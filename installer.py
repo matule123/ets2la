@@ -7,8 +7,8 @@ import shutil
 from pathlib import Path
 
 # Configuration
-REPO_URL = "https://github.com/your-repo/ETS2-UltraPilot.git" # User will replace this
-ASSETS_URL = "https://github.com/your-repo/ETS2-UltraPilot/releases/latest/download/assets.zip" # User will replace this
+REPO_URL = "https://github.com/matule123/ets2la.git"
+ASSETS_URL = "https://github.com/matule123/ets2la/releases/latest/download/assets.zip"
 REQUIRED_PACKAGES = ["pyqt6", "opencv-python", "numpy", "mss", "pydirectinput", "textual", "requests", "pyautogui", "vgamepad"]
 
 def log(message, level="INFO"):
