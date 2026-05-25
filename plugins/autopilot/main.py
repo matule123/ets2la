@@ -66,7 +66,7 @@ class Plugin(BasePlugin):
             self.sdk.controller.set_brake(0)
 
 
-        # 4. Steering Control with Recovery Mode
+        # 4. Advanced Steering with "Smooth-Steer" and Center-Seeking
         nav_direction = self.sdk.shared_state.get("nav_direction", 0)
 
         target_offset = 0.0
@@ -76,12 +76,15 @@ class Plugin(BasePlugin):
         self.steering_pid.set_setpoint(target_offset)
         steering_output = self.steering_pid.update(lane_offset, delta_time)
 
-        # RECOVERY MODE: If the truck is too far from the center,
-        # multiply the PID output to get back to the lane more aggressively.
+        # Smooth-Steer: Dampen high-frequency oscillations based on speed
+        speed_damping = np.clip(1.0 - (speed_kmh / 120.0) * 0.3, 0.7, 1.0)
+
+        # Center-Seeking: Add a subtle force that always pushes the truck back to 0
+        center_force = -lane_offset * 0.05
+
         recovery_factor = 1.0
         if abs(lane_offset) > 0.4:
             recovery_factor = 1.5 + (abs(lane_offset) * 0.5)
-            logging.debug(f"Recovery Mode Active: Factor {recovery_factor:.2f}")
 
-        steering_val = np.clip(steering_output * recovery_factor, -1.0, 1.0)
+        steering_val = np.clip((steering_output * speed_damping) + center_force * recovery_factor, -1.0, 1.0)
         self.sdk.controller.set_steering(steering_val)

@@ -81,35 +81,44 @@ def download_assets():
         return False
 
 def build_executable():
-    log("Building executable (.exe) with PyInstaller...")
+    log("Building production executable (.exe) with PyInstaller...")
     try:
-        # We use --onefile for a single exe, --noconsole to hide the terminal,
-        # and --collect-all to make sure torch and other complex packages are bundled.
-        # Note: torch is huge, so we might need specific hooks.
+        # In a production build, we must bundle all data folders.
+        # Syntax for --add-data is "source;destination" on Windows.
+        data_folders = [
+            ("core;core"),
+            ("plugins;plugins"),
+            ("sdk;sdk"),
+            ("assets;assets"),
+            ("ui;ui")
+        ]
+
         cmd = [
             "pyinstaller",
             "--noconsole",
             "--onefile",
-            "--name", "ETS2_UltraPilot",
+            "--name", "ETS2_UltraPilot_Pro",
             "--collect-all", "torch",
             "--collect-all", "torchvision",
-            "main.py"
+            "--collect-all", "pyqt6",
+            "--collect-all", "pyttsx3",
         ]
 
+        for src, dst in data_folders:
+            cmd.append(f"--add-data={src};{dst}")
+
+        cmd.append("main.py")
+
+        log(f"Running build command: {' '.join(cmd)}")
         if not run_command(" ".join(cmd)):
             log("PyInstaller failed to build the executable.", "ERROR")
             return False
 
-        # Copy assets and sdk to the dist folder so the exe can find them
-        dist_folder = "dist"
-        if os.path.exists(dist_folder):
-            if os.path.exists("sdk"):
-                shutil.copytree("sdk", os.path.join(dist_folder, "sdk"), dirs_exist_ok=True)
-            if os.path.exists("assets"):
-                shutil.copytree("assets", os.path.join(dist_folder, "assets"), dirs_exist_ok=True)
-            log("Assets copied to distribution folder.")
+        # Cleanup temp build files
+        if os.path.exists("build"):
+            shutil.rmtree("build")
 
-        log("Executable created successfully in the 'dist' folder!")
+        log("Production executable created successfully in the 'dist' folder!")
         return True
     except Exception as e:
         log(f"Build error: {str(e)}", "ERROR")

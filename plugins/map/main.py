@@ -28,17 +28,24 @@ class Plugin(BasePlugin):
         if not truck:
             return
 
-        # In a full implementation, this would read from a map file or API.
-        # For now, we implement a "virtual waypoint" that moves toward a target.
         truck_pos = self.sdk.shared_state.get("truck_pos", (0, 0))
-
-        # Simple simulation of navigation:
-        # If we are in 'NAVIGATING' state, we calculate direction to target.
         system_state = self.sdk.shared_state.get("system_state")
+
+        # 2. State-based Navigation Logic
         if system_state == "NAVIGATING":
             target_pos = self.sdk.shared_state.get("target_pos", (1000, 1000))
 
-            # Calculate angle to target
+            # Calculate distance to target
+            dist = math.sqrt((target_pos[0] - truck_pos[0])**2 + (target_pos[1] - truck_pos[1])**2)
+
+            # Waypoint state machine
+            if dist < 10: # Arrived at target
+                self.sdk.shared_state.set("system_state", "IDLE")
+                self.sdk.shared_state.set("tts_message", "Destination reached.")
+                logging.info("Map: Destination reached.")
+                return
+
+            # Calculate direction to target
             dx = target_pos[0] - truck_pos[0]
             dz = target_pos[1] - truck_pos[1]
             angle_to_target = math.atan2(dx, dz)
@@ -48,10 +55,9 @@ class Plugin(BasePlugin):
 
             # Difference between truck rotation and target angle
             diff = angle_to_target - truck_rot
-            # Normalize angle to -pi to pi
             diff = (diff + math.pi) % (2 * math.pi) - math.pi
 
-            # Normalize diff to -1.0 to 1.0 for the autopilot
+            # Normalize diff to -1.0 to 1.0
             self.nav_direction = np.clip(diff / math.pi, -1.0, 1.0)
             self.sdk.shared_state.set("nav_direction", self.nav_direction)
         else:

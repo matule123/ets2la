@@ -53,23 +53,28 @@ class Plugin(BasePlugin):
         fuel = truck.get("fuel", 100)
         fuel_range = truck.get("fuelRange", 0)
 
-        # 3. Speed Limit Notifications
-        if speed_limit != self.last_speed_limit:
+        # 3. Speed Limit Notifications (Smarter: only if significantly different)
+        if abs(speed_limit - self.last_speed_limit) > 1:
             self.last_speed_limit = speed_limit
-            self.speak(f"Speed limit changed to {round(speed_limit * 3.6)} kilometers per hour.")
+            self.speak(f"Speed limit updated to {round(speed_limit * 3.6)} kilometers per hour.")
 
-        # 4. Fuel Notifications (Every 5 minutes if low)
-        if fuel_range < 100:
+        # 4. Fuel Notifications (Context-aware)
+        if fuel_range < 50:
             current_time = self.sdk.shared_state.get("system_time", 0)
-            if current_time - self.last_fuel_notification > 300:
+            if current_time - self.last_fuel_notification > 600:
+                self.speak(f"Warning: Critical fuel level. {round(fuel_range)} kilometers remaining.")
+                self.last_fuel_notification = current_time
+        elif fuel_range < 200:
+            current_time = self.sdk.shared_state.get("system_time", 0)
+            if current_time - self.last_fuel_notification > 900:
                 self.speak(f"Fuel range is low: {round(fuel_range)} kilometers remaining.")
                 self.last_fuel_notification = current_time
 
-        # 5. Damage Notifications
+        # 5. Damage Notifications (Gradual updates)
         wear_engine = truck.get("wearEngine", 0)
-        if wear_engine > self.last_damage_notification + 0.05:
+        if wear_engine > self.last_damage_notification + 0.02:
             self.last_damage_notification = wear_engine
-            self.speak(f"Engine damage increased to {round(wear_engine * 100)} percent.")
+            self.speak(f"Engine wear increased to {round(wear_engine * 100)} percent.")
 
 
     def announce(self, text: str):

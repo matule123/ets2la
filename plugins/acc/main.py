@@ -34,10 +34,19 @@ class Plugin(BasePlugin):
 
         danger_level = self.sdk.shared_state.get("danger_level", 0)
 
-        # 2. Dynamic Target Speed based on danger level
+        # 2. Emergency Collision Avoidance
+        # If danger level is extreme, override everything and brake hard.
+        if danger_level > 0.8:
+            logging.warning("ACC: COLLISION AVOIDANCE ACTIVE!")
+            self.sdk.shared_state.set("acc_throttle", 0.0)
+            self.sdk.shared_state.set("acc_brake", 1.0)
+            self.sdk.shared_state.set("tts_message", "Collision alert! Emergency braking.")
+            return
+
+        # 3. Dynamic Target Speed based on danger level
         effective_target_speed = self.target_speed
         if danger_level > 0.05:
-            # Quadratic reduction for smoother deceleration
+            # Non-linear reduction for smoother approach
             reduction_factor = max(0.2, 1.0 - (danger_level ** 2 * 4))
             effective_target_speed = max(15.0, self.target_speed * reduction_factor)
             logging.debug(f"ACC: Adjusting target speed to {effective_target_speed:.1f} km/h")
@@ -46,10 +55,12 @@ class Plugin(BasePlugin):
         throttle_output = self.speed_pid.update(speed_kmh, delta_time)
         throttle_val = np.clip(throttle_output, 0.0, 1.0)
 
-        # 3. Output to shared state for the Controller to use
+        # 4. Output to shared state for the Controller to use
         if speed_kmh > effective_target_speed + 3:
+            # Gradual braking based on speed difference
+            brake_power = np.clip((speed_kmh - effective_target_speed) / 20.0, 0.1, 0.5)
             self.sdk.shared_state.set("acc_throttle", 0.0)
-            self.sdk.shared_state.set("acc_brake", 0.2 + (0.1 * danger_level))
+            self.sdk.shared_state.set("acc_brake", brake_power)
         else:
             self.sdk.shared_state.set("acc_throttle", throttle_val)
             self.sdk.shared_state.set("acc_brake", 0.0)
