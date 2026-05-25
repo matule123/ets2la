@@ -17,6 +17,7 @@ class PID:
     def update(self, measured_value: float, dt: float = None) -> float:
         """
         Calculates the control output based on the current measured value.
+        Includes basic anti-windup for the integral term.
         """
         if dt is None:
             now = time.time()
@@ -28,8 +29,10 @@ class PID:
         # Proportional term
         p_term = self.kp * error
 
-        # Integral term
+        # Integral term with anti-windup (clamping)
         self._integral += error * dt
+        # Clamp integral to prevent windup (limiting the influence of accumulated error)
+        self._integral = np.clip(self._integral, -10.0, 10.0)
         i_term = self.ki * self._integral
 
         # Derivative term

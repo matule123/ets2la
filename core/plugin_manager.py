@@ -43,17 +43,30 @@ class PluginManager:
 
     def discover_and_load(self):
         """Finds plugins and spawns processes."""
-        logging.info("Spawning plugin processes...")
+        logging.info("Discovering plugins in directory...")
 
-        # For this implementation, we'll map the folder structure to classes
-        # In a real system, we'd dynamically import the module.
-        # Here, we'll manually register the known plugins for stability.
-        from plugins.autopilot.main import Plugin as AutopilotPlugin
-        from plugins.hud.main import Plugin as HudPlugin
+        # Dynamically import plugins from the plugins directory
+        try:
+            plugin_folders = [f for f in os.listdir(self.plugin_dir)
+                            if os.path.isdir(os.path.join(self.plugin_dir, f))]
 
-        self.plugin_configs = [AutopilotPlugin, HudPlugin]
+            for folder in plugin_folders:
+                try:
+                    # Assume each plugin has a 'main.py' with a class named 'Plugin'
+                    module_path = f"plugins.{folder}.main"
+                    module = __import__(module_path, fromlist=["Plugin"])
+                    plugin_class = getattr(module, "Plugin")
 
-        for plugin_class in self..plugin_configs:
+                    if plugin_class:
+                        self.plugin_configs.append(plugin_class)
+                        logging.info(f"Discovered plugin: {folder}")
+                except Exception as e:
+                    logging.error(f"Failed to load plugin from {folder}: {e}")
+
+        except Exception as e:
+            logging.error(f"Error during plugin discovery: {e}")
+
+        for plugin_class in self.plugin_configs:
             stop_event = mp.Event()
             # Pass the shared state as the SDK proxy
             proc = mp.Process(

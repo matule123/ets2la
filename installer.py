@@ -9,7 +9,7 @@ from pathlib import Path
 # Configuration
 REPO_URL = "https://github.com/matule123/ets2la.git"
 ASSETS_URL = "https://github.com/matule123/ets2la/releases/latest/download/assets.zip"
-REQUIRED_PACKAGES = ["pyqt6", "opencv-python", "numpy", "mss", "pydirectinput", "textual", "requests", "pyautogui", "vgamepad"]
+REQUIRED_PACKAGES = ["pyqt6", "opencv-python", "numpy", "mss", "pydirectinput", "textual", "requests", "pyautogui", "vgamepad", "pyinstaller", "torch", "torchvision", "beautifulsoup4"]
 
 def log(message, level="INFO"):
     print(f"[{level}] {message}")
@@ -41,8 +41,20 @@ def setup_git_repo():
         run_command("git pull")
     else:
         log("Cloning repository...")
-        if not run_command(f"git clone {REPO_URL} ."):
-            log("Failed to clone repository", "ERROR")
+        # Clone into a temporary directory to avoid "directory not empty" errors
+        try:
+            if not run_command(f"git clone {REPO_URL} temp_repo"):
+                log("Failed to clone repository", "ERROR")
+                return False
+
+            # Move contents from temp_repo to current directory
+            for item in os.listdir("temp_repo"):
+                shutil.move(os.path.join("temp_repo", item), ".")
+
+            shutil.rmtree("temp_repo")
+            log("Repository cloned and files moved successfully.")
+        except Exception as e:
+            log(f"Unexpected error during repository setup: {str(e)}", "ERROR")
             return False
     return True
 
@@ -68,6 +80,41 @@ def download_assets():
         log(f"Asset download error: {str(e)}", "ERROR")
         return False
 
+def build_executable():
+    log("Building executable (.exe) with PyInstaller...")
+    try:
+        # We use --onefile for a single exe, --noconsole to hide the terminal,
+        # and --collect-all to make sure torch and other complex packages are bundled.
+        # Note: torch is huge, so we might need specific hooks.
+        cmd = [
+            "pyinstaller",
+            "--noconsole",
+            "--onefile",
+            "--name", "ETS2_UltraPilot",
+            "--collect-all", "torch",
+            "--collect-all", "torchvision",
+            "main.py"
+        ]
+
+        if not run_command(" ".join(cmd)):
+            log("PyInstaller failed to build the executable.", "ERROR")
+            return False
+
+        # Copy assets and sdk to the dist folder so the exe can find them
+        dist_folder = "dist"
+        if os.path.exists(dist_folder):
+            if os.path.exists("sdk"):
+                shutil.copytree("sdk", os.path.join(dist_folder, "sdk"), dirs_exist_ok=True)
+            if os.path.exists("assets"):
+                shutil.copytree("assets", os.path.join(dist_folder, "assets"), dirs_exist_ok=True)
+            log("Assets copied to distribution folder.")
+
+        log("Executable created successfully in the 'dist' folder!")
+        return True
+    except Exception as e:
+        log(f"Build error: {str(e)}", "ERROR")
+        return False
+
 def main():
     print("==========================================")
     print("   ETS2-UltraPilot Professional Installer  ")
@@ -86,9 +133,12 @@ def main():
         print("\n[!] Binary assets could not be downloaded. SDK features will be disabled.")
         # Continue anyway
 
+    if not build_executable():
+        print("\n[!] Failed to create executable. You can still run the project via main.py")
+
     print("\n==========================================")
     print("   Installation Complete!              ")
-    print("   You can now run main.py               ")
+    print("   Your app is ready in the 'dist' folder ")
     print("==========================================\n")
     input("Press Enter to finish...")
 

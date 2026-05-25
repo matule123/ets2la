@@ -73,7 +73,21 @@ class Controller:
             else:
                 pydirectinput.keyUp('s')
 
+    def set_blinker(self, side: str):
+        """Sets the turn signal. side: 'left', 'right', or 'off'"""
+        logging.info(f"Blinker: {side}")
+        # Typical ETS2 keys for blinkers are often mapped to [ and ] or specific keys
+        # We'll use digital fallback for this as it's usually a toggle
+        if side == "left":
+            pydirectinput.press('[')
+        elif side == "right":
+            pydirectinput.press(']')
+        else:
+            # To turn off, usually you press the same key again or a specific key
+            pass
+
     def stop_completely(self):
+
         """Brakes and stops the truck."""
         self.set_throttle(0)
         self.set_brake(1.0)

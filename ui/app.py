@@ -53,11 +53,75 @@ QSlider::groove:horizontal {
 }
 """
 
-class Page(QWidget):
+class AboutPage(Page):
     def __init__(self, engine):
-        super().__init__()
+        super().__init__(engine)
+        self.label = QLabel("ℹ️ About UltraPilot")
+        self.label.setStyleSheet("font-size: 24px; font-weight: bold; color: #00FF7F; margin-bottom: 20px;")
+        self.layout.addWidget(self.label)
+
+        text = QLabel(
+            "ETS2 UltraPilot Pro Edition\n\n"
+            "A professional-grade autopilot system for Euro Truck Simulator 2.\n"
+            "Featuring Advanced Lane Assist, Adaptive Cruise Control, "
+            "and Voice Navigation.\n\n"
+            "Built for simulation enthusiasts."
+        )
+        text.setWordWrap(True)
+        text.setStyleSheet("font-size: 16px; line-height: 150%;")
+        self.layout.addWidget(text)
+        self.layout.addStretch()
+
+class PluginsPage(Page):
+    def __init__(self, engine):
+        super().__init__(engine)
         self.engine = engine
-        self.layout = QVBoxLayout(self)
+        self.label = QLabel("🧩 Plugin Management")
+        self.label.setStyleSheet("font-size: 24px; font-weight: bold; color: #00FF7F; margin-bottom: 20px;")
+        self.layout.addWidget(self.label)
+
+        self.plugin_list = QVBoxLayout()
+        self.layout.addWidget(self.plugin_list)
+        self.layout.addStretch()
+        self.refresh_plugins()
+
+    def refresh_plugins(self):
+        # Clear current list
+        for i in reversed(range(self.plugin_list.count())):
+            self.plugin_list.itemAt(i).widget().setParent(None)
+
+        # In this architecture, we can't easily get the Plugin instances
+        # because they are in separate processes.
+        # We'll list the folders in the plugins directory.
+        import os
+        plugin_dir = "plugins"
+        if os.path.exists(plugin_dir):
+            for folder in os.listdir(plugin_dir):
+                if os.path.isdir(os.path.join(plugin_dir, folder)):
+                    self.add_plugin_row(folder)
+
+    def add_plugin_row(self, name):
+        row = QFrame()
+        row.setStyleSheet("background-color: #1A1A1A; border-radius: 5px; margin-bottom: 5px;")
+        l = QHBoxLayout(row)
+
+        lbl = QLabel(name.capitalize())
+        lbl.setFixedWidth(150)
+        l.addWidget(lbl)
+
+        btn = QPushButton("Toggle")
+        btn.setFixedWidth(100)
+
+        def toggle():
+            # This is tricky because plugins are in separate processes.
+            # We'll use the shared state to signal a toggle.
+            current = self.engine.shared_state.get(f"plugin_{name}_enabled", True)
+            self.engine.shared_state.set(f"plugin_{name}_enabled", not current)
+            logging.info(f"Requested toggle for plugin: {name}")
+
+        btn.clicked.connect(toggle)
+        l.addWidget(btn)
+        self.plugin_list.addWidget(row)
 
 class DashboardPage(Page):
     def __init__(self, engine):
@@ -144,21 +208,25 @@ class UltraPilotApp(QMainWindow):
         self.btn_dash = QPushButton("Dashboard")
         self.btn_settings = QPushButton("Settings")
         self.btn_plugins = QPushButton("Plugins")
+        self.btn_about = QPushButton("About")
 
         self.btn_dash.clicked.connect(lambda: self.pages.setCurrentIndex(0))
         self.btn_settings.clicked.connect(lambda: self.pages.setCurrentIndex(1))
         self.btn_plugins.clicked.connect(lambda: self.pages.setCurrentIndex(2))
+        self.btn_about.clicked.connect(lambda: self.pages.setCurrentIndex(3))
 
         sidebar_layout.addWidget(self.btn_dash)
         sidebar_layout.addWidget(self.btn_settings)
         sidebar_layout.addWidget(self.btn_plugins)
+        sidebar_layout.addWidget(self.btn_about)
         sidebar_layout.addStretch()
         main_layout.addWidget(self.sidebar)
 
         self.pages = QStackedWidget()
         self.pages.addWidget(DashboardPage(engine))
         self.pages.addWidget(SettingsPage(engine))
-        self.pages.addWidget(QWidget())
+        self.pages.addWidget(PluginsPage(engine))
+        self.pages.addWidget(AboutPage(engine))
         main_layout.addWidget(self.pages)
 
         self.start_btn = QPushButton("START ENGINE")
