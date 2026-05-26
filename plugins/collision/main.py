@@ -1,6 +1,7 @@
 import logging
 from sdk.base_plugin import BasePlugin
 from core.events import bus as event_bus
+from plugins.collision.settings import settings
 
 class Plugin(BasePlugin):
     """
@@ -29,24 +30,23 @@ class Plugin(BasePlugin):
         obstacle_pos = obstacle.get("position", "center")
 
         # Handle EMERGENCY state (Extreme danger)
-        if system_state == "SystemState.EMERGENCY" or danger_level > 0.8:
+        if system_state == "SystemState.EMERGENCY" or danger_level > settings.emergency_threshold:
             logging.warning("Collision Avoidance: EMERGENCY BRAKE!")
             self.trigger_emergency_stop()
             event_bus.publish("collision_alert", {"level": "CRITICAL", "action": "BRAKING"})
             return
 
         # Handle OVERTAKING / BYPASS state
-        # If the planner decided to overtake, this plugin helps execute the steering
         if system_state == "SystemState.OVERTAKING":
             # If obstacle is center or left, we want to steer right
-            steering_value = 0.3 if obstacle_pos in ["center", "left"] else -0.3
+            steering_value = settings.bypass_steering_intensity if obstacle_pos in ["center", "left"] else -settings.bypass_steering_intensity
 
             # Log bypass maneuver
             logging.info(f"Collision Avoidance: Executing bypass steering {steering_value}")
             self.sdk.set("bypass_steering", steering_value)
 
             # Slightly reduce speed during the maneuver for safety
-            self.sdk.set("acc_brake", 0.1)
+            self.sdk.set("acc_brake", settings.brake_during_bypass)
         else:
             # Reset bypass steering when not in overtaking mode
             self.sdk.set("bypass_steering", 0.0)

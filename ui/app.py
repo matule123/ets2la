@@ -1,8 +1,10 @@
 import sys
 import os
+import logging
 from PyQt6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QWidget, QStackedWidget, QFrame, QSlider
 from PyQt6.QtCore import QTimer, Qt
 from core.engine import UltraPilotEngine
+from ui.settings_menu import SettingsMenu
 
 # Gaming Dark Theme Stylesheet
 DARK_THEME = """
@@ -53,6 +55,14 @@ QSlider::groove:horizontal {
 }
 """
 
+class Page(QWidget):
+    def __init__(self, engine):
+        super().__init__()
+        self.engine = engine
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(30, 30, 30, 30)
+        self.layout.setSpacing(15)
+
 class AboutPage(Page):
     def __init__(self, engine):
         super().__init__(engine)
@@ -86,19 +96,15 @@ class PluginsPage(Page):
         self.refresh_plugins()
 
     def refresh_plugins(self):
-        # Clear current list
         for i in reversed(range(self.plugin_list.count())):
             self.plugin_list.itemAt(i).widget().setParent(None)
 
-        # In this architecture, we can't easily get the Plugin instances
-        # because they are in separate processes.
-        # We'll list the folders in the plugins directory.
         import os
         plugin_dir = "plugins"
         if os.path.exists(plugin_dir):
             for folder in os.listdir(plugin_dir):
                 if os.path.isdir(os.path.join(plugin_dir, folder)):
-                    self.add_plugin_row(folder)
+                    self.add_plugin_ la l.row(folder)
 
     def add_plugin_row(self, name):
         row = QFrame()
@@ -113,8 +119,6 @@ class PluginsPage(Page):
         btn.setFixedWidth(100)
 
         def toggle():
-            # This is tricky because plugins are in separate processes.
-            # We'll use the shared state to signal a toggle.
             current = self.engine.shared_state.get(f"plugin_{name}_enabled", True)
             self.engine.shared_state.set(f"plugin_{name}_enabled", not current)
             logging.info(f"Requested toggle for plugin: {name}")
@@ -145,47 +149,6 @@ class DashboardPage(Page):
         self.layout.addWidget(self.speed_container)
         self.layout.addStretch()
 
-class SettingsPage(Page):
-    def __init__(self, engine):
-        super().__init__(engine)
-        self.label = QLabel("⚙️ System Configuration")
-        self.label.setStyleSheet("font-size: 24px; font-weight: bold; color: #00FF7F; margin-bottom: 20px;")
-        self.layout.addWidget(self.label)
-
-        self.add_setting_slider("Cruise Speed (km/h)", "target_speed", 40, 120, 80)
-        self.add_setting_slider("Steering Sensitivity (Kp)", "steering_kp", 0.1, 1.0, 0.3, step=0.01)
-        self.add_setting_slider("Steering Stability (Kd)", "steering_kd", 0.0, 0.5, 0.1, step=0.01)
-        self.add_setting_slider("Acceleration Power", "throttle_power", 0.1, 1.0, 0.5, step=0.01)
-
-        self.layout.addStretch()
-
-    def add_setting_slider(self, name, key, min_val, max_val, default_val, step=1):
-        container = QFrame()
-        container.setStyleSheet("background-color: #1A1A1A; border-radius: 5px; margin-bottom: 10px;")
-        l = QHBoxLayout(container)
-
-        lbl = QLabel(name)
-        lbl.setFixedWidth(200)
-        l.addWidget(lbl)
-
-        slider = QSlider(Qt.Orientation.Horizontal)
-        multiplier = 100 if step < 1 else 1
-        slider.setRange(int(min_val * multiplier), int(max_val * multiplier))
-        slider.setValue(int(default_val * multiplier))
-
-        val_lbl = QLabel(f"{default_val}")
-        val_lbl.setFixedWidth(50)
-
-        def update_val(val):
-            real_val = val / multiplier
-            val_lbl.setText(f"{real_val:.2f}")
-            self.engine.shared_state.set(key, real_val)
-
-        slider.valueChanged.connect(update_val)
-        l.addWidget(slider)
-        l.addWidget(val_lbl)
-        self.layout.addWidget(container)
-
 class UltraPilotApp(QMainWindow):
     def __init__(self, engine):
         super().__init__()
@@ -211,7 +174,7 @@ class UltraPilotApp(QMainWindow):
         self.btn_about = QPushButton("About")
 
         self.btn_dash.clicked.connect(lambda: self.pages.setCurrentIndex(0))
-        self.btn_settings.clicked.connect(lambda: self.pages.setCurrentIndex(1))
+        self.btn_settings.clicked.connect(self.open_settings)
         self.btn_plugins.clicked.connect(lambda: self.pages.setCurrentIndex(2))
         self.btn_about.clicked.connect(lambda: self.pages.setCurrentIndex(3))
 
@@ -224,7 +187,7 @@ class UltraPilotApp(QMainWindow):
 
         self.pages = QStackedWidget()
         self.pages.addWidget(DashboardPage(engine))
-        self.pages.addWidget(SettingsPage(engine))
+        self.pages.addWidget(QWidget()) # Placeholder for settings (we use a separate window)
         self.pages.addWidget(PluginsPage(engine))
         self.pages.addWidget(AboutPage(engine))
         main_layout.addWidget(self.pages)
@@ -238,6 +201,10 @@ class UltraPilotApp(QMainWindow):
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_ui)
         self.timer.start(100)
+
+    def open_settings(self):
+        self.settings_window = SettingsMenu(self.engine)
+        self.settings_window.show()
 
     def toggle_engine(self):
         if self.engine.running:

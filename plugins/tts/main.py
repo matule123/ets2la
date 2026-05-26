@@ -1,7 +1,7 @@
-from sdk.base_plugin import BasePlugin
-import pyttsx3
 import logging
-from typing import Dict, Any
+import pyttsx3
+import threading
+from sdk.base_plugin import BasePlugin
 
 class Plugin(BasePlugin):
     """TTS plugin for voiced announcements and accessibility."""
@@ -24,15 +24,19 @@ class Plugin(BasePlugin):
         self.enabled = False
 
     def speak(self, text: str):
-        """Speak the given text using pyttsx3."""
+        """Speak the given text using pyttsx3 in a separate thread to avoid blocking."""
         if not self.enabled:
             return
         logging.info(f"TTS Speaking: {text}")
-        try:
-            self.engine.say(text)
-            self.engine.runAndWait()
-        except Exception as e:
-            logging.error(f"TTS speaking error: {e}")
+        def _say():
+            try:
+                local_engine = pyttsx3.init()
+                local_engine.say(text)
+                local_engine.runAndWait()
+            except Exception as e:
+                logging.error(f"TTS speaking error: {e}")
+
+        threading.Thread(target=_say, daemon=True).start()
 
     def on_tick(self, delta_time: float):
         if not self.enabled:
@@ -50,32 +54,19 @@ class Plugin(BasePlugin):
             return
 
         speed_limit = truck.get("speedLimit", 0)
-        fuel = truck.get("fuel", 100)
         fuel_range = truck.get("fuelRange", 0)
 
-        # 3. Speed Limit Notifications (Smarter: only if significantly different)
+        # 3. Speed Limit Notifications
         if abs(speed_limit - self.last_speed_limit) > 1:
             self.last_speed_limit = speed_limit
             self.speak(f"Speed limit updated to {round(speed_limit * 3.6)} kilometers per hour.")
 
-        # 4. Fuel Notifications (Context-aware)
+        # 4. Fuel Notifications
         if fuel_range < 50:
             current_time = self.sdk.shared_state.get("system_time", 0)
             if current_time - self.last_fuel_notification > 600:
                 self.speak(f"Warning: Critical fuel level. {round(fuel_range)} kilometers remaining.")
                 self.last_fuel_notification = current_time
-        elif fuel_range < 200:
-            current_time = self.sdk.shared_state.get("system_time", 0)
-            if current_time - self.last_fuel_notification > 900:
-                self.speak(f"Fuel range is low: {round(fuel_range)} kilometers remaining.")
-                self.last_fuel_notification = current_time
-
-        # 5. Damage Notifications (Gradual updates)
-        wear_engine = truck.get("wearEngine", 0)
-        if wear_engine > self.last_damage_notification + 0.02:
-            self.last_damage_notification = wear_engine
-            self.speak(f"Engine wear increased to {round(wear_engine * 100)} percent.")
-
 
     def announce(self, text: str):
         """Method for other plugins to trigger a voice announcement."""

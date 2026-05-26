@@ -5,151 +5,395 @@ import requests
 import zipfile
 import shutil
 from pathlib import Path
+from core.sdk import game_utils
+from PyQt6.QtWidgets import (
+    QApplication, QWizard, QWizardPage, QVBoxLayout, QLabel,
+    QPushButton, QProgressBar, QTextEdit, QFileDialog, QComboBox, QCheckBox
+)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
+from PyQt6.QtGui import QPixmap, QIcon
 
 # Configuration
 REPO_URL = "https://github.com/matule123/ets2la.git"
 ASSETS_URL = "https://github.com/matule123/ets2la/releases/latest/download/assets.zip"
-REQUIRED_PACKAGES = ["pyqt6", "opencv-python", "numpy", "mss", "pydirectinput", "textual", "requests", "pyautogui", "vgamepad", "pyinstaller", "torch", "torchvision", "beautifulsoup4"]
+REQUIRED_PACKAGES = ["pyqt6", "opencv-python", "numpy", "mss", "pydirectinput", "textual", "requests", "pyautogui", "vgamepad", "pyinstaller", "torch", "torchvision", "beautifulsoup4", "vdf", "pywin32"]
+ICON_PATH = "assets/favicon.ico"
+APP_NAME = "UltraPilot"
+INSTALLER_EXE_NAME = "ets2la_installer"
 
-def log(message, level="INFO"):
-    print(f"[{level}] {message}")
+TRANSLATIONS = {
+    "English": {
+        "welcome_title": "Welcome to UltraPilot Setup",
+        "welcome_subtitle": "This wizard will guide you through the installation of the most advanced autopilot for Euro Truck Simulator 2.",
+        "welcome_desc": "UltraPilot Pro provides advanced lane assist, adaptive cruise control, and a professional HUD for a realistic trucking experience.",
+        "lang_title": "Select Language",
+        "lang_subtitle": "Please choose your preferred language for the installation.",
+        "path_title": "Installation Folder",
+        "path_subtitle": "Choose where you want to install UltraPilot.",
+        "path_label": "Installation directory:",
+        "terms_title": "License Agreement",
+        "terms_subtitle": "Please accept the terms to continue.",
+        "terms_text": "By installing UltraPilot, you agree to use this software for educational and entertainment purposes in Euro Truck Simulator 2. We are not responsible for any virtual crashes caused by the autopilot.",
+        "terms_checkbox": "I accept the terms and conditions",
+        "setup_title": "System Setup",
+        "setup_sub": "Preparing environment and cloning repository...",
+        "deps_title": "Dependencies",
+        "deps_sub": "Installing required Python libraries...",
+        "assets_title": "Binary Assets",
+        "assets_sub": "Downloading critical SDKs and DLLs...",
+        "sdk_title": "SDK Setup",
+        "sdk_sub": "Installing SDKs to game directory...",
+        "build_title": "Application Build",
+        "build_sub": "Compiling the final executable...",
+        "success_msg": "\n[SUCCESS] Step completed successfully!",
+        "error_msg": "\n[ERROR] Step failed. Please check the logs above.",
+    },
+    "Slovenský": {
+        "welcome_title": "Vitajte v UltraPilot Setup",
+        "welcome_subtitle": "Tento sprievodca vás prevedie inštaláciou najpokročilejšieho autopilota pre Euro Truck Simulator 2.",
+        "welcome_desc": "UltraPilot Pro poskytuje pokročilú asistenciu pri udržiavaní jazdných pruhov, adaptívny tempomat and profesionálne HUD pre realistický zážitok z dopravy.",
+        "lang_title": "Vyberte jazyk",
+        "lang_subtitle": "Prosím, vyberte preferovaný jazyk pre inštaláciu.",
+        "path_title": "Priečinok inštalácie",
+        "path_subtitle": "Vyberte, kam chcete nainštalovať UltraPilot.",
+        "path_label": "Inštalačný priečinok:",
+        "terms_title": "Licenčná dohoda",
+        "terms_subtitle": "Pre pokračovanie prosím prijmite podmienky.",
+        "terms_text": "Inštaláciou UltraPilot súhlasíte, že budete používať tento softvér na vzdelávacie a zábavné účely v Euro Truck Simulator 2. Nie sme zodpovedné za žiadne virtuálne nehody spôsobené autopilotom.",
+        "terms_checkbox": "Prijímam podmienky používania",
+        "setup_title": "Nastavenie systému",
+        "setup_sub": "Príprava prostredia a klónovanie repozitóra...",
+        "deps_title": "Závislosti",
+        "deps_sub": "Inštalácia potrebných Python knižníc...",
+        "assets_title": "Binárne súbory",
+        "assets_sub": "Sťahovanie kritických SDK a DLL súborov...",
+        "sdk_title": "Nastavenie SDK",
+        "sdk_sub": "Inštalácia SDK do priečinka hry...",
+        "build_title": "Budovanie aplikácie",
+        "build_sub": "Kompilovanie konečného spustiteľného súboru...",
+        "success_msg": "\n[ÚCPECH] Krok bol úspešne dokončený!",
+        "error_msg": "\n[CHYBA] Krok zlyhal. Pozrite si prosím logy vyššie.",
+    }
+}
 
-def run_command(command, shell=True):
-    try:
-        result = subprocess.run(command, shell=shell, capture_output=True, text=True)
-        if result.returncode != 0:
-            log(f"Command failed: {command}\nError: {result.stderr}", "ERROR")
-            return False
-        return True
-    except Exception as e:
-        log(f"Execution error: {str(e)}", "ERROR")
-        return False
+class Worker(QThread):
+    """Thread for running long operations without freezing the UI."""
+    progress = pyqtSignal(int)
+    log = pyqtSignal(str)
+    finished = pyqtSignal(bool)
 
-def install_dependencies():
-    log("Installing required Python packages...")
-    for package in REQUIRED_PACKAGES:
-        log(f"Installing {package}...")
-        if not run_command(f"pip install {package}"):
-            log(f"Failed to install {package}", "ERROR")
-            return False
-    return True
+    def __init__(self, func, *args, **kwargs):
+        super().__init__()
+        self.func = func
+        self.args = args
+        self.kwargs = kwargs
 
-def setup_git_repo():
-    log("Setting up project repository...")
-    if os.path.exists(".git"):
-        log("Repository already exists. Updating...")
-        run_command("git pull")
-    else:
-        log("Cloning repository...")
-        # Clone into a temporary directory to avoid "directory not empty" errors
+    def run(self):
         try:
-            if not run_command(f"git clone {REPO_URL} temp_repo"):
-                log("Failed to clone repository", "ERROR")
-                return False
-
-            # Move contents from temp_repo to current directory
-            for item in os.listdir("temp_repo"):
-                shutil.move(os.path.join("temp_repo", item), ".")
-
-            shutil.rmtree("temp_repo")
-            log("Repository cloned and files moved successfully.")
+            result = self.func(*self.args, **self.kwargs, worker=self)
+            self.finished.emit(result)
         except Exception as e:
-            log(f"Unexpected error during repository setup: {str(e)}", "ERROR")
-            return False
-    return True
+            self.log.emit(f"Critical error: {str(e)}")
+            self.finished.emit(False)
 
-def download_assets():
-    log("Downloading required binary assets (DLLs, SDKs)...")
-    try:
-        response = requests.get(ASSETS_URL)
-        if response.status_code == 200:
-            with open("assets_temp.zip", "wb") as f:
-                f.write(response.content)
+class InstallWorker:
+    """Logic for the installation process."""
+    def __init__(self, worker, install_path):
+        self.worker = worker
+        self.install_path = install_path
 
-            log("Extracting assets...")
-            with zipfile.ZipFile("assets_temp.zip", "r") as zip_ref:
-                zip_ref.extractall("sdk") # Extract to sdk folder
-
-            os.remove("assets_temp.zip")
-            log("Assets installed successfully.")
+    def run_command(self, command, cwd=None):
+        try:
+            result = subprocess.run(command, shell=True, capture_output=True, text=True, cwd=cwd)
+            if result.returncode != 0:
+                self.worker.log.emit(f"Command failed: {command}\nError: {result.stderr}")
+                return False
             return True
-        else:
-            log(f"Failed to download assets. HTTP {response.status_code}", "ERROR")
-            return False
-    except Exception as e:
-        log(f"Asset download error: {str(e)}", "ERROR")
-        return False
-
-def build_executable():
-    log("Building production executable (.exe) with PyInstaller...")
-    try:
-        # In a production build, we must bundle all data folders.
-        # Syntax for --add-data is "source;destination" on Windows.
-        data_folders = [
-            ("core;core"),
-            ("plugins;plugins"),
-            ("sdk;sdk"),
-            ("assets;assets"),
-            ("ui;ui")
-        ]
-
-        cmd = [
-            "pyinstaller",
-            "--noconsole",
-            "--onefile",
-            "--name", "ETS2_UltraPilot_Pro",
-            "--collect-all", "torch",
-            "--collect-all", "torchvision",
-            "--collect-all", "pyqt6",
-            "--collect-all", "pyttsx3",
-        ]
-
-        for src, dst in data_folders:
-            cmd.append(f"--add-data={src};{dst}")
-
-        cmd.append("main.py")
-
-        log(f"Running build command: {' '.join(cmd)}")
-        if not run_command(" ".join(cmd)):
-            log("PyInstaller failed to build the executable.", "ERROR")
+        except Exception as e:
+            self.worker.log.emit(f"Execution error: {str(e)}")
             return False
 
-        # Cleanup temp build files
-        if os.path.exists("build"):
-            shutil.rmtree("build")
+    def setup_git_repo(self, worker):
+        worker.log.emit("Setting up project repository...")
+        if not os.path.exists(self.install_path):
+            os.makedirs(self.install_path, exist_ok=True)
+        try:
+            if os.path.exists(os.path.join(self.install_path, ".git")):
+                worker.log.emit("Repository already exists. Updating...")
+                return self.run_command("git pull", cwd=self.install_path)
+            else:
+                worker.log.emit(f"Cloning repository to {self.install_path}...")
+                temp_dir = os.path.join(self.install_path, "temp_repo")
+                if not self.run_command(f"git clone {REPO_URL} {temp_dir}"):
+                    return False
+                for item in os.listdir(temp_dir):
+                    shutil.move(os.path.join(temp_dir, item), self.install_path)
+                shutil.rmtree(temp_dir)
+                return True
+        except Exception as e:
+            worker.log.emit(f"Error: {str(e)}")
+            return False
 
-        log("Production executable created successfully in the 'dist' folder!")
+    def install_dependencies(self, worker):
+        worker.log.emit("Installing required Python packages...")
+        total = len(REQUIRED_PACKAGES)
+        for i, package in enumerate(REQUIRED_PACKAGES):
+            worker.log.emit(f"Installing {package}...")
+            if not self.run_command(f"pip install {package}", cwd=self.install_path):
+                worker.log.emit(f"Failed to install {package}", "ERROR")
+                return False
+            worker.progress.emit(int(((i + 1) / total) * 100))
         return True
-    except Exception as e:
-        log(f"Build error: {str(e)}", "ERROR")
-        return False
+
+    def download_assets(self, worker):
+        worker.log.emit("Downloading binary assets...")
+        try:
+            response = requests.get(ASSETS_URL)
+            if response.status_code == 200:
+                temp_zip = os.path.join(self.install_path, "assets_temp.zip")
+                with open(temp_zip, "wb") as f:
+                    f.write(response.content)
+                worker.log.emit("Extracting assets...")
+                with zipfile.ZipFile(temp_zip, "r") as zip_ref:
+                    zip_ref.extractall(os.path.join(self.install_path, "sdk"))
+                os.remove(temp_zip)
+                return True
+            else:
+                worker.log.emit(f"HTTP Error: {response.status_code}")
+                return False
+        except Exception as e:
+            worker.log.emit(f"Download error: {str(e)}")
+            return False
+
+    def install_game_sdk(self, worker):
+        worker.log.emit("Searching for installed SCS games...")
+        games = game_utils.find_scs_games()
+        if not games:
+            worker.log.emit("No SCS games found. Please install ETS2 or ATS.")
+            return False
+        for game_path in games:
+            version = game_utils.get_version_for_game(game_path)
+            worker.log.emit(f"Found game at {game_path} (Version: {version})")
+            sdk_version_path = os.path.join(self.install_path, "sdk", version)
+            if not os.path.exists(sdk_version_path):
+                worker.log.emit(f"No SDK files found for version {version} in {sdk_version_path}. Skipping...")
+                continue
+            target_path = os.path.join(game_path, "bin", "win_x64", "plugins")
+            os.makedirs(target_path, exist_ok=True)
+            try:
+                for file in os.listdir(sdk_version_path):
+                    src = os.path.join(sdk_version_path, file)
+                    dst = os.path.join(target_path, file)
+                    shutil.copy2(src, dst)
+                    worker.log.emit(f"Installed {file} to {target_path}")
+            except Exception as e:
+                worker.log.emit(f"Error copying files to {game_path}: {e}")
+                return False
+        return True
+
+    def build_executable(self, worker):
+        worker.log.emit("Building production executable...")
+        try:
+            data_folders = [("core;core"), ("plugins;plugins"), ("sdk;sdk"), ("assets;assets"), ("ui;ui")]
+            cmd = [
+                "pyinstaller", "--noconsole", "--onefile",
+                "--name", APP_NAME,
+                "--collect-all", "torch", "--collect-all", "torchvision",
+                "--collect-all", "pyqt6", "--collect-all", "pyttsx3",
+            ]
+            for src, dst in data_folders:
+                cmd.append(f"--add-data={src};{dst}")
+            cmd.append("main.py")
+            if os.path.exists(ICON_PATH):
+                cmd.insert(0, f"--icon={ICON_PATH}")
+            final_cmd = " ".join(cmd)
+            worker.log.emit(f"Running build in {self.install_path}...")
+            if not self.run_command(final_cmd, cwd=self.install_path):
+                return False
+            if os.path.exists(os.path.join(self.install_path, "build")):
+                shutil.rmtree(os.path.join(self.install_path, "build"))
+            worker.log.emit("Creating desktop shortcut...")
+            if not self.create_desktop_shortcut(APP_NAME, os.path.join(self.install_path, "dist", f"{APP_NAME}.exe")):
+                worker.log.emit("Warning: Could not create desktop shortcut.")
+            return True
+        except Exception as e:
+            worker.log.emit(f"Build error: {str(e)}")
+            return False
+
+    def create_desktop_shortcut(self, name, target_path):
+        try:
+            target_path = os.path.abspath(target_path)
+            desktop = Path(os.path.join(os.path.join(os.environ['USERPROFILE']), 'Desktop'))
+            shortcut_path = os.path.join(desktop, f"{name}.lnk")
+            ps_cmd = f'$s=(New-Object -ComObject WScript.Shell).CreateShortcut("{shortcut_path}");$s.TargetPath="{target_path}";$s.Save()'
+            return self.run_command(f"powershell -Command {ps_cmd}")
+        except Exception as e:
+            print(f"Shortcut error: {e}")
+            return False
+
+class LanguagePage(QWizardPage):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setTitle("Select Language")
+        self.setSubTitle("Please choose your preferred language for the installation.")
+        layout = QVBoxLayout()
+        self.lang_combo = QComboBox()
+        self.lang_combo.addItems(TRANSLATIONS.keys())
+        self.lang_combo.setCurrentText("Slovenský")
+        layout.addWidget(QLabel("Language / Jazyk:"))
+        layout.addWidget(self.lang_combo)
+        layout.addStretch()
+        self.setLayout(layout)
+    def get_language(self):
+        return self.lang_combo.currentText()
+
+class PathPage(QWizardPage):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setTitle("Installation Folder")
+        self.setSubTitle("Choose where you want to install UltraPilot.")
+        layout = QVBoxLayout()
+        self.path_edit = QTextEdit()
+        self.path_edit.setReadOnly(True)
+        self.path_edit.setMaximumHeight(30)
+        self.path_edit.setText(os.path.join(os.environ['USERPROFILE'], 'Documents', 'UltraPilot'))
+        self.browse_btn = QPushButton("Browse...")
+        self.browse_btn.clicked.connect(self.browse)
+        layout.addWidget(QLabel("Installation directory:"))
+        layout.addWidget(self.path_edit)
+        layout.addWidget(self.browse_btn)
+        layout.addStretch()
+        self.setLayout(layout)
+    def browse(self):
+        path = QFileDialog.getExistingDirectory(self, "Select Installation Folder")
+        if path:
+            self.path_edit.setText(path)
+    def get_path(self):
+        return self.path_edit.toPlainText().strip()
+
+class TermsPage(QWizardPage):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setTitle("License Agreement")
+        self.setSubTitle("Please accept the terms to continue.")
+        layout = QVBoxLayout()
+        self.terms_text = QTextEdit()
+        self.terms_text.setReadOnly(True)
+        self.terms_text.setText("By installing UltraPilot, you agree to use this software for educational and entertainment purposes in Euro Truck Simulator 2. We are not responsible for any virtual crashes caused by the autopilot.")
+        layout.addWidget(self.terms_text)
+        self.accept_checkbox = QCheckBox("I accept the terms and conditions")
+        layout.addWidget(self.accept_checkbox)
+        self.setLayout(layout)
+    def isComplete(self):
+        return self.accept_checkbox.isChecked()
+
+class WelcomePage(QWizardPage):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout()
+        self.logo_label = QLabel()
+        pixmap = QPixmap(ICON_PATH)
+        if not pixmap.isNull():
+            self.logo_label.setPixmap(pixmap.scaled(128, 128, Qt.AspectRatioMode.KeepAspectRatio))
+        self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.logo_label)
+        self.desc = QLabel("")
+        self.desc.setWordWrap(True)
+        self.desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.desc)
+        self.setLayout(layout)
+    def update_text(self, lang):
+        t = TRANSLATIONS[lang]
+        self.setTitle(t["welcome_title"])
+        self.setSubTitle(t["welcome_subtitle"])
+        self.desc.setText(t["welcome_desc"])
+
+class ProcessPage(QWizardPage):
+    def __init__(self, title, subtext, func_name, parent=None):
+        super().__init__(parent)
+        self.setTitle(title)
+        self.setSubTitle(subtext)
+        self.func_name = func_name
+        layout = QVBoxLayout()
+        self.log_area = QTextEdit()
+        self.log_area.setReadOnly(True)
+        self.log_area.setStyleSheet("background-color: #1e1e1e; color: #d4d4d4; font-family: Consolas, monospace;")
+        layout.addWidget(self.log_area)
+        self.progress_bar = QProgressBar()
+        layout.addWidget(self.progress_bar)
+        self.setLayout(layout)
+    def update_log(self, text):
+        self.log_area.append(text)
+        self.log_area.ensureCursorVisible()
+    def update_progress(self, val):
+        self.progress_bar.setValue(val)
+
+class UltraPilotInstaller(QWizard):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle(f"{APP_NAME} Setup")
+        self.setFixedSize(600, 500)
+        self.setWindowIcon(QIcon(ICON_PATH))
+        self.lang_page = LanguagePage()
+        self.path_page = PathPage()
+        self.terms_page = TermsPage()
+        self.welcome_page = WelcomePage()
+        self.addPage(self.welcome_page)
+        self.addPage(self.lang_page)
+        self.addPage(self.path_page)
+        self.addPage(self.terms_page)
+        self.logic = None
+        self.setOption(QWizard.WizardOption.HaveHelpButton, False)
+        self.setOption(QWizard.WizardOption.HaveCustomButton1, False)
+        self.setOption(QWizard.WizardOption.DisabledUpperRightButton, False)
+
+    def initializePage(self, page):
+        if page == self.welcome_page:
+            self.welcome_page.update_text("Slovenský")
+
+    def validatePage(self, page):
+        if page == self.lang_page:
+            lang = self.lang_page.get_language()
+            self.welcome_page.update_text(lang)
+            self.current_lang = lang
+            t = TRANSLATIONS[lang]
+            self.addPage(self.create_process_page(t["setup_title"], t["setup_sub"], "setup_git_repo"))
+            self.addPage(self.create_process_page(t["deps_title"], t["deps_sub"], "install_dependencies"))
+            self.addPage(self.create_process_page(t["assets_title"], t["assets_sub"], "download_assets"))
+            self.addPage(self.create_process_page(t["sdk_title"], t["sdk_sub"], "install_game_sdk"))
+            self.addPage(self.create_process_page(t["build_title"], t["build_sub"], "build_executable"))
+            self.logic = InstallWorker(self, self.path_page.get_path())
+        return True
+
+    def create_process_page(self, title, subtext, func_name):
+        page = ProcessPage(title, subtext, func_name)
+        page.button(QWizard.WizardButton.NextButton).clicked.connect(lambda: self.start_process(page))
+        return page
+
+    def start_process(self, page):
+        self.button(QWizard.WizardButton.NextButton).setEnabled(False)
+        self.button(QWizard.WizardButton.BackButton).setEnabled(False)
+        func = getattr(self.logic, page.func_name)
+        self.worker = Worker(func, self)
+        self.worker.log.connect(page.update_log)
+        self.worker.progress.connect(page.update_progress)
+        self.worker.finished.connect(lambda success: self.finish_process(page, success))
+        self.worker.start()
+
+    def finish_process(self, page, success):
+        self.button(QWizard.WizardButton.NextButton).setEnabled(True)
+        self.button(QWizard.WizardButton.BackButton).setEnabled(True)
+        t = TRANSLATIONS[self.current_lang]
+        if success:
+            page.update_log(t["success_msg"])
+        else:
+            page.update_log(t["error_msg"])
 
 def main():
-    print("==========================================")
-    print("   ETS2-UltraPilot Professional Installer  ")
-    print("==========================================\n")
-
-    if not setup_git_repo():
-        print("\n[!] Repository setup failed. Please check your internet connection.")
-        input("Press Enter to exit...")
-        sys.exit(1)
-
-    if not install_dependencies():
-        print("\n[!] Dependency installation failed. Some features may not work.")
-        # Continue anyway, let the updater handle it later
-
-    if not download_assets():
-        print("\n[!] Binary assets could not be downloaded. SDK features will be disabled.")
-        # Continue anyway
-
-    if not build_executable():
-        print("\n[!] Failed to create executable. You can still run the project via main.py")
-
-    print("\n==========================================")
-    print("   Installation Complete!              ")
-    print("   Your app is ready in the 'dist' folder ")
-    print("==========================================\n")
-    input("Press Enter to finish...")
+    app = QApplication(sys.argv)
+    wizard = UltraPilotInstaller()
+    wizard.show()
+    sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()
