@@ -7,6 +7,10 @@ class SettingsManager:
     """Handles persistence and access to application settings."""
 
     def __init__(self, filename: str = "settings.json"):
+        # Resolve relative to the app dir so it works frozen and from source.
+        if not os.path.isabs(filename):
+            from core.paths import app_dir
+            filename = os.path.join(app_dir(), filename)
         self.filename = filename
         self.settings: Dict[str, Any] = {}
         self.load()
@@ -61,5 +65,18 @@ class SettingsManager:
                 "enabled": True,
                 "color": "lime",
                 "position": [100, 100]
+            },
+            # Per-plugin enable map (folder name -> bool). Missing = enabled.
+            "plugins": {
+                "autopilot": True,
+                "acc": True,
+                "collision": True,
+                "map": True,
+                "tts": True,
+                # The AR-style HUD plugin emits overlay data with no renderer; the
+                # on-screen HUD is core/hud.py instead, so keep this plugin off.
+                "hud": False,
+                "ecodrive": False,
+                "discord": False
             }
         }

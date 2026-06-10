@@ -72,61 +72,58 @@ class SCSTelemetry:
         return decoded, offset + count
 
     def update(self) -> Dict[str, Any]:
-        """Read all telemetry data from shared memory."""
+        """Read the telemetry fields we use from shared memory.
+
+        Uses the **fixed absolute zone offsets** of the scs-sdk-plugin shared
+        memory layout (the same plugin/struct ETS2LA targets), derived from
+        scs-telemetry-common.hpp:
+
+            Zone 4 (floats)  starts at 700
+            Zone 5 (bools)   starts at 1500
+            Zone 8 (doubles) starts at 2200   <- truck world placement
+
+        The previous version hand-guessed these offsets, so position/heading
+        were wrong, which broke any coordinate-based navigation.
+        """
         if not self.mm:
             return {}
 
-        data = {}
-        offset = 0
-
+        data: Dict[str, Any] = {}
         try:
-            # Zone 1: Basic info
-            data["sdkActive"], offset = self.read_bool(offset)
-            offset += 3 # placeholder
-            data["pause"], offset = self.read_bool(offset)
-            offset += 3 # placeholder
-            data["time"], offset = self.read_long_long(offset)
-            data["simulatedTime"], offset = self.read_long_long(offset)
-            data["renderTime"], offset = self.read_long_long(offset)
-            data["multiplayerTimeOffset"], offset = self.read_long_long(offset)
+            # --- Zone 3: truck ints (gear) ---
+            data["truckInt"] = {"gear": self.read_int(504)[0]}
 
-            # Zone 2: UI and Config (simplified)
-            # Skipping some buffers to get to key values
-            offset = 40
-            data["scsValues"] = {}
-            data["scsValues"]["versionMajor"], offset = self.read_int(offset)
-            data["scsValues"]["versionMinor"], offset = self.read_int(offset)
+            # --- Zone 4: truck floats (absolute byte offsets) ---
+            tf = {}
+            tf["speed"] = self.read_float(948)[0]               # m/s
+            tf["engineRpm"] = self.read_float(952)[0]
+            tf["cruiseControlSpeed"] = self.read_float(988)[0]
+            tf["fuel"] = self.read_float(1000)[0]               # liters
+            tf["fuelRange"] = self.read_float(1008)[0]          # km
+            tf["speedLimit"] = self.read_float(1068)[0]         # m/s
+            data["truckFloat"] = tf
 
-            # Fast forward to Truck Float data (Zone 4 starts at 700)
-            offset = 700
-            data["truckFloat"] = {}
-            data["truckFloat"]["speed"], offset = self.read_float(offset)
-            data["truckFloat"]["engineRpm"], offset = self.read_float(offset)
-            data["truckFloat"]["userSteer"], offset = self.read_float(offset)
-            data["truckFloat"]["userThrottle"], offset = self.read_float(offset)
-            data["truckFloat"]["userBrake"], offset = self.read_float(offset)
-            data["truckFloat"]["gameSteer"], offset = self.read_float(offset)
-            data["truckFloat"]["gameThrottle"], offset = self.read_float(offset)
-            data["truckFloat"]["gameBrake"], offset = self.read_float(offset)
-            data["truckFloat"]["cruiseControlSpeed"], offset = self.read_float(offset)
-            data["truckFloat"]["fuel"], offset = self.read_float(offset)
-            data["truckFloat"]["speedLimit"], offset = self.read_float(offset)
+            # --- Zone 5: truck bools ---
+            tb = {}
+            tb["parkBrake"] = self.read_bool(1566)[0]
+            tb["engineEnabled"] = self.read_bool(1576)[0]
+            tb["blinkerLeftActive"] = self.read_bool(1578)[0]
+            tb["blinkerRightActive"] = self.read_bool(1579)[0]
+            data["truckBool"] = tb
 
-            # Zone 5: Bools (Start at 1500)
-            offset = 1500
-            data["truckBool"] = {}
-            data["truckBool"]["parkBrake"], offset = self.read_bool(offset)
-            data["truckBool"]["engineEnabled"], offset = self.read_bool(offset + 550) # approximated
+            # --- Zone 8: truck world placement (doubles) ---
+            tp = {}
+            tp["coordinateX"] = self.read_double(2200)[0]
+            tp["coordinateY"] = self.read_double(2208)[0]
+            tp["coordinateZ"] = self.read_double(2216)[0]
+            # rotationX is a 0..1 fraction of a full turn (heading); Y/Z are pitch/roll.
+            tp["rotationX"] = self.read_double(2224)[0]
+            tp["rotationY"] = self.read_double(2232)[0]
+            tp["rotationZ"] = self.read_double(2240)[0]
+            data["truckPlacement"] = tp
 
-            # Zone 8: Placement (Start at 2200)
-            offset = 2200
-            data["truckPlacement"] = {}
-            data["truckPlacement"]["coordinateX"], offset = self.read_double(offset)
-            data["truckPlacement"]["coordinateY"], offset = self.read_double(offset)
-            data["truckPlacement"]["coordinateZ"], offset = self.read_double(offset)
-            data["truckPlacement"]["rotationX"], offset = self.read_double(offset)
-            data["truckPlacement"]["rotationY"], offset = self.read_double(offset)
-            data["truckPlacement"]["rotationZ"], offset = self.read_double(offset)
+            # sdkActive lives at offset 0 — useful to know the game is feeding data.
+            data["sdkActive"] = self.read_bool(0)[0]
 
         except Exception as e:
             logging.error(f"Error reading SCS telemetry: {e}")

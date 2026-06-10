@@ -97,3 +97,69 @@ def get_version_for_game(game_path):
         version = get_version_number(exe_path)
         return ".".join([str(i) for i in version[:2]])
     return "Unknown"
+
+
+def install_game_dlls(assets_dir: str, names=None) -> list:
+    """
+    Copy the SCS SDK plugin DLLs from ``assets_dir`` into every detected game's
+    ``bin/win_x64/plugins/`` folder so the game shares telemetry AND accepts
+    control input.
+
+    ``names`` defaults to both the telemetry and controller plugins.  Returns the
+    list of plugin folders written to.  Files already locked by a running game
+    are skipped quietly (they're usually already the right version).
+    """
+    import shutil
+
+    if names is None:
+        names = ["scs-telemetry.dll", "scs_sdk_controller.dll"]
+
+    installed = []
+    for game_path in find_scs_games():
+        plugins_dir = os.path.join(game_path, "bin", "win_x64", "plugins")
+        try:
+            os.makedirs(plugins_dir, exist_ok=True)
+        except Exception as e:
+            logging.error("Could not create %s: %s", plugins_dir, e)
+            continue
+        for name in names:
+            src = os.path.join(assets_dir, name)
+            if not os.path.exists(src):
+                logging.info("DLL %s not found in assets — skipping.", name)
+                continue
+            dst = os.path.join(plugins_dir, name)
+            try:
+                shutil.copy2(src, dst)
+                logging.info("Installed %s into %s", name, plugins_dir)
+            except Exception as e:
+                # Most common cause: the game is running and has the DLL locked.
+                logging.info("Skipped %s (in use / locked?): %s", name, e)
+        if plugins_dir not in installed:
+            installed.append(plugins_dir)
+    return installed
+
+
+def install_telemetry_dll(dll_source: str) -> list:
+    """
+    Backwards-compatible helper: install just the telemetry DLL given its path.
+    Prefer :func:`install_game_dlls` to install the whole SDK at once.
+    """
+    import shutil
+
+    if not dll_source or not os.path.exists(dll_source):
+        logging.warning("Telemetry DLL not found at %s — skipping game install. "
+                        "Place 'scs-telemetry.dll' in assets/ to enable telemetry.",
+                        dll_source)
+        return []
+
+    installed = []
+    for game_path in find_scs_games():
+        plugins_dir = os.path.join(game_path, "bin", "win_x64", "plugins")
+        try:
+            os.makedirs(plugins_dir, exist_ok=True)
+            shutil.copy2(dll_source, os.path.join(plugins_dir, "scs-telemetry.dll"))
+            installed.append(plugins_dir)
+            logging.info("Installed telemetry DLL into %s", plugins_dir)
+        except Exception as e:
+            logging.info("Skipped telemetry DLL (in use / locked?): %s", e)
+    return installed

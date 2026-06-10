@@ -1,0 +1,29 @@
+# --- Core runtime ---
+PyQt6>=6.5
+numpy>=1.24
+opencv-python>=4.8
+mss>=9.0
+psutil>=5.9
+requests>=2.31
+
+# --- Control backends ---
+vgamepad>=0.1.0          # virtual Xbox controller (analog steering)
+pydirectinput>=1.0.4     # digital keyboard fallback
+
+# --- Voice / TTS ---
+pyttsx3>=2.90
+
+# --- Optional integrations ---
+pypresence>=4.3          # Discord Rich Presence (plugin: discord)
+beautifulsoup4>=4.12     # HF model index scraping (core/ai_model)
+
+# --- Windows helpers (installer / SCS plugin install) ---
+pywin32>=306; platform_system == "Windows"
+vdf>=3.4                 # parse Steam libraryfolders.vdf
+
+# --- AI lane model (optional, large; CV fallback works without it) ---
+# torch>=2.1
+# torchvision>=0.16
+
+# --- Packaging the .msi installer (build-time only) ---
+# cx_Freeze>=6.15

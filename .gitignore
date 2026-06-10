@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Build / packaging artifacts
+build/
+dist/
+*.spec
+*.msi
+*.exe
+
+# Runtime / generated data
+model-cache/
+routes/
+settings.json
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

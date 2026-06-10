@@ -7,8 +7,12 @@ from plugins.acc.settings import settings
 class Plugin(BasePlugin):
     """
     Adaptive Cruise Control (ACC) Plugin.
-    Maintains a safe distance from the vehicle in front by controlling speed.
+    Maintains a safe distance from the vehicle in front by controlling speed,
+    and (improvement over the original) automatically respects the in-game
+    posted speed limit when ``obey_speed_limit`` is enabled.
     """
+
+    NAME = "acc"
 
     def on_start(self):
         logging.info("ACC Plugin started with professional PID control.")
@@ -28,13 +32,13 @@ class Plugin(BasePlugin):
             return
 
         # 1. Telemetry & State
-        truck = self.sdk.telemetry.get("truck", {})
-        speed = truck.get("speed", 0)
+        truck = self.sdk.telemetry.get("truck", {}) or {}
+        speed = truck.get("speed", 0) or 0
         # Handle both m/s and km/h inputs
-        speed_kmh = speed * 3.6 if speed < 200 else speed
+        speed_kmh = abs(speed) * 3.6 if abs(speed) < 200 else abs(speed)
 
         # Get danger level from perception/traffic analysis
-        danger_level = self.sdk.shared_state.get("danger_level", 0)
+        danger_level = self.sdk.shared_state.get("danger_level", 0) or 0
 
         # 2. Emergency Collision Avoidance
         if danger_level > settings.emergency_brake_threshold:
@@ -45,12 +49,23 @@ class Plugin(BasePlugin):
             return
 
         # 3. Dynamic Target Speed Calculation
-        # Blend target speed with a "safe" speed based on distance/danger
-        effective_target_speed = settings.target_speed
+        # Start from the user's target (live override from the UI settings page,
+        # falling back to the persisted default), never exceeding the posted limit.
+        user_target = self.sdk.shared_state.get("acc_target_speed", None)
+        base_target_speed = float(user_target) if user_target is not None else settings.target_speed
+        effective_target_speed = base_target_speed
+        obey_limit = self.sdk.shared_state.get("acc_obey_limit", None)
+        obey_limit = bool(obey_limit) if obey_limit is not None else getattr(settings, "obey_speed_limit", True)
+        if obey_limit:
+            speed_limit_ms = truck.get("speedLimit", 0) or 0
+            speed_limit_kmh = speed_limit_ms * 3.6 if speed_limit_ms < 200 else speed_limit_ms
+            if speed_limit_kmh > 5:  # 0 means "unknown / no limit"
+                effective_target_speed = min(effective_target_speed, speed_limit_kmh)
+
         if danger_level > 0.05:
             # Non-linear reduction for smoother approach: speed drops faster as danger increases
             reduction_factor = max(0.3, 1.0 - (danger_level ** 1.5 * 3))
-            effective_target_speed = max(20.0, settings.target_speed * reduction_factor)
+            effective_target_speed = max(20.0, base_target_speed * reduction_factor)
             logging.debug(f"ACC: Adjusting target speed to {effective_target_speed:.1f} km/h due to traffic")
 
         self.speed_pid.set_setpoint(effective_target_speed)

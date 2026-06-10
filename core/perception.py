@@ -1,19 +1,32 @@
-from core.ai_model import Model, MODEL_CONFIG
+import logging
+import numpy as np
+import cv2
+import mss
+
 
 class Perception:
-    """Computer Vision module for ETS2."""
+    """Computer Vision module for ETS2 (screen-capture based)."""
 
-    def __init__(self):
+    def __init__(self, shared_state=None):
+        # Shared state so detections can publish e.g. ai_confidence.
+        self.shared_state = shared_state
+
         self.sct = mss.mss()
-        self.monitor = self.sct.monitor
+        # monitors[0] is the virtual "all monitors" entry; [1] is the primary.
+        self.monitor = self.sct.monitors[1] if len(self.sct.monitors) > 1 else self.sct.monitors[0]
 
-        # Initialize AI Model for Lane Detection
-        self.model = Model(
-            HF_owner=MODEL_CONFIG["HF_OWNER"],
-            HF_repository=MODEL_CONFIG["HF_REPOSITORY"],
-            HF_model_folder=MODEL_CONFIG["HF_FOLDER"]
-        )
-        self.model.load_model()
+        # Initialize AI Model for lane detection (optional — degrade to CV).
+        self.model = None
+        try:
+            from core.ai_model import Model, MODEL_CONFIG
+            self.model = Model(
+                HF_owner=MODEL_CONFIG["HF_OWNER"],
+                HF_repository=MODEL_CONFIG["HF_REPOSITORY"],
+                HF_model_folder=MODEL_CONFIG["HF_FOLDER"],
+            )
+            self.model.load_model()
+        except Exception as e:
+            logging.warning(f"AI lane model unavailable, using classic CV only: {e}")
 
         # Temporal smoothing for danger level
         self._last_danger_level = 0.0
@@ -103,21 +116,18 @@ class Perception:
         frame = self.get_frame()
 
         # 1. Try AI Model
-        if self.model.loaded:
+        if self.model and self.model.loaded:
             try:
                 predictions = self.model.detect(frame)
                 if predictions:
-                    # We can estimate confidence based on prediction variance or specific model output
-                    # For now, we simulate confidence based on whether the model returned a value
-                    confidence = 0.95 if predictions else 0.0
-                    self.shared_state.set("ai_confidence", confidence)
+                    self._publish("ai_confidence", 0.95)
                     return self._process_ai_output(predictions, frame.shape[1])
             except Exception as e:
                 logging.error(f"AI Lane Detection failed: {e}")
-                self.shared_state.set("ai_confidence", 0.0)
+                self._publish("ai_confidence", 0.0)
 
         # 2. Fallback to Traditional CV
-        self.shared_state.set("ai_confidence", 0.3) # Lower confidence for traditional CV
+        self._publish("ai_confidence", 0.3)  # Lower confidence for traditional CV
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         edges = cv2.Canny(gray, 50, 150)
         height, width = edges.shape
@@ -133,8 +143,13 @@ class Perception:
             avg_x = np.mean([line[0][0] for line in lines])
             return (avg_x - (width // 2)) / (width // 2)
 
-        self.shared_state.set("ai_confidence", 0.0)
+        self._publish("ai_confidence", 0.0)
         return 0.0
+
+    def _publish(self, key, value):
+        """Safely write to shared state (no-op if running standalone)."""
+        if self.shared_state is not None:
+            self.shared_state.set(key, value)
 
     def detect_toll(self) -> bool:
         """

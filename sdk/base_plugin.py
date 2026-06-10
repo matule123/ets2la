@@ -1,32 +1,45 @@
-from abc import ABC, abstractmethod
 from typing import Any, Dict
-import multiprocessing as mp
 
-class BasePlugin(ABC):
+
+class BasePlugin:
     """
     Base class for all UltraPilot plugins.
-    Now designed to run in a separate Process for stability and performance.
+
+    Each plugin runs in its own OS process for stability (a crash in one plugin
+    cannot take down the engine).  The plugin receives a :class:`PluginSDK`
+    instance which exposes telemetry, the control proxy, shared state, tags and
+    settings through one consistent API.
+
+    Lifecycle hooks (``on_start`` / ``on_tick`` / ``on_stop``) are optional —
+    override only the ones you need.  This is intentionally *not* an ABC so a
+    plugin that only implements ``on_tick`` still loads cleanly.
     """
 
-    def __init__(self, sdk_proxy: Any):
-        self.sdk = sdk_proxy # Proxy to the engine's shared state and controllers
-        self.enabled = False
+    #: Override in a subclass to give the plugin a friendly name / default state.
+    NAME: str = "plugin"
+    DEFAULT_ENABLED: bool = True
+
+    def __init__(self, sdk: Any):
+        self.sdk = sdk                       # unified PluginSDK proxy
+        self.tags = getattr(sdk, "tags", None)
+        self.settings = getattr(sdk, "settings", None)
+        self.enabled = self.DEFAULT_ENABLED
         self.config: Dict[str, Any] = {}
 
-    @abstractmethod
+    # --- Lifecycle (override as needed) --------------------------------------
     def on_start(self):
-        """Called when the plugin process starts."""
-        pass
+        """Called once when the plugin process starts."""
 
-    @abstractmethod
     def on_stop(self):
-        """Called when the plugin process is terminated."""
-        pass
+        """Called when the plugin process is shutting down."""
 
-    @abstractmethod
     def on_tick(self, delta_time: float):
-        """The main execution loop for the plugin."""
-        pass
+        """Main loop, called every frame while the plugin is enabled."""
 
+    # --- Helpers --------------------------------------------------------------
     def update_config(self, new_config: Dict[str, Any]):
         self.config.update(new_config)
+
+    def toggle(self):
+        self.enabled = not self.enabled
+        return self.enabled

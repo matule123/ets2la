@@ -49,17 +49,14 @@ class UltraPilotPlanner:
             self.set_blinker("off")
             return self.current_state, voice_alert
 
-        # 3. Overtaking / Bypass Logic
+        # 3. Obstacle ahead — slow down / brake (no blind vision-based lane change).
+        #    Auto-overtaking via screen CV is unreliable, so mid-level danger maps to
+        #    a controlled AVOID_OBSTACLE (brake), which the Autopilot plugin handles.
         if danger_level > 0.3:
-            if self.current_state != SystemState.OVERTAKING:
-                voice_alert = "Obstacle detected. Initiating bypass maneuver."
-                self.set_state(SystemState.OVERTAKING)
-
-            # Set blinker based on where we need to move
-            # If obstacle is center or left, we move right. If right, move left.
-            target_blinker = "right" if obstacle_pos in ["center", "left"] else "left"
-            self.set_blinker(target_blinker)
-
+            if self.current_state != SystemState.AVOID_OBSTACLE:
+                voice_alert = "Obstacle ahead. Slowing down."
+            self.set_state(SystemState.AVOID_OBSTACLE)
+            self.set_blinker("off")
             return self.current_state, voice_alert
 
         # 4. Lane Following / Navigation

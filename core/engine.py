@@ -1,6 +1,6 @@
 import time
 import logging
-from core.events import bus as event_bus
+
 from core.telemetry import Telemetry
 from core.controller import Controller
 from core.plugin_manager import PluginManager
@@ -13,21 +13,33 @@ from core.modules.game_watcher import GameWatcher
 from core.modules.better_screen_capture import BetterScreenCapture
 from core.modules.traffic_analysis import TrafficAnalysis
 from core.planner import UltraPilotPlanner
+from sdk.plugin_sdk import (
+    CTL_STEERING, CTL_THROTTLE, CTL_BRAKE, CTL_BLINKER, CTL_PAY_TOLL,
+)
+
 
 class UltraPilotEngine:
-    """The main engine for ETS2-UltraPilot."""
+    """
+    The main engine for ETS2-UltraPilot.
 
-    def __init__(self):
+    Owns the single physical Controller.  Plugins never drive the device
+    directly — they write *control intents* into shared state and the engine
+    flushes them here, gated by a master ``autopilot_active`` switch for safety.
+    """
+
+    def __init__(self, shared_dict=None):
         logging.basicConfig(level=logging.INFO)
         logging.info("Starting ETS2-UltraPilot Engine...")
 
         self.settings = SettingsManager()
-        self.shared_state = SharedState()
-        self.voice = VoiceAssistant()
+        # Wrap the shared dict handed down by the bootloader (or create one).
+        self.shared_state = SharedState(shared_dict)
+        # Route voice alerts through shared state to the single tts plugin speaker.
+        self.voice = VoiceAssistant(self.shared_state)
 
         self.telemetry = Telemetry()
         self.controller = Controller()
-        self.perception = Perception()
+        self.perception = Perception(self.shared_state)
         self.planner = UltraPilotPlanner()
 
         self.module_manager = ModuleManager(self)
@@ -38,23 +50,92 @@ class UltraPilotEngine:
         self.module_manager.register_module(BetterScreenCapture)
         self.module_manager.register_module(TrafficAnalysis)
 
-
-
         self.running = False
         self.fps = self.settings.get("general", {}).get("fps", 60)
+
+        # Global hotkey ('N' by default) to toggle the autopilot from inside the
+        # game without alt-tabbing.  Uses GetAsyncKeyState (works app-wide).
+        self._hotkey_vk = 0x4E  # 'N'
+        self._hotkey_was_down = False
+        # Track autopilot on/off edges so we release controls only once on disable.
+        self._was_active = False
+        try:
+            import win32api  # noqa: F401
+            self._has_win32 = True
+        except Exception:
+            self._has_win32 = False
+
+        # Publish current settings so plugins (other processes) can read them.
+        self.shared_state.set("settings", self.settings.settings)
+        # Master safety switch: nothing is sent to the game until enabled.
+        if self.shared_state.get("autopilot_active") is None:
+            self.shared_state.set("autopilot_active", False)
 
     def start(self):
         self.running = True
         self.plugin_manager.discover_and_load()
-
         self.run_loop()
 
     def stop(self):
         self.running = False
+        self.controller.release_all()
         self.module_manager.stop_all()
         self.plugin_manager.stop_all()
         self.voice.stop()
         logging.info("ETS2-UltraPilot Engine stopped.")
+
+    # --- Hotkey ---------------------------------------------------------------
+    def _check_hotkey(self):
+        """Toggle autopilot_active on a rising edge of the 'N' key (app-wide)."""
+        if not self._has_win32:
+            return
+        try:
+            import win32api
+            down = bool(win32api.GetAsyncKeyState(self._hotkey_vk) & 0x8000)
+        except Exception:
+            return
+        if down and not self._hotkey_was_down:
+            new_state = not bool(self.shared_state.get("autopilot_active", False))
+            self.shared_state.set("autopilot_active", new_state)
+            msg = "Autopilot enabled." if new_state else "Autopilot disabled."
+            logging.info("Hotkey N -> %s", msg)
+            self.shared_state.set("tts_message", msg)
+            if not new_state:
+                self.controller.release_all()
+        self._hotkey_was_down = down
+
+    # --- Control flush --------------------------------------------------------
+    def _flush_controls(self):
+        """Apply the latest control intents to the physical device.
+
+        Gated by the master switch.  When the autopilot is NOT active we release
+        everything once and then leave the controls untouched — so the driver
+        keeps full manual control of a real wheel (writing 0 every frame would
+        fight the player's steering through the SCS SDK input)."""
+        if not self.shared_state.get("autopilot_active", False):
+            if self._was_active:
+                self.controller.release_all()
+                self._was_active = False
+            return
+        self._was_active = True
+
+        steering = self.shared_state.get(CTL_STEERING, 0.0)
+        throttle = self.shared_state.get(CTL_THROTTLE, 0.0)
+        brake = self.shared_state.get(CTL_BRAKE, 0.0)
+
+        self.controller.set_steering(steering)
+        self.controller.set_throttle(throttle)
+        self.controller.set_brake(brake)
+
+        # Blinker: a plugin may force one via ctl_blinker, otherwise follow the planner.
+        blinker = self.shared_state.get(CTL_BLINKER) or self.shared_state.get("active_blinker", "off")
+        self.controller.set_blinker(blinker)
+        if self.shared_state.get(CTL_BLINKER):
+            self.shared_state.set(CTL_BLINKER, None)
+
+        if self.shared_state.get(CTL_PAY_TOLL):
+            self.controller.pay_toll()
+            self.shared_state.set(CTL_PAY_TOLL, False)
 
     def run_loop(self):
         last_time = time.time()
@@ -63,14 +144,22 @@ class UltraPilotEngine:
             delta_time = current_time - last_time
             last_time = current_time
 
-            # 1. Update Telemetry and push to Shared State
+            # 0. Global hotkey (toggle autopilot from inside the game)
+            self._check_hotkey()
+
+            # 1. Telemetry
             if self.telemetry.update():
+                truck = self.telemetry.get("truck", {}) or {}
                 self.shared_state.update_batch({
                     "telemetry": self.telemetry.data,
-                    "speed": self.telemetry.get("truck", {}).get("speed", 0)
+                    "speed": truck.get("speed", 0),
+                    # World pose for coordinate-based navigation (map plugin).
+                    "truck_world_pos": (truck.get("x", 0.0), truck.get("z", 0.0)),
+                    "truck_heading": truck.get("rotation", 0.0),
+                    "truck_speed_ms": truck.get("speed", 0.0),
                 })
 
-            # 2. Update Perception and push to Shared State
+            # 2. Perception
             obstacle_data = self.perception.detect_obstacles()
             self.shared_state.set("obstacle", obstacle_data)
             self.shared_state.set("nav_direction", self.perception.detect_navigation_arrow())
@@ -78,49 +167,38 @@ class UltraPilotEngine:
             self.shared_state.set("toll_detected", self.perception.detect_toll())
             self.shared_state.set("danger_level", obstacle_data.get("level", 0))
 
-            # 3. Planning Layer
+            # 3. Planning
             perception_data = {
                 "lane_offset": self.shared_state.get("lane_offset"),
                 "nav_direction": self.shared_state.get("nav_direction"),
                 "obstacle": obstacle_data,
                 "danger_level": obstacle_data.get("level", 0),
-                "toll_detected": self.shared_state.get("toll_detected")
+                "toll_detected": self.shared_state.get("toll_detected"),
             }
             telemetry_data = self.shared_state.get("telemetry", {})
 
-            current_state, voice_alert = self.planner.update(perception_data, telemetry_data, delta_time)
-            self.shared_state.set("system_state", current_state)
+            current_state, voice_alert = self.planner.update(
+                perception_data, telemetry_data, delta_time)
+            # Store the state name (string) so other processes read it cleanly.
+            self.shared_state.set("system_state",
+                                  getattr(current_state, "name", str(current_state)))
             self.shared_state.set("active_blinker", self.planner.active_blinker)
 
             if voice_alert:
                 self.voice.say(voice_alert)
 
-            # 4. Update Core Modules (includes GameWatcher)
+            # 4. Core modules + plugin supervision
             self.module_manager.update_all(delta_time)
-
-            # 4. Plugin Manager tick
             self.plugin_manager.tick(delta_time)
 
-            # 5. Controller Sync (Apply Shared State to Physical Inputs)
-            # Steering combine: Lane offset + Bypass steering
-            base_steering = self.shared_state.get("lane_offset", 0) * 0.5
-            bypass_steering = self.shared_state.get("bypass_steering", 0.0)
-            self.controller.set_steering(base_steering + bypass_steering)
+            # 5. Apply control intents to the device (safety-gated)
+            self._flush_controls()
 
-            # Throttle/Brake
-            acc_throttle = self.shared_state.get("acc_throttle", 0.0)
-            acc_brake = self.shared_state.get("acc_brake", 0.0)
-            self.controller.set_throttle(acc_throttle)
-            self.controller.set_brake(acc_brake)
-
-            # Blinker
-            active_blinker = self.shared_state.get("active_blinker", "off")
-            self.controller.set_blinker(active_blinker)
-
-            # 6. Maintain FPS
+            # 6. Maintain target FPS
             sleep_time = (1.0 / self.fps) - (time.time() - current_time)
             if sleep_time > 0:
                 time.sleep(sleep_time)
+
 
 if __name__ == "__main__":
     engine = UltraPilotEngine()

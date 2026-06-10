@@ -1,90 +1,116 @@
+import logging
+import numpy as np
 from sdk.base_plugin import BasePlugin
 from core.pid import PID
-import logging
+
 
 class Plugin(BasePlugin):
-    """Autopilot plugin for lane keeping and speed control using PID."""
+    """
+    Autopilot plugin — the single authority that turns perception + ACC outputs
+    into the final control intents (steering / throttle / brake).
+
+    It integrates:
+      * ACC plugin throttle/brake targets,
+      * EcoDrive throttle smoothing (when active),
+      * lane offset + navigation direction into a PID-driven steering signal,
+      * planner states (EMERGENCY / PAY_TOLL / AVOID_OBSTACLE) for safety.
+    """
+
+    NAME = "autopilot"
 
     def on_start(self):
         logging.info("Autopilot Plugin started with PID control.")
         self.enabled = True
-
-
-        # PID for Steering: kp, ki, kd
         self.steering_pid = PID(kp=0.3, ki=0.01, kd=0.1)
         self.steering_pid.set_setpoint(0.0)
-
+        self._last_throttle = 0.0
+        self._last_steering = 0.0
 
     def on_stop(self):
         logging.info("Autopilot Plugin stopped.")
         self.enabled = False
 
+    def _apply_throttle(self, throttle: float):
+        """Apply EcoDrive low-pass smoothing to throttle if eco is active."""
+        if self.sdk.shared_state.get("eco_active", False):
+            alpha = float(self.sdk.shared_state.get("eco_smoothing", 0.15))
+            throttle = (alpha * throttle) + ((1 - alpha) * self._last_throttle)
+        self._last_throttle = throttle
+        self.sdk.controller.set_throttle(throttle)
+
     def on_tick(self, delta_time: float):
-        # 1. Telemetry & State
-        speed = self.sdk.telemetry.get("truck", {}).get("speed", 0)
+        # 1. Telemetry & state
+        speed = self.sdk.telemetry.get("truck", {}).get("speed", 0) or 0
         speed_kmh = speed * 3.6 if speed < 200 else speed
         system_state = self.sdk.shared_state.get("system_state")
-        danger_level = self.sdk.shared_state.get("danger_level", 0)
-        lane_offset = self.sdk.shared_state.get("lane_offset", 0)
+        danger_level = self.sdk.shared_state.get("danger_level", 0) or 0
+        lane_offset = self.sdk.shared_state.get("lane_offset", 0) or 0
 
-        # 2. Handle States with Hysteresis and Safety
+        # 2. Safety states
         if system_state == "EMERGENCY":
             self.sdk.controller.stop_completely()
-            logging.critical("EMERGENCY STOP TRIGGERED!")
             self.sdk.shared_state.set("tts_message", "Emergency stop triggered!")
             return
 
         if system_state == "PAY_TOLL":
-            # Enhanced Toll Logic: Ensure complete stop before payment
             if speed_kmh > 0.5:
                 self.sdk.controller.set_throttle(0)
-                self.sdk.controller.set_brake(0.7) # Stronger braking for toll
-                return
+                self.sdk.controller.set_brake(0.7)
             else:
                 self.sdk.controller.pay_toll()
-                logging.info("Toll payment sequence executed - Truck Stopped.")
-                return
-
-        if system_state == "AVOID_OBSTACLE":
-            # Dynamic braking based on danger level with a safety floor
-            self.sdk.controller.set_throttle(0)
-            brake_power = np.clip(0.5 + (0.5 * danger_level), 0.5, 1.0)
-            self.sdk.controller.set_brake(brake_power)
             return
 
-        # 3. ACC integration: Use outputs from the ACC plugin
-        acc_throttle = self.sdk.shared_state.get("acc_throttle", 0.0)
-        acc_brake = self.sdk.shared_state.get("acc_brake", 0.0)
+        # Collision plugin's independent brake request (combined via max below).
+        collision_brake = float(self.sdk.shared_state.get("collision_brake_request", 0.0) or 0.0)
 
+        if system_state == "AVOID_OBSTACLE":
+            self.sdk.controller.set_throttle(0)
+            brake_power = float(np.clip(0.5 + (0.5 * danger_level), 0.5, 1.0))
+            self.sdk.controller.set_brake(max(brake_power, collision_brake))
+            return
+
+        # 3. Longitudinal control from ACC outputs
+        acc_throttle = self.sdk.shared_state.get("acc_throttle", None)
+        acc_brake = self.sdk.shared_state.get("acc_brake", None)
         if acc_throttle is not None and acc_brake is not None:
-            self.sdk.controller.set_throttle(acc_throttle)
-            self.sdk.controller.set_brake(acc_brake)
-            logging.debug(f"Autopilot using ACC outputs: T={acc_throttle:.2f}, B={acc_brake:.2f}")
+            brake = max(float(acc_brake), collision_brake)
+            # Don't accelerate while any brake is requested.
+            self._apply_throttle(0.0 if brake > 0.01 else float(acc_throttle))
+            self.sdk.controller.set_brake(brake)
         else:
-            # Fallback if ACC plugin is disabled or not running
-            self.sdk.controller.set_throttle(0.1)
-            self.sdk.controller.set_brake(0)
+            # Fallback if ACC plugin is disabled / not running yet.
+            self._apply_throttle(0.0 if collision_brake > 0.01 else 0.1)
+            self.sdk.controller.set_brake(collision_brake)
 
+        # 4. Lateral control.
+        #    When the navigation plugin is following a recorded route, its
+        #    coordinate-based steering (cross-track + heading error) is the
+        #    primary lateral signal — far more reliable than screen CV.  Smooth
+        #    it across frames to avoid jerky wheel motion.
+        nav_active = bool(self.sdk.shared_state.get("nav_active", False))
+        if nav_active:
+            nav_steering = float(self.sdk.shared_state.get("nav_steering", 0.0) or 0.0)
+            self._last_steering = (0.4 * nav_steering) + (0.6 * self._last_steering)
+            steering_val = float(np.clip(self._last_steering, -1.0, 1.0))
+        else:
+            # Fallback: vision-based lane centering + navigation arrow direction.
+            nav_direction = self.sdk.shared_state.get("nav_direction", 0) or 0
+            target_offset = nav_direction * 0.6 if abs(nav_direction) > 0.2 else 0.0
 
-        # 4. Advanced Steering with "Smooth-Steer" and Center-Seeking
-        nav_direction = self.sdk.shared_state.get("nav_direction", 0)
+            self.steering_pid.set_setpoint(target_offset)
+            steering_output = self.steering_pid.update(lane_offset, delta_time)
 
-        target_offset = 0.0
-        if abs(nav_direction) > 0.2:
-            target_offset = nav_direction * 0.6
+            speed_damping = float(np.clip(1.0 - (speed_kmh / 120.0) * 0.3, 0.7, 1.0))
+            center_force = -lane_offset * 0.05
+            recovery_factor = 1.5 + (abs(lane_offset) * 0.5) if abs(lane_offset) > 0.4 else 1.0
 
-        self.steering_pid.set_setpoint(target_offset)
-        steering_output = self.steering_pid.update(lane_offset, delta_time)
+            steering_val = float(np.clip(
+                (steering_output * speed_damping) + center_force * recovery_factor, -1.0, 1.0))
+            self._last_steering = steering_val
 
-        # Smooth-Steer: Dampen high-frequency oscillations based on speed
-        speed_damping = np.clip(1.0 - (speed_kmh / 120.0) * 0.3, 0.7, 1.0)
-
-        # Center-Seeking: Add a subtle force that always pushes the truck back to 0
-        center_force = -lane_offset * 0.05
-
-        recovery_factor = 1.0
-        if abs(lane_offset) > 0.4:
-            recovery_factor = 1.5 + (abs(lane_offset) * 0.5)
-
-        steering_val = np.clip((steering_output * speed_damping) + center_force * recovery_factor, -1.0, 1.0)
         self.sdk.controller.set_steering(steering_val)
+
+        # Publish UI tags.
+        self.tags.steering = round(steering_val, 3)
+        self.tags.speed_kmh = round(speed_kmh, 1)
+        self.tags.nav_active = nav_active

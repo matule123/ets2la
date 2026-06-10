@@ -8,21 +8,38 @@ class SCSController:
     Interface for the SCS SDK Controller DLL.
     This allows direct memory writing/input simulation for ETS2.
     """
-    def __init__(self, dll_path: str = "sdk/scs_sdk_controller.dll"):
+    #: ctypes exports a usable control DLL must provide.
+    REQUIRED_EXPORTS = ("SetSteering", "SetThrottle", "SetBrake")
+
+    def __init__(self, dll_path: str = None):
+        if dll_path is None:
+            from core.paths import resource
+            dll_path = resource("assets", "scs_sdk_controller.dll")
         self.dll_path = dll_path
         self.dll = None
         self._load_dll()
 
     def _load_dll(self):
         if not os.path.exists(self.dll_path):
-            logging.warning(f"SCS SDK DLL not found at {self.dll_path}. Precise control disabled.")
+            logging.info(f"SCS control DLL not found at {self.dll_path}; using virtual joystick.")
             return
 
         try:
-            self.dll = ctypes.CDLL(self.dll_path)
-            logging.info("SCS SDK Controller DLL loaded successfully.")
+            dll = ctypes.CDLL(self.dll_path)
         except Exception as e:
-            logging.error(f"Failed to load SCS SDK DLL: {str(e)}")
+            logging.error(f"Failed to load SCS control DLL: {e}")
+            return
+
+        # The SCS *plugin* DLL drives the game via Local\\SCSControls shared
+        # memory, not ctypes calls — it has no SetSteering/SetThrottle exports.
+        # Only claim this backend if the DLL actually exposes them, otherwise we
+        # would silently send no input. The Controller then falls back to vgamepad.
+        if all(hasattr(dll, name) for name in self.REQUIRED_EXPORTS):
+            self.dll = dll
+            logging.info("SCS SDK Controller DLL loaded (ctypes control available).")
+        else:
+            logging.info("SCS control DLL has no ctypes control exports; "
+                         "using virtual joystick instead.")
 
     def set_steering(self, value: float):
         """Value: -1.0 to 1.0"""

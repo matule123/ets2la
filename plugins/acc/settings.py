@@ -7,6 +7,7 @@ class ACCSettings:
     aggressiveness: str = "Normal"   # "Eco", "Normal", "Aggressive"
     follow_distance_seconds: float = 2.0
     emergency_brake_threshold: float = 0.8
+    obey_speed_limit: bool = True    # auto-cap target speed to posted limit
 
     def __post_init__(self):
         # Ensure values are within reasonable ranges

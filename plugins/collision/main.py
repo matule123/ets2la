@@ -1,61 +1,52 @@
 import logging
+import numpy as np
 from sdk.base_plugin import BasePlugin
-from core.events import bus as event_bus
 from plugins.collision.settings import settings
+
 
 class Plugin(BasePlugin):
     """
-    Collision Avoidance & Bypass Plugin.
-    Monitors the environment and handles emergency braking and bypass steering.
+    Collision Avoidance plugin.
+
+    Watches perception danger and publishes a *brake request* that the Autopilot
+    combines (via max) with the ACC brake.  It never writes ``acc_brake`` or the
+    final controls directly — that used to fight the ACC plugin every tick.
+
+    Cross-process note: the old version used an in-process ``event_bus`` to talk
+    to the engine, which never worked across process boundaries.  All coordination
+    now goes through shared state, consistent with the rest of the system.
     """
-    def __init__(self, sdk_proxy):
-        super().__init__(sdk_proxy)
-        self.enabled = True
-        logging.info("Collision Avoidance & Bypass Plugin initialized.")
+
+    NAME = "collision"
 
     def on_start(self):
-        logging.info("Collision Avoidance & Bypass Plugin started.")
-        event_bus.subscribe("emergency_brake", self.on_emergency_brake)
+        logging.info("Collision Avoidance plugin started.")
+        self.enabled = True
 
     def on_stop(self):
-        logging.info("Collision Avoidance & Bypass Plugin stopped.")
+        logging.info("Collision Avoidance plugin stopped.")
+        self.sdk.set("collision_brake_request", 0.0)
 
     def on_tick(self, delta_time: float):
         if not self.enabled:
             return
 
         system_state = self.sdk.get("system_state")
-        obstacle = self.sdk.get("obstacle", {"level": 0, "position": "center"})
-        danger_level = obstacle.get("level", 0)
-        obstacle_pos = obstacle.get("position", "center")
+        obstacle = self.sdk.get("obstacle", {"level": 0, "position": "center"}) or {}
+        danger_level = obstacle.get("level", 0) or 0
 
-        # Handle EMERGENCY state (Extreme danger)
-        if system_state == "SystemState.EMERGENCY" or danger_level > settings.emergency_threshold:
-            logging.warning("Collision Avoidance: EMERGENCY BRAKE!")
-            self.trigger_emergency_stop()
-            event_bus.publish("collision_alert", {"level": "CRITICAL", "action": "BRAKING"})
+        # Engine stores system_state as the plain enum name (e.g. "EMERGENCY"),
+        # not "SystemState.EMERGENCY" — match accordingly.
+        if system_state == "EMERGENCY" or danger_level > settings.emergency_threshold:
+            self.sdk.set("collision_brake_request", 1.0)
+            self.tags.collision_status = "EMERGENCY BRAKE"
             return
 
-        # Handle OVERTAKING / BYPASS state
-        if system_state == "SystemState.OVERTAKING":
-            # If obstacle is center or left, we want to steer right
-            steering_value = settings.bypass_steering_intensity if obstacle_pos in ["center", "left"] else -settings.bypass_steering_intensity
-
-            # Log bypass maneuver
-            logging.info(f"Collision Avoidance: Executing bypass steering {steering_value}")
-            self.sdk.set("bypass_steering", steering_value)
-
-            # Slightly reduce speed during the maneuver for safety
-            self.sdk.set("acc_brake", settings.brake_during_bypass)
+        # Proportional braking as danger ramps up; 0 when the road is clear.
+        if danger_level > 0.3:
+            brake = float(np.clip(0.3 + danger_level * 0.7, 0.0, 0.9))
+            self.sdk.set("collision_brake_request", brake)
+            self.tags.collision_status = f"BRAKING {brake:.2f}"
         else:
-            # Reset bypass steering when not in overtaking mode
-            self.sdk.set("bypass_steering", 0.0)
-            self.sdk.set("acc_brake", 0.0)
-
-    def trigger_emergency_stop(self):
-        self.sdk.set("emergency_brake", True)
-        self.sdk.set("acc_brake", 1.0)
-
-    def on_emergency_brake(self, data):
-        logging.info(f"Collision Avoidance received emergency brake event: {data}")
-        self.trigger_emergency_stop()
+            self.sdk.set("collision_brake_request", 0.0)
+            self.tags.collision_status = "Clear"
