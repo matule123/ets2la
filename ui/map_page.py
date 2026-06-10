@@ -4,12 +4,52 @@ import math
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit, QComboBox,
+    QProgressBar,
 )
 from PyQt6.QtGui import QPainter, QColor, QPen, QPolygonF
-from PyQt6.QtCore import Qt, QTimer, QPointF
+from PyQt6.QtCore import Qt, QTimer, QPointF, QThread, pyqtSignal
 from core.paths import app_dir
 
 ROUTES_DIR = os.path.join(app_dir(), "routes")
+
+
+class MapDownloadWorker(QThread):
+    """Downloads + extracts a map dataset in the background."""
+    progress = pyqtSignal(float, str)
+    done = pyqtSignal(bool)
+
+    def __init__(self, key):
+        super().__init__()
+        self.key = key
+
+    def run(self):
+        try:
+            from core.navigation import map_data
+            ok = map_data.download(self.key, progress_cb=lambda f, t: self.progress.emit(f, t))
+            self.done.emit(bool(ok))
+        except Exception:
+            self.done.emit(False)
+
+
+class RoadNetLoadWorker(QThread):
+    """Loads the downloaded road network in the background (can be large)."""
+    done = pyqtSignal(object)
+
+    def run(self):
+        try:
+            from core.navigation import map_data
+            from core.navigation.road_network import RoadNetwork
+            downloaded = [d for d in map_data.list_datasets() if d["downloaded"]]
+            if not downloaded:
+                self.done.emit(None)
+                return
+            net = RoadNetwork()
+            if net.load(map_data.dataset_dir(downloaded[0]["key"])):
+                self.done.emit(net)
+            else:
+                self.done.emit(None)
+        except Exception:
+            self.done.emit(None)
 
 
 class MapView(QWidget):
@@ -19,8 +59,9 @@ class MapView(QWidget):
         super().__init__()
         self.state = state
         self.route_points = []   # [(x, z), ...] drawn route (loaded for display)
+        self.road_net = None     # RoadNetwork (when a map is downloaded + loaded)
         self.setMinimumHeight(300)
-        self.setStyleSheet("background-color: #0E0E0E; border-radius: 8px;")
+        self.setStyleSheet("background-color: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 10px;")
 
     def set_route(self, points):
         self.route_points = points or []
@@ -42,7 +83,7 @@ class MapView(QWidget):
         pts = list(self.route_points)
         all_pts = pts + ([truck] if truck else [])
         if not all_pts:
-            qp.setPen(QColor("#555"))
+            qp.setPen(QColor("#9CA3AF"))
             qp.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
                         "No route loaded.\nRecord or load a route below.")
             return
@@ -60,7 +101,7 @@ class MapView(QWidget):
 
         # Route polyline.
         if len(pts) >= 2:
-            qp.setPen(QPen(QColor("#00FF7F"), 3))
+            qp.setPen(QPen(QColor("#10B981"), 3))
             poly = QPolygonF([to_screen(p) for p in pts])
             qp.drawPolyline(poly)
             # Start (green) and end (red) markers.
@@ -92,21 +133,21 @@ class MapPage(QWidget):
         layout.setSpacing(15)
 
         title = QLabel("🗺️ Navigation")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #00FF7F;")
+        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #065F46;")
         layout.addWidget(title)
 
         self.view = MapView(state)
         layout.addWidget(self.view)
 
         self.status = QLabel("Idle.")
-        self.status.setStyleSheet("color: #8E8E93;")
+        self.status.setStyleSheet("color: #6B7280;")
         layout.addWidget(self.status)
 
         # --- Record row ---
         rec_row = QHBoxLayout()
         self.name_edit = QLineEdit()
         self.name_edit.setPlaceholderText("route name")
-        self.name_edit.setStyleSheet("background:#1E1E1E; border:1px solid #333; padding:6px;")
+        self.name_edit.setStyleSheet("background:#FFFFFF; border:1px solid #DfE3E8; border-radius:8px; padding:6px;")
         btn_rec = QPushButton("● Record")
         btn_stop_rec = QPushButton("■ Stop & Save")
         btn_rec.clicked.connect(self.start_record)
@@ -119,7 +160,7 @@ class MapPage(QWidget):
         # --- Replay row ---
         play_row = QHBoxLayout()
         self.route_combo = QComboBox()
-        self.route_combo.setStyleSheet("background:#1E1E1E; border:1px solid #333; padding:6px;")
+        self.route_combo.setStyleSheet("background:#FFFFFF; border:1px solid #DfE3E8; border-radius:8px; padding:6px;")
         btn_load = QPushButton("▶ Load & Navigate")
         btn_clear = QPushButton("⏹ Stop Nav")
         btn_load.clicked.connect(self.load_route)
@@ -128,12 +169,75 @@ class MapPage(QWidget):
         play_row.addWidget(btn_load)
         play_row.addWidget(btn_clear)
         layout.addLayout(play_row)
+
+        # --- Map data (ETS2 / ProMods / versions) ---
+        map_title = QLabel("Map data")
+        map_title.setStyleSheet("font-size: 15px; font-weight: bold; color: #0F766E; margin-top: 8px;")
+        layout.addWidget(map_title)
+        map_row = QHBoxLayout()
+        self.map_combo = QComboBox()
+        self.map_combo.setStyleSheet("background:#FFFFFF; border:1px solid #DfE3E8; border-radius:8px; padding:6px;")
+        self.btn_dl = QPushButton("⬇ Download map")
+        self.btn_dl.clicked.connect(self.download_map)
+        map_row.addWidget(self.map_combo)
+        map_row.addWidget(self.btn_dl)
+        layout.addLayout(map_row)
+        self.dl_bar = QProgressBar()
+        self.dl_bar.setVisible(False)
+        layout.addWidget(self.dl_bar)
+        self.dl_status = QLabel("")
+        self.dl_status.setStyleSheet("color: #6B7280; font-size: 12px;")
+        layout.addWidget(self.dl_status)
+
         layout.addStretch()
+
+        self._dl_worker = None
+        self._populate_maps()
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.refresh)
         self.timer.start(150)
         self._last_routes = None
+
+    # --- Map data -------------------------------------------------------------
+    def _populate_maps(self):
+        try:
+            from core.navigation import map_data
+            datasets = map_data.list_datasets()
+        except Exception as e:
+            self.dl_status.setText(f"Could not reach map index: {e}")
+            return
+        self.map_combo.clear()
+        for d in datasets:
+            mark = "✓ " if d["downloaded"] else ""
+            self.map_combo.addItem(f"{mark}{d['key']}  ({d['game']} {d['version']})", d["key"])
+        if datasets:
+            self.dl_status.setText("Pick your game version (or ProMods) and download once.")
+
+    def download_map(self):
+        if self._dl_worker is not None:
+            return
+        key = self.map_combo.currentData()
+        if not key:
+            return
+        self.btn_dl.setEnabled(False)
+        self.dl_bar.setVisible(True)
+        self._dl_worker = MapDownloadWorker(key)
+        self._dl_worker.progress.connect(self._on_dl_progress)
+        self._dl_worker.done.connect(self._on_dl_done)
+        self._dl_worker.start()
+
+    def _on_dl_progress(self, frac, text):
+        self.dl_bar.setValue(int(frac * 100))
+        self.dl_status.setText(text)
+
+    def _on_dl_done(self, ok):
+        self.btn_dl.setEnabled(True)
+        self.dl_bar.setVisible(False)
+        self._dl_worker = None
+        self.dl_status.setText("✓ Map downloaded — map navigation data ready."
+                               if ok else "✗ Download failed (check internet).")
+        self._populate_maps()
 
     # --- Actions --------------------------------------------------------------
     def start_record(self):

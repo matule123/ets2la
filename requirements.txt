@@ -16,6 +16,7 @@ pyttsx3>=2.90
 # --- Optional integrations ---
 pypresence>=4.3          # Discord Rich Presence (plugin: discord)
 beautifulsoup4>=4.12     # HF model index scraping (core/ai_model)
+PyYAML>=6.0              # parse the ETS2LA map-data index (core/navigation/map_data)
 
 # --- Windows helpers (installer / SCS plugin install) ---
 pywin32>=306; platform_system == "Windows"

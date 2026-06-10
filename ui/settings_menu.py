@@ -20,23 +20,23 @@ class SettingsMenu(QWidget):
         self.init_ui()
 
     def init_ui(self):
-        self.setStyleSheet("background-color: #121212; color: white; font-family: 'Segoe UI';")
+        self.setStyleSheet("background-color: #F4F6F8; color: #1A1D21; font-family: 'Segoe UI';")
 
         layout = QVBoxLayout()
         layout.setSpacing(20)
         layout.setContentsMargins(30, 30, 30, 30)
 
         title = QLabel("⚙️ Settings")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #00FF7F; margin-bottom: 10px;")
+        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #065F46; margin-bottom: 10px;")
         layout.addWidget(title)
 
         # --- ACC Section ---
         acc_frame = QFrame()
-        acc_frame.setStyleSheet("background-color: #1e1e1e; border-radius: 10px; padding: 10px;")
+        acc_frame.setStyleSheet("background-color: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 12px; padding: 12px;")
         acc_layout = QVBoxLayout(acc_frame)
 
         acc_title = QLabel("Adaptive Cruise Control")
-        acc_title.setStyleSheet("font-size: 18px; font-weight: bold; color: #00ffcc;")
+        acc_title.setStyleSheet("font-size: 18px; font-weight: bold; color: #0F766E;")
         acc_layout.addWidget(acc_title)
 
         # Target Speed Slider
@@ -70,6 +70,32 @@ class SettingsMenu(QWidget):
         acc_layout.addWidget(self.limit_toggle)
 
         layout.addWidget(acc_frame)
+
+        # --- Steering Section ---
+        steer_frame = QFrame()
+        steer_frame.setStyleSheet("background-color: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 12px; padding: 12px;")
+        steer_layout = QVBoxLayout(steer_frame)
+        steer_title = QLabel("Steering")
+        steer_title.setStyleSheet("font-size: 18px; font-weight: bold; color: #0F766E;")
+        steer_layout.addWidget(steer_title)
+
+        self.invert_toggle = QCheckBox("Invert steering (flip if the truck turns the wrong way)")
+        self.invert_toggle.setChecked(bool(self.state.get("steering_invert", False)))
+        self.invert_toggle.toggled.connect(self.update_invert)
+        steer_layout.addWidget(self.invert_toggle)
+
+        sens_layout = QHBoxLayout()
+        init_sens = int((self.state.get("steering_sensitivity", 1.0) or 1.0) * 100)
+        self.sens_label = QLabel(f"Sensitivity: {init_sens / 100:.2f}×")
+        self.sens_slider = QSlider(Qt.Orientation.Horizontal)
+        self.sens_slider.setRange(30, 200)  # 0.3× .. 2.0×
+        self.sens_slider.setValue(init_sens)
+        self.sens_slider.valueChanged.connect(self.update_sensitivity)
+        sens_layout.addWidget(self.sens_label)
+        sens_layout.addWidget(self.sens_slider)
+        steer_layout.addLayout(sens_layout)
+
+        layout.addWidget(steer_frame)
         layout.addStretch()
         self.setLayout(layout)
 
@@ -77,6 +103,8 @@ class SettingsMenu(QWidget):
         self.update_acc_speed(init_speed)
         self.update_acc_dist(init_gap)
         self.update_obey_limit(self.limit_toggle.isChecked())
+        self.update_invert(self.invert_toggle.isChecked())
+        self.update_sensitivity(init_sens)
 
     def update_acc_speed(self, val):
         self.speed_label.setText(f"Target Speed: {val} km/h")
@@ -89,3 +117,11 @@ class SettingsMenu(QWidget):
 
     def update_obey_limit(self, checked):
         self.state.set("acc_obey_limit", bool(checked))
+
+    def update_invert(self, checked):
+        self.state.set("steering_invert", bool(checked))
+
+    def update_sensitivity(self, val):
+        s = val / 100.0
+        self.sens_label.setText(f"Sensitivity: {s:.2f}×")
+        self.state.set("steering_sensitivity", s)

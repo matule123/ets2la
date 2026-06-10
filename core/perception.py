@@ -174,41 +174,67 @@ class Perception:
 
     def detect_obstacles(self) -> dict:
         """
-        Detects obstacles in front (e.g., red brake lights).
-        Returns: Dictionary with 'level' (0.0 to 1.0) and 'position' ('left', 'right', 'center').
-        Includes temporal smoothing.
+        Detects obstacles ahead and returns ``{'level': 0..1, 'position': left/center/right}``.
+
+        Two signals, combined conservatively to avoid phantom braking:
+          * **Brake lights** (red mass) — the strongest cue a vehicle ahead is
+            slowing; weighted heavily.
+          * **Large object ahead** — a big contiguous contour in the lane region
+            (a vehicle blocking the view); weighted lightly as a nudge.
+
+        Note: screen vision is inherently limited.  Reliable traffic tracking
+        ultimately needs the game's traffic shared-memory data.
         """
         frame = self.get_frame(self.obstacle_region)
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        h, w = frame.shape[:2]
+        total_pixels = max(1, h * w)
 
-        # Look for red colors (brake lights)
-        lower_red1 = np.array([0, 100, 100])
-        upper_red1 = np.array([10, 255, 255])
-        lower_red2 = np.array([160, 100, 100])
-        upper_red2 = np.array([180, 255, 255])
+        # --- 1) Brake lights (red) ---
+        mask1 = cv2.inRange(hsv, np.array([0, 90, 90]), np.array([10, 255, 255]))
+        mask2 = cv2.inRange(hsv, np.array([160, 90, 90]), np.array([180, 255, 255]))
+        red_mask = cv2.bitwise_or(mask1, mask2)
+        red_count = cv2.countNonZero(red_mask)
+        red_danger = np.clip((red_count / total_pixels) * 12.0, 0.0, 1.0)
 
-        mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
-        mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
-        full_mask = cv2.bitwise_or(mask1, mask2)
+        # --- 2) Large object ahead (big dark/contrasting contour) ---
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 60, 160)
+        edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        obj_danger = 0.0
+        obj_cx = None
+        if contours:
+            biggest = max(contours, key=cv2.contourArea)
+            area_frac = cv2.contourArea(biggest) / total_pixels
+            # Only count genuinely large masses (a close vehicle), low weight.
+            if area_frac > 0.18:
+                obj_danger = np.clip((area_frac - 0.18) * 1.2, 0.0, 0.5)
+                M = cv2.moments(biggest)
+                if M["m00"] > 0:
+                    obj_cx = int(M["m10"] / M["m00"])
 
-        red_pixel_count = cv2.countNonZero(full_mask)
-        total_pixels = full_mask.shape[0] * full_mask.shape[1]
-        current_danger = np.clip((red_pixel_count / total_pixels) * 10, 0.0, 1.0)
+        current_danger = float(np.clip(max(red_danger, red_danger * 0.6 + obj_danger),
+                                       0.0, 1.0))
 
-        # Temporal smoothing
+        # Temporal smoothing to steady the signal.
         alpha = 0.3
         self._last_danger_level = (alpha * current_danger) + ((1 - alpha) * self._last_danger_level)
 
-        # Determine position of the red mass
+        # Position from whichever signal is present (prefer red mass).
         position = "center"
-        if red_pixel_count > 100:
-            M = cv2.moments(full_mask)
+        cx = None
+        if red_count > 80:
+            M = cv2.moments(red_mask)
             if M["m00"] > 0:
                 cx = int(M["m10"] / M["m00"])
-                center_x = frame.shape[1] // 2
-                if cx < center_x - 20:
-                    position = "left"
-                elif cx > center_x + 20:
-                    position = "right"
+        elif obj_cx is not None:
+            cx = obj_cx
+        if cx is not None:
+            center_x = w // 2
+            if cx < center_x - 20:
+                position = "left"
+            elif cx > center_x + 20:
+                position = "right"
 
         return {"level": self._last_danger_level, "position": position}

@@ -10,16 +10,23 @@ from PyQt6.QtCore import QTimer
 from ui.settings_menu import SettingsMenu
 from ui.map_page import MapPage
 
-# Gaming Dark Theme Stylesheet
-DARK_THEME = """
-QMainWindow { background-color: #121212; }
-QWidget { background-color: #121212; color: #E0E0E0; font-family: 'Segoe UI', sans-serif; }
-QPushButton { background-color: #1E1E1E; border: 1px solid #333; border-radius: 5px; padding: 10px; color: #B0B0B0; }
-QPushButton:hover { background-color: #2A2A2A; border-color: #00FF7F; color: #FFFFFF; }
-QPushButton:pressed { background-color: #00FF7F; color: #000000; }
-QLabel { color: #E0E0E0; }
-QFrame#Sidebar { background-color: #1A1A1A; border-right: 1px solid #333; }
+# Clean light theme (ETS2LA-style: white surfaces, green accent).
+ACCENT = "#10B981"
+LIGHT_THEME = """
+QMainWindow { background-color: #F4F6F8; }
+QWidget { background-color: #F4F6F8; color: #1A1D21; font-family: 'Segoe UI', sans-serif; }
+QPushButton { background-color: #FFFFFF; border: 1px solid #DfE3E8; border-radius: 8px; padding: 10px; color: #374151; }
+QPushButton:hover { border-color: #10B981; color: #065F46; }
+QPushButton:pressed { background-color: #10B981; color: #FFFFFF; }
+QLabel { color: #1A1D21; }
+QFrame#Sidebar { background-color: #FFFFFF; border-right: 1px solid #E5E7EB; }
+QComboBox, QLineEdit { background-color: #FFFFFF; border: 1px solid #DfE3E8; border-radius: 8px; padding: 7px; }
+QCheckBox { spacing: 8px; }
+QSlider::groove:horizontal { height: 6px; background: #E5E7EB; border-radius: 3px; }
+QSlider::handle:horizontal { background: #10B981; width: 16px; margin: -6px 0; border-radius: 8px; }
+QStatusBar { background-color: #FFFFFF; border-top: 1px solid #E5E7EB; }
 """
+DARK_THEME = LIGHT_THEME  # kept for backwards-compatible references
 
 
 class Page(QWidget):
@@ -35,7 +42,7 @@ class AboutPage(Page):
     def __init__(self, state):
         super().__init__(state)
         title = QLabel("ℹ️ About UltraPilot")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #00FF7F; margin-bottom: 20px;")
+        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #065F46; margin-bottom: 20px;")
         self.layout.addWidget(title)
         text = QLabel(
             "ETS2 UltraPilot Pro Edition\n\n"
@@ -53,7 +60,7 @@ class PluginsPage(Page):
     def __init__(self, state):
         super().__init__(state)
         title = QLabel("🧩 Plugin Management")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #00FF7F; margin-bottom: 20px;")
+        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #065F46; margin-bottom: 20px;")
         self.layout.addWidget(title)
 
         self.plugin_list = QVBoxLayout()
@@ -78,7 +85,7 @@ class PluginsPage(Page):
 
     def add_plugin_row(self, name):
         row = QFrame()
-        row.setStyleSheet("background-color: #1A1A1A; border-radius: 5px;")
+        row.setStyleSheet("background-color: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 8px; padding: 4px;")
         l = QHBoxLayout(row)
 
         lbl = QLabel(name.capitalize())
@@ -113,22 +120,22 @@ class DashboardPage(Page):
     def __init__(self, state):
         super().__init__(state)
         title = QLabel("🚀 UltraPilot Telemetry")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #00FF7F; margin-bottom: 10px;")
+        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #065F46; margin-bottom: 10px;")
         self.layout.addWidget(title)
 
         container = QFrame()
-        container.setStyleSheet("background-color: #1A1A1A; border-radius: 10px; padding: 20px;")
+        container.setStyleSheet("background-color: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 12px; padding: 20px;")
         cl = QVBoxLayout(container)
 
         st = QLabel("CURRENT SPEED")
-        st.setStyleSheet("color: #888; font-size: 12px; font-weight: bold;")
+        st.setStyleSheet("color: #6B7280; font-size: 12px; font-weight: bold;")
         cl.addWidget(st)
         self.speed_val = QLabel("0 km/h")
-        self.speed_val.setStyleSheet("font-size: 48px; font-weight: bold; color: #FFFFFF;")
+        self.speed_val.setStyleSheet("font-size: 48px; font-weight: bold; color: #111827;")
         cl.addWidget(self.speed_val)
 
         self.state_val = QLabel("SYSTEM: IDLE")
-        self.state_val.setStyleSheet("color: #00FF7F; font-size: 16px; font-weight: bold;")
+        self.state_val.setStyleSheet("color: #10B981; font-size: 16px; font-weight: bold;")
         cl.addWidget(self.state_val)
 
         self.layout.addWidget(container)
@@ -136,15 +143,15 @@ class DashboardPage(Page):
         # Live telemetry grid (gear / rpm / fuel / limit / position / nav).
         self.metrics = {}
         grid_frame = QFrame()
-        grid_frame.setStyleSheet("background-color: #1A1A1A; border-radius: 10px; padding: 15px;")
+        grid_frame.setStyleSheet("background-color: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 12px; padding: 15px;")
         grid = QHBoxLayout(grid_frame)
         for key, label in [("gear", "GEAR"), ("rpm", "RPM"), ("fuel", "FUEL"),
                            ("limit", "LIMIT"), ("nav", "NAV")]:
             col = QVBoxLayout()
             cap = QLabel(label)
-            cap.setStyleSheet("color: #888; font-size: 11px; font-weight: bold;")
+            cap.setStyleSheet("color: #6B7280; font-size: 11px; font-weight: bold;")
             val = QLabel("—")
-            val.setStyleSheet("color: #FFFFFF; font-size: 20px; font-weight: bold;")
+            val.setStyleSheet("color: #111827; font-size: 20px; font-weight: bold;")
             col.addWidget(cap)
             col.addWidget(val)
             grid.addLayout(col)
@@ -152,7 +159,7 @@ class DashboardPage(Page):
         self.layout.addWidget(grid_frame)
 
         self.conn_val = QLabel("● Waiting for game telemetry…")
-        self.conn_val.setStyleSheet("color: #8E8E93; font-size: 12px; margin-top: 6px;")
+        self.conn_val.setStyleSheet("color: #9CA3AF; font-size: 12px; margin-top: 6px;")
         self.layout.addWidget(self.conn_val)
 
         self.layout.addStretch()
@@ -240,7 +247,7 @@ class UltraPilotApp(QMainWindow):
         self.start_btn = QPushButton("ENABLE AUTOPILOT")
         self.start_btn.clicked.connect(self.toggle_autopilot)
         self.statusBar().addWidget(self.start_btn)
-        self.statusBar().setStyleSheet("background-color: #1A1A1A; color: #888;")
+        self.statusBar().setStyleSheet("background-color: #FFFFFF; color: #6B7280;")
         self._render_start_btn()
 
         self.timer = QTimer()
@@ -251,10 +258,10 @@ class UltraPilotApp(QMainWindow):
         active = self.state.get("autopilot_active", False)
         if active:
             self.start_btn.setText("DISABLE AUTOPILOT")
-            self.start_btn.setStyleSheet("background-color: #FF4444; color: #FFF; font-weight: bold;")
+            self.start_btn.setStyleSheet("background-color: #EF4444; color: #FFFFFF; font-weight: bold; padding: 8px 18px; border-radius: 8px;")
         else:
             self.start_btn.setText("ENABLE AUTOPILOT")
-            self.start_btn.setStyleSheet("background-color: #00FF7F; color: #000; font-weight: bold;")
+            self.start_btn.setStyleSheet("background-color: #10B981; color: #FFFFFF; font-weight: bold; padding: 8px 18px; border-radius: 8px;")
 
     def toggle_autopilot(self):
         current = self.state.get("autopilot_active", False)

@@ -51,7 +51,7 @@ def build_app():
     print("=== Step 1/3: freezing the application (cx_Freeze) ===")
     if not _ensure("cx_Freeze", "cx_Freeze"):
         return None
-    subprocess.run([sys.executable, "setup_msi.py", "build"], check=True)
+    subprocess.run([sys.executable, "freeze_app.py", "build"], check=True)
     builds = [b for b in glob.glob(os.path.join("build", "exe.win-amd64-*"))
               if os.path.exists(os.path.join(b, "UltraPilot.exe"))]
     if not builds:

@@ -123,6 +123,12 @@ class UltraPilotEngine:
         throttle = self.shared_state.get(CTL_THROTTLE, 0.0)
         brake = self.shared_state.get(CTL_BRAKE, 0.0)
 
+        # Live steering tuning from the Settings page: sensitivity + invert.
+        sens = self.shared_state.get("steering_sensitivity", 1.0) or 1.0
+        steering = max(-1.0, min(1.0, float(steering) * float(sens)))
+        if self.shared_state.get("steering_invert", False):
+            steering = -steering
+
         self.controller.set_steering(steering)
         self.controller.set_throttle(throttle)
         self.controller.set_brake(brake)

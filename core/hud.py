@@ -93,79 +93,68 @@ class UltraPilotHUD(QWidget):
         qp = QPainter(self)
         qp.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        accent = QColor(_STATE_COLORS.get(d["state"], "#00FFCC"))
+        accent = QColor(_STATE_COLORS.get(d["state"], "#10B981"))
+        TEXT = QColor("#111827")
+        MUTED = QColor("#6B7280")
 
-        # Panel background.
-        qp.setBrush(QColor(10, 10, 12, 200))
-        qp.setPen(QPen(accent, 2))
-        qp.drawRoundedRect(QRectF(1, 1, self.W - 2, self.H - 2), 10, 10)
+        # Clean white translucent card with a soft border.
+        qp.setBrush(QColor(255, 255, 255, 235))
+        qp.setPen(QPen(QColor(0, 0, 0, 25), 1))
+        qp.drawRoundedRect(QRectF(1, 1, self.W - 2, self.H - 2), 14, 14)
+        # Thin accent strip on the left edge.
+        qp.setPen(Qt.PenStyle.NoPen)
+        qp.setBrush(accent)
+        qp.drawRoundedRect(QRectF(1, 1, 6, self.H - 2), 3, 3)
 
-        # State title.
-        qp.setPen(accent)
-        qp.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-        qp.drawText(QRectF(14, 8, self.W - 28, 20), Qt.AlignmentFlag.AlignLeft,
-                    f"● {d['state']}")
+        # State (dot + name) top-left.
+        qp.setBrush(accent); qp.setPen(Qt.PenStyle.NoPen)
+        qp.drawEllipse(QRectF(20, 16, 9, 9))
+        qp.setPen(TEXT)
+        qp.setFont(QFont("Segoe UI Semibold", 11, QFont.Weight.DemiBold))
+        qp.drawText(QRectF(36, 11, self.W - 130, 20), Qt.AlignmentFlag.AlignVCenter, d["state"])
 
-        # Autopilot status (top right).
-        ap_color = QColor("#34C759") if d["active"] else QColor("#FF453A")
-        qp.setPen(ap_color)
-        qp.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-        qp.drawText(QRectF(14, 8, self.W - 28, 20), Qt.AlignmentFlag.AlignRight,
-                    "AUTOPILOT ON" if d["active"] else "AUTOPILOT OFF")
-
-        # Big speed readout.
+        # Autopilot pill top-right.
+        on = d["active"]
+        pill = QRectF(self.W - 104, 12, 86, 20)
+        qp.setBrush(QColor("#10B981") if on else QColor("#9CA3AF"))
+        qp.setPen(Qt.PenStyle.NoPen)
+        qp.drawRoundedRect(pill, 10, 10)
         qp.setPen(QColor("#FFFFFF"))
-        qp.setFont(QFont("Segoe UI", 38, QFont.Weight.Bold))
-        qp.drawText(QRectF(10, 28, 150, 56), Qt.AlignmentFlag.AlignLeft,
-                    f"{d['speed_kmh']:.0f}")
-        qp.setPen(QColor("#8E8E93"))
-        qp.setFont(QFont("Segoe UI", 9))
-        qp.drawText(QRectF(12, 80, 150, 16), Qt.AlignmentFlag.AlignLeft, "km/h")
+        qp.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        qp.drawText(pill, Qt.AlignmentFlag.AlignCenter, "AUTOPILOT" if on else "MANUAL")
 
-        # Gear box (right of speed).
-        qp.setPen(QPen(QColor("#444"), 1))
-        qp.setBrush(QColor(30, 30, 34, 220))
-        qp.drawRoundedRect(QRectF(150, 36, 50, 44), 6, 6)
-        qp.setPen(QColor("#FFD60A"))
-        qp.setFont(QFont("Segoe UI", 22, QFont.Weight.Bold))
-        qp.drawText(QRectF(150, 38, 50, 40), Qt.AlignmentFlag.AlignCenter,
+        # Big speed.
+        qp.setPen(TEXT)
+        qp.setFont(QFont("Segoe UI", 44, QFont.Weight.Bold))
+        qp.drawText(QRectF(18, 34, 160, 64), Qt.AlignmentFlag.AlignLeft, f"{d['speed_kmh']:.0f}")
+        qp.setPen(MUTED)
+        qp.setFont(QFont("Segoe UI", 10))
+        qp.drawText(QRectF(20, 96, 160, 18), Qt.AlignmentFlag.AlignLeft, "km/h")
+
+        # Gear badge (right).
+        qp.setBrush(QColor("#F3F4F6")); qp.setPen(QPen(QColor("#E5E7EB"), 1))
+        qp.drawRoundedRect(QRectF(self.W - 96, 44, 78, 52), 10, 10)
+        qp.setPen(accent)
+        qp.setFont(QFont("Segoe UI", 26, QFont.Weight.Bold))
+        qp.drawText(QRectF(self.W - 96, 46, 78, 48), Qt.AlignmentFlag.AlignCenter,
                     _gear_text(d["gear"]))
 
-        # Blinkers (flashing arrows, top-area right side).
-        if d["blinkerL"] and self._blink_phase:
-            qp.setPen(QColor("#34C759"))
-            qp.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
-            qp.drawText(QRectF(210, 36, 30, 44), Qt.AlignmentFlag.AlignCenter, "◀")
-        if d["blinkerR"] and self._blink_phase:
-            qp.setPen(QColor("#34C759"))
-            qp.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
-            qp.drawText(QRectF(255, 36, 30, 44), Qt.AlignmentFlag.AlignCenter, "▶")
-
-        # RPM bar.
-        rpm_frac = max(0.0, min(1.0, d["rpm"] / 2500.0))
-        bar = QRectF(14, 96, self.W - 28, 8)
-        qp.setPen(Qt.PenStyle.NoPen)
-        qp.setBrush(QColor(40, 40, 44))
-        qp.drawRoundedRect(bar, 4, 4)
-        rpm_color = QColor("#FF453A") if rpm_frac > 0.85 else accent
-        qp.setBrush(rpm_color)
-        qp.drawRoundedRect(QRectF(14, 96, (self.W - 28) * rpm_frac, 8), 4, 4)
-
-        # Info line (fuel | limit | target | nav).
-        parts = [f"⛽ {d['fuel']:.0f}L"]
+        # Bottom info line: limit • nav (clean, muted).
+        parts = []
         if d["limit_ms"] and d["limit_ms"] > 1:
-            parts.append(f"LIM {d['limit_ms'] * 3.6:.0f}")
+            parts.append(f"Limit {d['limit_ms'] * 3.6:.0f}")
         if d["acc_speed"] is not None:
             try:
-                parts.append(f"SET {float(d['acc_speed']):.0f}")
+                parts.append(f"Set {float(d['acc_speed']):.0f}")
             except (TypeError, ValueError):
                 pass
         if d["nav_active"] and d["nav_dist"] is not None:
-            parts.append(f"🧭 {float(d['nav_dist']) / 1000:.1f}km")
-        qp.setPen(QColor("#C8C8C8"))
-        qp.setFont(QFont("Consolas", 9))
-        qp.drawText(QRectF(14, 112, self.W - 28, 20), Qt.AlignmentFlag.AlignLeft,
-                    "   ".join(parts))
+            parts.append(f"Nav {float(d['nav_dist']) / 1000:.1f} km")
+        parts.append(f"Fuel {d['fuel']:.0f} L")
+        qp.setPen(MUTED)
+        qp.setFont(QFont("Segoe UI", 9))
+        qp.drawText(QRectF(20, self.H - 26, self.W - 36, 18),
+                    Qt.AlignmentFlag.AlignLeft, "   •   ".join(parts))
 
     # --- Dragging -------------------------------------------------------------
     def mousePressEvent(self, event):

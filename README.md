@@ -42,16 +42,19 @@ pip install -r requirements.txt
 python main.py
 ```
 
-**Windows installer (.msi):**
+**Windows installer (single, branded):**
 
 ```bash
-pip install cx_Freeze
-python setup_msi.py bdist_msi
-# → dist/UltraPilot-<version>-win64.msi
+pip install cx_Freeze pyinstaller
+python build_installer.py
+# → dist/UltraPilot-Setup/UltraPilot_Installer.exe  (+ payload/)
 ```
 
-The MSI installs UltraPilot to `Program Files\UltraPilot`, creates Start-menu and desktop
-shortcuts, and copies the SCS telemetry DLL into the game.
+`build_installer.py` is the one and only installer build: it freezes the app
+(`freeze_app.py`) and wraps it into a branded **UltraPilot_Installer.exe** (light theme,
+logo, Slovak/English, live status). Running it copies the app to the chosen folder,
+installs the SCS plugin DLLs into the game, sets up ViGEmBus and creates shortcuts.
+Zip the `UltraPilot-Setup` folder to share it.
 
 ## Usage
 
