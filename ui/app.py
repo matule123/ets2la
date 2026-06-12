@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QWidget, QStackedWidget, QFrame,
 )
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QTimer, Qt
 
 from ui.settings_menu import SettingsMenu
 from ui.map_page import MapPage
@@ -209,7 +209,15 @@ class UltraPilotApp(QMainWindow):
         self.state = state
         self.setWindowTitle("ETS2 UltraPilot Pro Edition")
         self.setFixedSize(800, 500)
-        self.setStyleSheet(DARK_THEME)
+        from core.theme import stylesheet
+        self._theme = (state.get("ui_theme", "light") or "light")
+        self.setStyleSheet(stylesheet(self._theme))
+        # Window/taskbar icon.
+        from PyQt6.QtGui import QIcon
+        from core.paths import resource
+        _ico = resource("assets", "favicon.ico")
+        if os.path.exists(_ico):
+            self.setWindowIcon(QIcon(_ico))
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -221,6 +229,16 @@ class UltraPilotApp(QMainWindow):
         self.sidebar.setObjectName("Sidebar")
         self.sidebar.setFixedWidth(200)
         sb = QVBoxLayout(self.sidebar)
+        # Logo at the top of the sidebar.
+        from PyQt6.QtGui import QPixmap
+        from core.paths import resource as _res
+        logo = QLabel()
+        _pm = QPixmap(_res("assets", "logo.png"))
+        if not _pm.isNull():
+            logo.setPixmap(_pm.scaledToWidth(150, 1))  # 1 = SmoothTransformation
+        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sb.addWidget(logo)
+        sb.addSpacing(10)
         btn_dash = QPushButton("Dashboard")
         btn_map = QPushButton("Navigation")
         btn_plugins = QPushButton("Plugins")

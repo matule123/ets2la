@@ -86,20 +86,31 @@ def main():
 
     processes = {name: spawn(name) for name in targets}
 
+    def shutdown():
+        logging.info("Shutting down UltraPilot…")
+        for proc in processes.values():
+            if proc.is_alive():
+                proc.terminate()
+        for proc in processes.values():
+            proc.join(timeout=3)
+
     try:
-        # Supervise: if a process dies, restart it (the Engine is critical,
-        # UI/HUD are convenience — all are kept alive).
+        # Supervise. Closing the UI window quits the whole app (it does NOT get
+        # respawned — that caused the "won't stay closed / keeps reopening" bug).
+        # Engine/HUD are restarted only if they crash unexpectedly.
         while True:
             time.sleep(1.0)
-            for name, p in list(processes.items()):
+            if not processes["UI"].is_alive():
+                logging.info("UI closed — exiting UltraPilot.")
+                shutdown()
+                break
+            for name in ("Engine", "HUD"):
+                p = processes[name]
                 if not p.is_alive():
-                    logging.warning(f"Process {name} exited (code {p.exitcode}) — restarting.")
+                    logging.warning(f"Process {name} crashed (code {p.exitcode}) — restarting.")
                     processes[name] = spawn(name)
     except KeyboardInterrupt:
-        logging.info("Bootloader shutting down...")
-        for p in processes.values():
-            p.terminate()
-            p.join()
+        shutdown()
 
 
 if __name__ == "__main__":

@@ -96,6 +96,47 @@ class SettingsMenu(QWidget):
         steer_layout.addLayout(sens_layout)
 
         layout.addWidget(steer_frame)
+
+        # --- Appearance Section (theme + language) ---
+        from PyQt6.QtWidgets import QComboBox, QPushButton
+        from core.i18n import LANGUAGES, coverage
+        app_frame = QFrame()
+        app_frame.setStyleSheet("background-color: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 12px; padding: 12px;")
+        app_layout = QVBoxLayout(app_frame)
+        app_title = QLabel("Appearance")
+        app_title.setStyleSheet("font-size: 18px; font-weight: bold; color: #0F766E;")
+        app_layout.addWidget(app_title)
+
+        theme_row = QHBoxLayout()
+        theme_row.addWidget(QLabel("Theme:"))
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(["Light", "Dark", "System"])
+        cur = (self.state.get("ui_theme", "light") or "light").capitalize()
+        self.theme_combo.setCurrentText(cur)
+        self.theme_combo.currentTextChanged.connect(self.update_theme)
+        theme_row.addWidget(self.theme_combo)
+        theme_row.addStretch()
+        app_layout.addLayout(theme_row)
+
+        lang_row = QHBoxLayout()
+        lang_row.addWidget(QLabel("Language:"))
+        self.lang_combo = QComboBox()
+        self.lang_combo.addItems(LANGUAGES.keys())
+        self.lang_combo.setCurrentText(self.state.get("ui_language", "Slovenčina") or "Slovenčina")
+        self.lang_combo.currentTextChanged.connect(self.update_language)
+        lang_row.addWidget(self.lang_combo)
+        lang_row.addStretch()
+        app_layout.addLayout(lang_row)
+
+        self.cov_label = QLabel("")
+        self.cov_label.setStyleSheet("color: #6B7280; font-size: 12px;")
+        app_layout.addWidget(self.cov_label)
+
+        ets_btn = QPushButton("🌐 Open ETS2LA web app")
+        ets_btn.clicked.connect(self._open_ets2la)
+        app_layout.addWidget(ets_btn)
+
+        layout.addWidget(app_frame)
         layout.addStretch()
         self.setLayout(layout)
 
@@ -105,6 +146,19 @@ class SettingsMenu(QWidget):
         self.update_obey_limit(self.limit_toggle.isChecked())
         self.update_invert(self.invert_toggle.isChecked())
         self.update_sensitivity(init_sens)
+        self.update_language(self.lang_combo.currentText())
+
+    def update_theme(self, name):
+        self.state.set("ui_theme", name.lower())
+
+    def update_language(self, lang):
+        from core.i18n import coverage
+        self.state.set("ui_language", lang)
+        self.cov_label.setText(f"{lang} — {coverage(lang)}% translated")
+
+    def _open_ets2la(self):
+        import webbrowser
+        webbrowser.open("https://app.ets2la.com/onboarding")
 
     def update_acc_speed(self, val):
         self.speed_label.setText(f"Target Speed: {val} km/h")
