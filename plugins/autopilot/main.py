@@ -90,8 +90,13 @@ class Plugin(BasePlugin):
         nav_active = bool(self.sdk.shared_state.get("nav_active", False))
         if nav_active:
             nav_steering = float(self.sdk.shared_state.get("nav_steering", 0.0) or 0.0)
-            self._last_steering = (0.4 * nav_steering) + (0.6 * self._last_steering)
-            steering_val = float(np.clip(self._last_steering, -1.0, 1.0))
+            # Heavier low-pass + per-tick rate limit so the wheel never snaps
+            # (this is what made it lurch violently into corners).
+            target = (0.18 * nav_steering) + (0.82 * self._last_steering)
+            max_step = 0.05  # max steering change per tick
+            delta = float(np.clip(target - self._last_steering, -max_step, max_step))
+            self._last_steering = float(np.clip(self._last_steering + delta, -1.0, 1.0))
+            steering_val = self._last_steering
         else:
             # Fallback: vision-based lane centering + navigation arrow direction.
             nav_direction = self.sdk.shared_state.get("nav_direction", 0) or 0

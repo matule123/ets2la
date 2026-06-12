@@ -1,90 +1,78 @@
-from PyQt6.QtWidgets import QApplication, QWidget
-from PyQt6.QtGui import QPainter, QColor, QFont, QPen
-from PyQt6.QtCore import Qt, QTimer, QRectF
 import sys
+import math
+from PyQt6.QtWidgets import QApplication, QWidget
+from PyQt6.QtGui import QPainter, QColor, QFont, QPen, QPolygonF, QBrush
+from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
 
-# State -> accent colour for the HUD.
 _STATE_COLORS = {
-    "EMERGENCY": "#FF3B30",
-    "AVOID_OBSTACLE": "#FF9500",
-    "OVERTAKING": "#FFCC00",
-    "PAY_TOLL": "#FFD60A",
-    "FOLLOW_LANE": "#00FFCC",
-    "CRUISE": "#34C759",
-    "IDLE": "#8E8E93",
+    "EMERGENCY": "#EF4444", "AVOID_OBSTACLE": "#F59E0B", "OVERTAKING": "#F59E0B",
+    "PAY_TOLL": "#EAB308", "FOLLOW_LANE": "#10B981", "CRUISE": "#10B981",
+    "IDLE": "#9CA3AF",
+}
+_VEH_COLORS = {  # surrounding vehicle colours by type
+    "car": "#3B82F6", "van": "#8B5CF6", "bus": "#F59E0B", "truck": "#EF4444",
 }
 
 
-def _gear_text(gear: int) -> str:
-    if gear is None:
+def _gear_text(gear):
+    if not gear:
         return "N"
     if gear > 0:
         return str(int(gear))
-    if gear < 0:
-        return f"R{abs(int(gear))}" if gear < -1 else "R"
-    return "N"
+    return "R"
 
 
 class UltraPilotHUD(QWidget):
-    """Transparent, always-on-top, custom-painted HUD overlay for ETS2."""
+    """Animated driving-view HUD: ego truck, surrounding traffic, route, lights."""
 
-    W, H = 300, 150
+    W, H = 340, 460
+    VIEW_M = 75.0          # metres shown ahead in the driving view
 
     def __init__(self, shared_state):
         super().__init__()
         self.shared_state = shared_state
-        self._blink_phase = True  # for flashing blinker arrows
+        self._blink = True
         self.init_ui()
 
     def init_ui(self):
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.Tool
-        )
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint |
+                            Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.resize(self.W, self.H)
-        self.move_to_corner()
-
-        self.timer = QTimer()
-        self.timer.timeout.connect(self._tick)
-        self.timer.start(100)  # 10 FPS
-
-    def move_to_corner(self):
         screen = QApplication.primaryScreen().geometry()
         self.move(screen.width() - self.W - 20, 40)
+        self.timer = QTimer()
+        self.timer.timeout.connect(self._tick)
+        self.timer.start(80)   # ~12 fps animation
 
     def _tick(self):
-        self._blink_phase = not self._blink_phase
+        self._blink = not self._blink
         self.update()
 
-    # --- Data helpers ---------------------------------------------------------
+    # --- Data -----------------------------------------------------------------
     def _read(self):
         s = self.shared_state
         state = s.get("system_state", "IDLE")
         state = state.name if hasattr(state, "name") else str(state)
-
         speed = s.get("speed", 0) or 0
         try:
             speed = float(speed)
         except (TypeError, ValueError):
             speed = 0.0
-        speed_kmh = speed * 3.6 if abs(speed) < 200 else speed
-
         truck = (s.get("telemetry", {}) or {}).get("truck", {}) or {}
         return {
             "state": state,
-            "speed_kmh": abs(speed_kmh),
+            "speed_kmh": abs(speed) * 3.6 if abs(speed) < 200 else abs(speed),
             "gear": truck.get("gear", 0),
-            "rpm": truck.get("engineRpm", 0.0) or 0.0,
-            "fuel": truck.get("fuel", 0.0) or 0.0,
-            "limit_ms": truck.get("speedLimit", 0.0) or 0.0,
-            "blinkerL": bool(truck.get("blinkerLeft", False)),
-            "blinkerR": bool(truck.get("blinkerRight", False)),
             "active": bool(s.get("autopilot_active", False)),
-            "nav_active": bool(s.get("nav_active", False)),
-            "nav_dist": s.get("distance_to_dest"),
-            "acc_speed": s.get("tags.acc.acc_speed"),
+            "throttle": float(s.get("ctl_throttle", 0.0) or 0.0),
+            "brake": float(s.get("ctl_brake", 0.0) or 0.0),
+            "pos": s.get("truck_world_pos"),
+            "heading": s.get("truck_heading", 0.0) or 0.0,
+            "traffic": s.get("traffic", []) or [],
+            "light": s.get("traffic_light"),
+            "nav_path": s.get("nav_path", []) or [],
+            "limit_ms": truck.get("speedLimit", 0.0) or 0.0,
         }
 
     # --- Painting -------------------------------------------------------------
@@ -92,69 +80,167 @@ class UltraPilotHUD(QWidget):
         d = self._read()
         qp = QPainter(self)
         qp.setRenderHint(QPainter.RenderHint.Antialiasing)
-
         accent = QColor(_STATE_COLORS.get(d["state"], "#10B981"))
-        TEXT = QColor("#111827")
-        MUTED = QColor("#6B7280")
 
-        # Clean white translucent card with a soft border.
-        qp.setBrush(QColor(255, 255, 255, 235))
-        qp.setPen(QPen(QColor(0, 0, 0, 25), 1))
-        qp.drawRoundedRect(QRectF(1, 1, self.W - 2, self.H - 2), 14, 14)
-        # Thin accent strip on the left edge.
-        qp.setPen(Qt.PenStyle.NoPen)
-        qp.setBrush(accent)
-        qp.drawRoundedRect(QRectF(1, 1, 6, self.H - 2), 3, 3)
+        # Card.
+        qp.setBrush(QColor(255, 255, 255, 238))
+        qp.setPen(QPen(QColor(0, 0, 0, 28), 1))
+        qp.drawRoundedRect(QRectF(1, 1, self.W - 2, self.H - 2), 16, 16)
 
-        # State (dot + name) top-left.
-        qp.setBrush(accent); qp.setPen(Qt.PenStyle.NoPen)
-        qp.drawEllipse(QRectF(20, 16, 9, 9))
-        qp.setPen(TEXT)
-        qp.setFont(QFont("Segoe UI Semibold", 11, QFont.Weight.DemiBold))
-        qp.drawText(QRectF(36, 11, self.W - 130, 20), Qt.AlignmentFlag.AlignVCenter, d["state"])
+        # ---- Top bar: speed + autopilot pill ----
+        qp.setPen(QColor("#111827"))
+        qp.setFont(QFont("Segoe UI", 40, QFont.Weight.Bold))
+        qp.drawText(QRectF(18, 12, 150, 56), Qt.AlignmentFlag.AlignLeft, f"{d['speed_kmh']:.0f}")
+        qp.setPen(QColor("#6B7280"))
+        qp.setFont(QFont("Segoe UI", 10))
+        qp.drawText(QRectF(20, 64, 80, 16), Qt.AlignmentFlag.AlignLeft, "km/h")
 
-        # Autopilot pill top-right.
         on = d["active"]
-        pill = QRectF(self.W - 104, 12, 86, 20)
+        pill = QRectF(self.W - 116, 16, 96, 22)
         qp.setBrush(QColor("#10B981") if on else QColor("#9CA3AF"))
         qp.setPen(Qt.PenStyle.NoPen)
-        qp.drawRoundedRect(pill, 10, 10)
+        qp.drawRoundedRect(pill, 11, 11)
         qp.setPen(QColor("#FFFFFF"))
         qp.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         qp.drawText(pill, Qt.AlignmentFlag.AlignCenter, "AUTOPILOT" if on else "MANUAL")
 
-        # Big speed.
-        qp.setPen(TEXT)
-        qp.setFont(QFont("Segoe UI", 44, QFont.Weight.Bold))
-        qp.drawText(QRectF(18, 34, 160, 64), Qt.AlignmentFlag.AlignLeft, f"{d['speed_kmh']:.0f}")
-        qp.setPen(MUTED)
-        qp.setFont(QFont("Segoe UI", 10))
-        qp.drawText(QRectF(20, 96, 160, 18), Qt.AlignmentFlag.AlignLeft, "km/h")
-
-        # Gear badge (right).
-        qp.setBrush(QColor("#F3F4F6")); qp.setPen(QPen(QColor("#E5E7EB"), 1))
-        qp.drawRoundedRect(QRectF(self.W - 96, 44, 78, 52), 10, 10)
+        # gear + speed-limit chips
         qp.setPen(accent)
-        qp.setFont(QFont("Segoe UI", 26, QFont.Weight.Bold))
-        qp.drawText(QRectF(self.W - 96, 46, 78, 48), Qt.AlignmentFlag.AlignCenter,
-                    _gear_text(d["gear"]))
-
-        # Bottom info line: limit • nav (clean, muted).
-        parts = []
+        qp.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
+        qp.drawText(QRectF(118, 24, 40, 30), Qt.AlignmentFlag.AlignLeft, _gear_text(d["gear"]))
         if d["limit_ms"] and d["limit_ms"] > 1:
-            parts.append(f"Limit {d['limit_ms'] * 3.6:.0f}")
-        if d["acc_speed"] is not None:
-            try:
-                parts.append(f"Set {float(d['acc_speed']):.0f}")
-            except (TypeError, ValueError):
-                pass
-        if d["nav_active"] and d["nav_dist"] is not None:
-            parts.append(f"Nav {float(d['nav_dist']) / 1000:.1f} km")
-        parts.append(f"Fuel {d['fuel']:.0f} L")
-        qp.setPen(MUTED)
-        qp.setFont(QFont("Segoe UI", 9))
-        qp.drawText(QRectF(20, self.H - 26, self.W - 36, 18),
-                    Qt.AlignmentFlag.AlignLeft, "   •   ".join(parts))
+            self._draw_limit_sign(qp, self.W - 116, 44, d["limit_ms"] * 3.6)
+
+        # ---- Traffic light widget (top, under pill) ----
+        if d["light"]:
+            self._draw_traffic_light(qp, self.W - 60, 70, d["light"])
+
+        # ---- Driving view ----
+        view = QRectF(14, 96, self.W - 70, self.H - 112)
+        self._draw_driving_view(qp, view, d, accent)
+
+        # ---- Throttle / brake vertical bar (right side) ----
+        self._draw_pedal_bar(qp, QRectF(self.W - 46, 96, 30, self.H - 112), d)
+
+    # --- Sub-widgets ----------------------------------------------------------
+    def _draw_limit_sign(self, qp, x, y, kmh):
+        qp.setBrush(QColor("#FFFFFF")); qp.setPen(QPen(QColor("#EF4444"), 3))
+        qp.drawEllipse(QRectF(x, y, 34, 34))
+        qp.setPen(QColor("#111827")); qp.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        qp.drawText(QRectF(x, y, 34, 34), Qt.AlignmentFlag.AlignCenter, f"{kmh:.0f}")
+
+    def _draw_traffic_light(self, qp, x, y, light):
+        col = {"red": "#EF4444", "green": "#22C55E", "yellow": "#F59E0B"}.get(light.get("color"), "#9CA3AF")
+        qp.setBrush(QColor("#1F2937")); qp.setPen(Qt.PenStyle.NoPen)
+        qp.drawRoundedRect(QRectF(x, y, 22, 50), 5, 5)
+        for i, c in enumerate(("#EF4444", "#F59E0B", "#22C55E")):
+            active = (light.get("color") == {0: "red", 1: "yellow", 2: "green"}[i])
+            qp.setBrush(QColor(c) if active else QColor(60, 60, 64))
+            qp.drawEllipse(QRectF(x + 5, y + 4 + i * 15, 12, 12))
+        tl = light.get("time_left", 0) or 0
+        if tl > 0:
+            qp.setPen(QColor(col)); qp.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+            qp.drawText(QRectF(x - 8, y + 52, 38, 14), Qt.AlignmentFlag.AlignCenter, f"{tl:.0f}s")
+
+    def _to_view(self, wx, wz, tx, tz, h, view, scale):
+        """World -> driving-view coords (truck near bottom, forward = up)."""
+        dx, dz = wx - tx, wz - tz
+        fx, fz = -math.sin(h), -math.cos(h)         # forward
+        ahead = dx * fx + dz * fz
+        lateral = dx * math.cos(h) - dz * math.sin(h)
+        sx = view.center().x() + lateral * scale
+        sy = view.bottom() - 70 - ahead * scale     # truck sits 70px from bottom
+        return QPointF(sx, sy), ahead, lateral
+
+    def _draw_driving_view(self, qp, view, d, accent):
+        qp.setBrush(QColor("#EEF1F4")); qp.setPen(QPen(QColor("#E5E7EB"), 1))
+        qp.drawRoundedRect(view, 10, 10)
+        qp.save(); qp.setClipRect(view)
+
+        scale = (view.height() - 80) / self.VIEW_M
+        pos, h = d["pos"], d["heading"]
+
+        if pos:
+            tx, tz = pos
+            # route path (where to go)
+            path = d["nav_path"]
+            if len(path) >= 2:
+                qp.setPen(QPen(QColor(16, 185, 129, 180), 6))
+                poly = QPolygonF([self._to_view(px, pz, tx, tz, h, view, scale)[0]
+                                  for px, pz in path])
+                qp.drawPolyline(poly)
+
+            # surrounding vehicles
+            for v in d["traffic"]:
+                p, ahead, lateral = self._to_view(v["x"], v["z"], tx, tz, h, view, scale)
+                if ahead < -20 or ahead > self.VIEW_M or abs(lateral) > 45:
+                    continue
+                self._draw_vehicle(qp, p, v, h, scale)
+
+        # ego truck (always centre-bottom, pointing up)
+        ex, ey = view.center().x(), view.bottom() - 70
+        qp.setBrush(QColor(accent)); qp.setPen(QPen(QColor("#065F46"), 1))
+        qp.drawRoundedRect(QRectF(ex - 8, ey - 16, 16, 30), 4, 4)
+        qp.setBrush(QColor("#065F46"))
+        qp.drawPolygon(QPolygonF([QPointF(ex, ey - 22), QPointF(ex - 6, ey - 14),
+                                  QPointF(ex + 6, ey - 14)]))
+        qp.restore()
+
+    def _draw_vehicle(self, qp, center, v, ego_h, scale):
+        # All grey; the silhouette tells car / van / bus / truck apart.
+        ln = max(7, v["length"] * scale)
+        wd = max(5, v["width"] * scale)
+        rel = v["yaw"] - ego_h
+        body = QColor("#9CA3AF")
+        dark = QColor("#6B7280")
+        win = QColor("#D1D5DB")
+        qp.save()
+        qp.translate(center)
+        qp.rotate(-math.degrees(rel))
+        qp.setPen(QPen(QColor("#4B5563"), 1))
+        t = v["type"]
+        if t == "truck":
+            qp.setBrush(dark)
+            qp.drawRoundedRect(QRectF(-wd / 2, ln / 2 - wd, wd, wd), 2, 2)        # cab
+            qp.setBrush(body)
+            qp.drawRoundedRect(QRectF(-wd / 2, -ln / 2, wd, ln - wd - 1), 2, 2)   # trailer
+        elif t == "bus":
+            qp.setBrush(body)
+            qp.drawRoundedRect(QRectF(-wd / 2, -ln / 2, wd, ln), 3, 3)
+            qp.setBrush(win)
+            qp.drawRoundedRect(QRectF(-wd / 2 + 1.5, -ln / 2 + 2, wd - 3, ln - 4), 2, 2)
+        elif t == "van":
+            qp.setBrush(body)
+            qp.drawRoundedRect(QRectF(-wd / 2, -ln / 2, wd, ln), 3, 3)
+            qp.setBrush(dark)
+            qp.drawRoundedRect(QRectF(-wd / 2, ln / 2 - wd * 0.8, wd, wd * 0.8), 2, 2)  # cab
+        else:  # car
+            qp.setBrush(body)
+            qp.drawRoundedRect(QRectF(-wd / 2, -ln / 2, wd, ln), 4, 4)
+            qp.setBrush(dark)
+            qp.drawRoundedRect(QRectF(-wd / 2 + 1.5, -ln / 4, wd - 3, ln / 2), 2, 2)  # cabin
+        qp.restore()
+
+    def _draw_pedal_bar(self, qp, r, d):
+        mid = r.center().y()
+        qp.setBrush(QColor("#F3F4F6")); qp.setPen(QPen(QColor("#E5E7EB"), 1))
+        qp.drawRoundedRect(r, 6, 6)
+        qp.setPen(QPen(QColor("#9CA3AF"), 1))
+        qp.drawLine(QPointF(r.left(), mid), QPointF(r.right(), mid))
+        half = (mid - r.top())
+        # throttle up (green), brake down (red)
+        t = max(0.0, min(1.0, d["throttle"]))
+        b = max(0.0, min(1.0, d["brake"]))
+        qp.setPen(Qt.PenStyle.NoPen)
+        qp.setBrush(QColor("#22C55E"))
+        qp.drawRoundedRect(QRectF(r.left() + 4, mid - t * half, r.width() - 8, t * half), 3, 3)
+        qp.setBrush(QColor("#EF4444"))
+        qp.drawRoundedRect(QRectF(r.left() + 4, mid, r.width() - 8, b * half), 3, 3)
+        qp.setPen(QColor("#6B7280")); qp.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+        qp.drawText(QRectF(r.left() - 2, r.top() - 14, r.width() + 4, 12),
+                    Qt.AlignmentFlag.AlignCenter, "GAS")
+        qp.drawText(QRectF(r.left() - 2, r.bottom() + 2, r.width() + 4, 12),
+                    Qt.AlignmentFlag.AlignCenter, "BRK")
 
     # --- Dragging -------------------------------------------------------------
     def mousePressEvent(self, event):

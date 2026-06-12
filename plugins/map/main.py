@@ -122,5 +122,10 @@ class Plugin(BasePlugin):
             self.sdk.set("nav_active", True)
             self.sdk.set("distance_to_dest", self.active_route.distance_to_end(pos))
             self.tags.nav_steering = round(steer, 3)
+
+            # Publish the upcoming path points so the HUD can draw "where to go".
+            idx = self.active_route.closest_index(pos)
+            self.sdk.set("nav_path", [list(p) for p in self.active_route.points[idx:idx + 25]])
         else:
             self.sdk.set("nav_active", False)
+            self.sdk.set("nav_path", [])

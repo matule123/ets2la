@@ -80,6 +80,11 @@ class MapView(QWidget):
         truck = self.state.get("truck_world_pos")
         heading = self.state.get("truck_heading", 0.0) or 0.0
 
+        # Truck-centered map view when the road network is loaded.
+        if self.road_net is not None and self.road_net.loaded and truck:
+            self._paint_map(qp, w, h, truck, heading)
+            return
+
         pts = list(self.route_points)
         all_pts = pts + ([truck] if truck else [])
         if not all_pts:
@@ -120,6 +125,47 @@ class MapView(QWidget):
             qp.setBrush(QColor("#FFD60A"))
             qp.setPen(QPen(QColor("#FFD60A"), 1))
             qp.drawPolygon(QPolygonF([tip, left, right]))
+
+    def _paint_map(self, qp, w, h, truck, heading):
+        """Truck-centered road-network view (fixed zoom, ~radius metres around)."""
+        radius = 700.0                     # metres shown around the truck
+        scale = (min(w, h) - 20) / (2 * radius)
+        cx, cz = truck
+
+        def to_screen(p):
+            sx = w / 2 + (p[0] - cx) * scale
+            sy = h / 2 - (cz - p[1]) * scale   # flip Z so north is up
+            return QPointF(sx, sy)
+
+        # Nearby roads (grey).
+        qp.setPen(QPen(QColor("#B7BDC6"), 2))
+        for a, b in self.road_net.segments_near(truck, radius):
+            qp.drawLine(to_screen(a), to_screen(b))
+
+        # Road ahead from the map graph (blue) — stage-3 path generation.
+        try:
+            ahead = self.road_net.path_ahead(truck, heading)
+            if len(ahead) >= 2:
+                qp.setPen(QPen(QColor("#2563EB"), 4))
+                qp.drawPolyline(QPolygonF([to_screen(p) for p in ahead]))
+        except Exception:
+            pass
+
+        # Recorded/loaded route on top (green).
+        pts = list(self.route_points)
+        if len(pts) >= 2:
+            qp.setPen(QPen(QColor("#10B981"), 3))
+            qp.drawPolyline(QPolygonF([to_screen(p) for p in pts]))
+
+        # Truck arrow at centre.
+        c = to_screen(truck)
+        fx, fz = -math.sin(heading), -math.cos(heading)
+        tip = QPointF(c.x() + fx * 16, c.y() - fz * 16)
+        left = QPointF(c.x() - fz * 8 + fx * -7, c.y() - fx * 8 - fz * -7)
+        right = QPointF(c.x() + fz * 8 + fx * -7, c.y() + fx * 8 - fz * -7)
+        qp.setBrush(QColor("#F59E0B"))
+        qp.setPen(QPen(QColor("#B45309"), 1))
+        qp.drawPolygon(QPolygonF([tip, left, right]))
 
 
 class MapPage(QWidget):
@@ -192,7 +238,9 @@ class MapPage(QWidget):
         layout.addStretch()
 
         self._dl_worker = None
+        self._net_worker = None
         self._populate_maps()
+        self._load_road_net()   # if a map is already downloaded, load it for display
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.refresh)
@@ -235,9 +283,36 @@ class MapPage(QWidget):
         self.btn_dl.setEnabled(True)
         self.dl_bar.setVisible(False)
         self._dl_worker = None
-        self.dl_status.setText("✓ Map downloaded — map navigation data ready."
+        self.dl_status.setText("✓ Map downloaded — loading road network…"
                                if ok else "✗ Download failed (check internet).")
         self._populate_maps()
+        if ok:
+            self._load_road_net()
+
+    def _load_road_net(self):
+        """Load the downloaded road network in the background (for the map view)."""
+        if self.view.road_net is not None or self._net_worker is not None:
+            return
+        try:
+            from core.navigation import map_data
+            if not any(d["downloaded"] for d in map_data.list_datasets()):
+                return
+        except Exception:
+            return
+        self.dl_status.setText("Loading road network…")
+        self._net_worker = RoadNetLoadWorker()
+        self._net_worker.done.connect(self._on_net_loaded)
+        self._net_worker.start()
+
+    def _on_net_loaded(self, net):
+        self._net_worker = None
+        if net is not None:
+            self.view.road_net = net
+            self.dl_status.setText(f"✓ Map loaded ({len(net.segments)} road segments). "
+                                   "Roads around the truck are shown above.")
+            self.view.update()
+        else:
+            self.dl_status.setText("Map data present but could not be loaded.")
 
     # --- Actions --------------------------------------------------------------
     def start_record(self):

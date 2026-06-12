@@ -39,6 +39,9 @@ class UltraPilotEngine:
 
         self.telemetry = Telemetry()
         self.controller = Controller()
+        # Surrounding traffic + traffic lights from the ETS2LA game plugin (if installed).
+        from core.sdk.ets2la_data import ETS2LAData
+        self.ets2la = ETS2LAData()
         self.perception = Perception(self.shared_state)
         self.planner = UltraPilotPlanner()
 
@@ -164,6 +167,18 @@ class UltraPilotEngine:
                     "truck_heading": truck.get("rotation", 0.0),
                     "truck_speed_ms": truck.get("speed", 0.0),
                 })
+
+                # Surrounding traffic + the traffic light controlling us (ETS2LA plugin).
+                try:
+                    from core.sdk.ets2la_data import nearest_light_ahead
+                    traffic = self.ets2la.read_traffic()
+                    lights = self.ets2la.read_traffic_lights()
+                    pos = (truck.get("x", 0.0), truck.get("z", 0.0))
+                    self.shared_state.set("traffic", traffic)
+                    self.shared_state.set("traffic_light",
+                                          nearest_light_ahead(lights, pos, truck.get("rotation", 0.0)))
+                except Exception:
+                    pass
 
             # 2. Perception
             obstacle_data = self.perception.detect_obstacles()

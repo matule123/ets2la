@@ -19,11 +19,11 @@ from typing import List, Optional, Sequence, Tuple
 
 Point = Tuple[float, float]
 
-# Tuning (kept conservative; the engine/autopilot can further damp the output).
-ANGLE_GAIN = 1.6          # rad of heading error → steering (≈0.6 rad ⇒ full lock)
-CTE_GAIN = 0.06           # per-metre lateral correction
-MIN_LOOKAHEAD = 8.0       # metres
-MAX_LOOKAHEAD = 35.0
+# Tuning (anticipate curves early + gentle, so corrections stay small/smooth).
+ANGLE_GAIN = 1.05         # rad of heading error → steering
+CTE_GAIN = 0.045          # per-metre lateral correction
+MIN_LOOKAHEAD = 16.0      # metres — look well ahead so curves are anticipated
+MAX_LOOKAHEAD = 60.0
 ARRIVAL_RADIUS = 12.0     # metres from the last point counts as "arrived"
 
 
@@ -145,7 +145,9 @@ class Route:
             return 0.0
 
         idx = self.closest_index(pos)
-        lookahead = _clamp(MIN_LOOKAHEAD + abs(speed_ms) * 0.9, MIN_LOOKAHEAD, MAX_LOOKAHEAD)
+        # Look further ahead the faster we go, so curves are anticipated, not
+        # reacted to late (which caused the late + violent jerk into corners).
+        lookahead = _clamp(MIN_LOOKAHEAD + abs(speed_ms) * 1.6, MIN_LOOKAHEAD, MAX_LOOKAHEAD)
         tx, tz = self.lookahead_point(idx, pos, lookahead)
 
         # Desired direction (truck → lookahead point).

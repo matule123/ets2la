@@ -46,6 +46,8 @@ class RoadNetwork:
 
     def __init__(self):
         self.nodes = {}          # uid -> (x, z)
+        self.adj = {}            # uid -> [connected uid, ...]  (road graph)
+        self._ngrid = {}         # (cx,cz) -> [uid, ...]  (node spatial index)
         self.segments = []       # [((x1,z1),(x2,z2)), ...]
         self._grid = {}          # (cx,cz) -> [segment_index, ...]
         self.loaded = False
@@ -61,7 +63,10 @@ class RoadNetwork:
         try:
             raw_nodes = _loadf(nodes_path)
             for n in raw_nodes:
-                self.nodes[n["uid"]] = (float(n["x"]), float(n["z"]))
+                uid = n["uid"]
+                x, z = float(n["x"]), float(n["z"])
+                self.nodes[uid] = (x, z)
+                self._ngrid.setdefault(self._cell(x, z), []).append(uid)
         except Exception as e:
             logging.exception("road_network: failed to load nodes: %s", e)
             return False
@@ -69,10 +74,12 @@ class RoadNetwork:
         try:
             raw_roads = _loadf(roads_path)
             for r in raw_roads:
-                a = self.nodes.get(r.get("startNodeUid"))
-                b = self.nodes.get(r.get("endNodeUid"))
+                su, eu = r.get("startNodeUid"), r.get("endNodeUid")
+                a, b = self.nodes.get(su), self.nodes.get(eu)
                 if a and b:
                     self._add_segment(a, b)
+                    self.adj.setdefault(su, []).append(eu)
+                    self.adj.setdefault(eu, []).append(su)
         except Exception as e:
             logging.exception("road_network: failed to load roads: %s", e)
             return False
@@ -133,3 +140,63 @@ class RoadNetwork:
             return (qx - px) ** 2 + (qz - pz) ** 2
 
         return min(near, key=dist2_to_seg)
+
+    def _nearest_node(self, pos):
+        """uid of the node closest to ``pos`` (via the node grid)."""
+        px, pz = pos
+        cx0, cz0 = self._cell(px, pz)
+        best, best_d = None, float("inf")
+        for r in (0, 1, 2):  # expand search rings until something is found
+            for dx in range(-r, r + 1):
+                for dz in range(-r, r + 1):
+                    for uid in self._ngrid.get((cx0 + dx, cz0 + dz), ()):
+                        x, z = self.nodes[uid]
+                        d = (x - px) ** 2 + (z - pz) ** 2
+                        if d < best_d:
+                            best_d, best = d, uid
+            if best is not None:
+                break
+        return best
+
+    def path_ahead(self, pos, heading, length=260.0, max_steps=80):
+        """
+        Greedily follow the road graph forward from ``pos`` in the heading
+        direction, returning a polyline ``[(x, z), ...]`` of the road ahead.
+
+        Stage-3 localization + path generation: picks at each node the neighbour
+        best aligned with the current travel direction.  Geometry is node-to-node
+        (straight) for now — smooth lane geometry is a later stage.
+        """
+        if not self.loaded or not pos:
+            return []
+        cur = self._nearest_node(pos)
+        if cur is None:
+            return []
+        dirx, dirz = -math.sin(heading), -math.cos(heading)
+        path = [self.nodes[cur]]
+        visited = {cur}
+        total = 0.0
+        while total < length and len(path) < max_steps:
+            cx, cz = self.nodes[cur]
+            best, best_dot = None, 0.25  # require a forward-ish continuation
+            for nb in self.adj.get(cur, ()):
+                if nb in visited or nb not in self.nodes:
+                    continue
+                nx, nz = self.nodes[nb]
+                vx, vz = nx - cx, nz - cz
+                L = math.hypot(vx, vz)
+                if L < 1e-3:
+                    continue
+                dot = (vx * dirx + vz * dirz) / L
+                if dot > best_dot:
+                    best_dot, best = dot, nb
+            if best is None:
+                break
+            nx, nz = self.nodes[best]
+            seg = math.hypot(nx - cx, nz - cz)
+            path.append((nx, nz))
+            total += seg
+            dirx, dirz = (nx - cx) / seg, (nz - cz) / seg
+            visited.add(best)
+            cur = best
+        return path
