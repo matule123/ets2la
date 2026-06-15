@@ -63,7 +63,11 @@ def _ensure_vigembus():
 
 
 def main():
-    logging.basicConfig(level=logging.INFO)
+    try:
+        from core.logger import setup as _log_setup
+        _log_setup()
+    except Exception:
+        logging.basicConfig(level=logging.INFO)
     logging.info("UltraPilot Bootloader starting...")
     _ensure_game_dlls()
     _ensure_vigembus()

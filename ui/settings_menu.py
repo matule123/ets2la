@@ -132,10 +132,6 @@ class SettingsMenu(QWidget):
         self.cov_label.setStyleSheet("color: #6B7280; font-size: 12px;")
         app_layout.addWidget(self.cov_label)
 
-        ets_btn = QPushButton("🌐 Open ETS2LA web app")
-        ets_btn.clicked.connect(self._open_ets2la)
-        app_layout.addWidget(ets_btn)
-
         layout.addWidget(app_frame)
         layout.addStretch()
         self.setLayout(layout)
@@ -155,10 +151,6 @@ class SettingsMenu(QWidget):
         from core.i18n import coverage
         self.state.set("ui_language", lang)
         self.cov_label.setText(f"{lang} — {coverage(lang)}% translated")
-
-    def _open_ets2la(self):
-        import webbrowser
-        webbrowser.open("https://app.ets2la.com/onboarding")
 
     def update_acc_speed(self, val):
         self.speed_label.setText(f"Target Speed: {val} km/h")

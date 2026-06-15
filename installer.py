@@ -237,6 +237,7 @@ class InstallWorker(QThread):
             # --- shortcuts ---
             self.log.emit(self.t["s_short"])
             self._make_shortcuts(exe_path, mode)
+            _write_record(self.install_path, exe_path, mode)
             self.progress.emit(100)
 
             self.log.emit("")
@@ -509,8 +510,89 @@ class Installer(QWizard):
         super().done(result)
 
 
+RECORD_PATH = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+                           "UltraPilot", ".install.json")
+
+
+def _write_record(install_path, exe_path, mode):
+    import json
+    try:
+        os.makedirs(os.path.dirname(RECORD_PATH), exist_ok=True)
+        with open(RECORD_PATH, "w") as f:
+            json.dump({"install_path": install_path, "exe_path": exe_path, "mode": mode}, f)
+    except Exception:
+        pass
+
+
+def _read_record():
+    import json
+    try:
+        with open(RECORD_PATH) as f:
+            rec = json.load(f)
+        if rec.get("install_path") and os.path.isdir(rec["install_path"]):
+            return rec
+    except Exception:
+        pass
+    return None
+
+
+def _uninstall(rec):
+    """Remove the installed app folder and shortcuts."""
+    import shutil
+    try:
+        shutil.rmtree(rec["install_path"], ignore_errors=True)
+    except Exception:
+        pass
+    for folder in (os.path.join(os.environ.get("USERPROFILE", ""), "Desktop"),
+                   os.path.join(os.environ.get("APPDATA", ""),
+                                r"Microsoft\Windows\Start Menu\Programs")):
+        lnk = os.path.join(folder, "UltraPilot.lnk")
+        try:
+            if os.path.exists(lnk):
+                os.remove(lnk)
+        except Exception:
+            pass
+    try:
+        os.remove(RECORD_PATH)
+    except Exception:
+        pass
+
+
+def _maintenance_dialog(rec):
+    """Already installed -> offer Repair / Uninstall / Cancel. Returns action."""
+    from PyQt6.QtWidgets import QMessageBox
+    box = QMessageBox()
+    box.setWindowTitle("UltraPilot")
+    if os.path.exists(ICON_PATH):
+        box.setWindowIcon(QIcon(ICON_PATH))
+    box.setStyleSheet(DARK_QSS)
+    box.setText("UltraPilot je už nainštalovaný.\nČo chceš spraviť?")
+    repair = box.addButton("Opraviť", QMessageBox.ButtonRole.AcceptRole)
+    uninstall = box.addButton("Odinštalovať", QMessageBox.ButtonRole.DestructiveRole)
+    box.addButton("Zrušiť", QMessageBox.ButtonRole.RejectRole)
+    box.exec()
+    clicked = box.clickedButton()
+    if clicked == uninstall:
+        return "uninstall"
+    if clicked == repair:
+        return "repair"
+    return "cancel"
+
+
 def main():
     app = QApplication(sys.argv)
+    # If already installed, show the maintenance options first.
+    rec = _read_record()
+    if rec is not None:
+        action = _maintenance_dialog(rec)
+        if action == "uninstall":
+            _uninstall(rec)
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(None, "UltraPilot", "UltraPilot bol odinštalovaný.")
+            return
+        elif action == "cancel":
+            return
+        # "repair" falls through to a normal (re)install over the same folder.
     w = Installer()
     w.show()
     sys.exit(app.exec())

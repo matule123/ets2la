@@ -235,7 +235,7 @@ class UltraPilotApp(QMainWindow):
         logo = QLabel()
         _pm = QPixmap(_res("assets", "logo.png"))
         if not _pm.isNull():
-            logo.setPixmap(_pm.scaledToWidth(150, 1))  # 1 = SmoothTransformation
+            logo.setPixmap(_pm.scaledToWidth(150, Qt.TransformationMode.SmoothTransformation))
         logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sb.addWidget(logo)
         sb.addSpacing(10)

@@ -355,6 +355,16 @@ class MapPage(QWidget):
             if current in routes:
                 self.route_combo.setCurrentText(current)
 
+        # Publish the road ahead so the autopilot can steer by map (no recording).
+        net = self.view.road_net
+        truck = self.state.get("truck_world_pos")
+        if net is not None and net.loaded and truck:
+            try:
+                path = net.path_ahead(truck, self.state.get("truck_heading", 0.0) or 0.0)
+                self.state.set("map_path", [list(p) for p in path] if len(path) >= 2 else [])
+            except Exception:
+                self.state.set("map_path", [])
+
         if self.state.get("nav_active"):
             dist = self.state.get("distance_to_dest")
             if dist is not None:
