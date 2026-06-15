@@ -288,6 +288,12 @@ class UltraPilotApp(QMainWindow):
         self._render_start_btn()
 
     def update_ui(self):
+        # Live theme switching from the Settings page.
+        new_theme = self.state.get("ui_theme", "light") or "light"
+        if new_theme != getattr(self, "_theme", None):
+            self._theme = new_theme
+            from core.theme import stylesheet
+            self.setStyleSheet(stylesheet(new_theme))
         dash = self.pages.widget(0)
         if isinstance(dash, DashboardPage):
             dash.refresh()
