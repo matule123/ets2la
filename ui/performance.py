@@ -68,7 +68,7 @@ class PerformancePage(QWidget):
             root = me
         procs = [root] + root.children(recursive=True)
         seen, app_rss = set(), 0
-        rows = []
+        plugins = []
         for p in procs:
             try:
                 if p.pid in seen:
@@ -76,20 +76,31 @@ class PerformancePage(QWidget):
                 seen.add(p.pid)
                 rss = p.memory_info().rss
                 app_rss += rss
-                name = p.name()
-                # Plugin processes are named "Plugin-<folder>".
-                label = name
-                rows.append((label, rss, p))
+                # multiprocessing names plugin workers "Plugin-<folder>".
+                pname = p.name()
+                try:
+                    mp_name = next((a for a in p.cmdline() if a.startswith("Plugin-")), None)
+                except Exception:
+                    mp_name = None
+                label = mp_name or pname
+                if label.startswith("Plugin-"):
+                    plugins.append((label.replace("Plugin-", "").capitalize(), rss))
             except Exception:
                 continue
 
-        self.app_lbl.setText(f"UltraPilot RAM: {app_rss/1e6:.0f} MB  ({100*app_rss/vm.total:.1f}% of system)")
+        plug_rss = sum(r for _, r in plugins) or 1
+        self.app_lbl.setText(f"UltraPilot RAM: {app_rss/1e6:.0f} MB total · "
+                             f"plugins {plug_rss/1e6:.0f} MB")
 
         self._clear_rows()
-        for label, rss, p in sorted(rows, key=lambda r: -r[1])[:10]:
-            pct = 100 * rss / app_rss if app_rss else 0
+        if not plugins:
+            lbl = QLabel("No plugin processes running yet (start the app with the game).")
+            lbl.setStyleSheet("color:#9CA3AF;")
+            self.rows.addWidget(lbl)
+        for label, rss in sorted(plugins, key=lambda r: -r[1]):
+            pct = 100 * rss / plug_rss
             row = QHBoxLayout()
-            n = QLabel(label); n.setFixedWidth(180)
+            n = QLabel(label); n.setFixedWidth(150)
             bar = QProgressBar(); bar.setValue(int(pct))
             bar.setFormat(f"{rss/1e6:.0f} MB  ({pct:.0f}%)")
             row.addWidget(n); row.addWidget(bar)

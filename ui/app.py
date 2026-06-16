@@ -242,29 +242,25 @@ class UltraPilotApp(QMainWindow):
         btn_dash = QPushButton("Dashboard")
         btn_map = QPushButton("Navigation")
         btn_viz = QPushButton("Visualization")
-        btn_perf = QPushButton("Performance")
         btn_plugins = QPushButton("Plugins")
         btn_settings = QPushButton("Settings")
         btn_about = QPushButton("About")
         btn_dash.clicked.connect(lambda: self.pages.setCurrentIndex(0))
         btn_map.clicked.connect(lambda: self.pages.setCurrentIndex(1))
         btn_viz.clicked.connect(lambda: self.pages.setCurrentIndex(2))
-        btn_perf.clicked.connect(lambda: self.pages.setCurrentIndex(3))
-        btn_plugins.clicked.connect(lambda: self.pages.setCurrentIndex(4))
-        btn_settings.clicked.connect(lambda: self.pages.setCurrentIndex(5))
-        btn_about.clicked.connect(lambda: self.pages.setCurrentIndex(6))
-        for b in (btn_dash, btn_map, btn_viz, btn_perf, btn_plugins, btn_settings, btn_about):
+        btn_plugins.clicked.connect(lambda: self.pages.setCurrentIndex(3))
+        btn_settings.clicked.connect(lambda: self.pages.setCurrentIndex(4))
+        btn_about.clicked.connect(lambda: self.pages.setCurrentIndex(5))
+        for b in (btn_dash, btn_map, btn_viz, btn_plugins, btn_settings, btn_about):
             sb.addWidget(b)
         sb.addStretch()
         main_layout.addWidget(self.sidebar)
 
         from ui.visualization import VisualizationPage
-        from ui.performance import PerformancePage
         self.pages = QStackedWidget()
         self.pages.addWidget(DashboardPage(state))
         self.pages.addWidget(MapPage(state))
         self.pages.addWidget(VisualizationPage(state))
-        self.pages.addWidget(PerformancePage(state))
         self.pages.addWidget(PluginsPage(state))
         self.pages.addWidget(SettingsMenu(state))
         self.pages.addWidget(AboutPage(state))

@@ -133,6 +133,18 @@ class SettingsMenu(QWidget):
         app_layout.addWidget(self.cov_label)
 
         layout.addWidget(app_frame)
+
+        # --- Performance sub-card (plugin RAM usage) ---
+        try:
+            from ui.performance import PerformancePage
+            perf_frame = QFrame()
+            perf_frame.setStyleSheet("background-color: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 12px; padding: 6px;")
+            pf_lay = QVBoxLayout(perf_frame)
+            pf_lay.addWidget(PerformancePage(self.state))
+            layout.addWidget(perf_frame)
+        except Exception:
+            pass
+
         layout.addStretch()
         self.setLayout(layout)
 
