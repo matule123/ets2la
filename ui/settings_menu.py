@@ -134,6 +134,34 @@ class SettingsMenu(QWidget):
 
         layout.addWidget(app_frame)
 
+        # --- AR overlay (calibration) ---
+        ar_frame = QFrame()
+        ar_frame.setStyleSheet("background-color: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 12px; padding: 12px;")
+        ar_lay = QVBoxLayout(ar_frame)
+        ar_title = QLabel("AR overlay (experimental)")
+        ar_title.setStyleSheet("font-size: 18px; font-weight: bold; color: #0F766E;")
+        ar_lay.addWidget(ar_title)
+        self.ar_toggle = QCheckBox("Draw the route on the road over the game")
+        self.ar_toggle.setChecked(bool(self.state.get("ar_enabled", True)))
+        self.ar_toggle.toggled.connect(lambda v: self.state.set("ar_enabled", bool(v)))
+        ar_lay.addWidget(self.ar_toggle)
+
+        def ar_slider(label, key, lo, hi, default, scale=1.0):
+            row = QHBoxLayout()
+            cap = QLabel(label)
+            cur = self.state.get(key, default)
+            cur = float(cur) if cur is not None else default
+            sl = QSlider(Qt.Orientation.Horizontal)
+            sl.setRange(lo, hi); sl.setValue(int(cur * scale))
+            sl.valueChanged.connect(lambda v: self.state.set(key, v / scale))
+            row.addWidget(cap); row.addWidget(sl)
+            ar_lay.addLayout(row)
+
+        ar_slider("FOV", "ar_fov", 40, 100, 60.0)
+        ar_slider("Height", "ar_height", 5, 60, 2.5, scale=10.0)   # 0.5–6.0 m
+        ar_slider("Pitch", "ar_pitch", -20, 30, 8.0)
+        layout.addWidget(ar_frame)
+
         # --- Performance sub-card (plugin RAM usage) ---
         try:
             from ui.performance import PerformancePage

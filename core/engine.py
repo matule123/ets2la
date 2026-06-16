@@ -117,6 +117,20 @@ class UltraPilotEngine:
             return 0.0
         return float(max(0.0, min(1.0, (45.0 - nearest) / 37.0)))
 
+    def _light_brake(self, light):
+        """Brake (0..1) to stop at a red light ahead; 0 on green/yellow/none."""
+        if not light:
+            return 0.0
+        color = light.get("color")
+        dist = light.get("distance", 999.0)
+        if color != "red":
+            return 0.0          # green / yellow → keep going
+        if dist <= 9.0:
+            return 1.0          # at the line → hold stop
+        if dist >= 50.0:
+            return 0.0          # too far to act yet
+        return float(max(0.0, min(1.0, (50.0 - dist) / 41.0)))
+
     # --- Hotkey ---------------------------------------------------------------
     def _check_hotkey(self):
         """Toggle autopilot_active on a rising edge of the 'N' key (app-wide)."""
@@ -206,9 +220,12 @@ class UltraPilotEngine:
                     pos = (truck.get("x", 0.0), truck.get("z", 0.0))
                     hdg = truck.get("rotation", 0.0)
                     self.shared_state.set("traffic", traffic)
-                    self.shared_state.set("traffic_light", nearest_light_ahead(lights, pos, hdg))
+                    light = nearest_light_ahead(lights, pos, hdg)
+                    self.shared_state.set("traffic_light", light)
                     # Lead-vehicle following: brake for the nearest car ahead in our lane.
                     self.shared_state.set("traffic_brake", self._lead_brake(traffic, pos, hdg))
+                    # Stop on red / go on green.
+                    self.shared_state.set("light_brake", self._light_brake(light))
                 except Exception:
                     pass
 

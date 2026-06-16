@@ -63,7 +63,8 @@ class Plugin(BasePlugin):
         # Brake requests: collision plugin (CV) + traffic-following (real lead car).
         collision_brake = float(self.sdk.shared_state.get("collision_brake_request", 0.0) or 0.0)
         traffic_brake = float(self.sdk.shared_state.get("traffic_brake", 0.0) or 0.0)
-        collision_brake = max(collision_brake, traffic_brake)
+        light_brake = float(self.sdk.shared_state.get("light_brake", 0.0) or 0.0)
+        collision_brake = max(collision_brake, traffic_brake, light_brake)
 
         if system_state == "AVOID_OBSTACLE":
             self.sdk.controller.set_throttle(0)

@@ -92,11 +92,8 @@ def main():
         "Engine": run_engine,
         "UI": run_ui,
         "HUD": run_hud,
+        "AR": run_ar,   # draws nothing until enabled in Settings (ar_enabled)
     }
-    # AR overlay is experimental (transparent click-through can be unstable on
-    # some setups). Off by default; enable with env UP_AR=1 once it's calibrated.
-    if os.environ.get("UP_AR") == "1":
-        targets["AR"] = run_ar
 
     def spawn(name):
         p = mp.Process(target=targets[name], args=(shared_dict,), name=name)
@@ -124,7 +121,7 @@ def main():
                 logging.info("UI closed — exiting UltraPilot.")
                 shutdown()
                 break
-            for name in [n for n in ("Engine", "HUD", "AR") if n in processes]:
+            for name in [n for n in ("Engine", "HUD") if n in processes]:
                 p = processes[name]
                 if not p.is_alive():
                     logging.warning(f"Process {name} crashed (code {p.exitcode}) — restarting.")

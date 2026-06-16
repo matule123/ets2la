@@ -87,8 +87,11 @@ class VisualizationPage(QWidget):
         try:
             from ui.gpu_view import GpuView
             lay.addWidget(GpuView(state), stretch=1)
-        except Exception:
-            pass
+        except Exception as e:
+            msg = QLabel(f"3D view unavailable:\n{e}\n\n"
+                        "Install the GPU libraries:\npip install pyqtgraph PyOpenGL")
+            msg.setStyleSheet("color:#6B7280; font-size:13px;")
+            lay.addWidget(msg, stretch=1)
 
         self.island = _GlassIsland(state)
         lay.addWidget(self.island)

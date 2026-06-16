@@ -30,6 +30,28 @@ except Exception:
             return json.load(f)
 
 
+def _smooth(points, per_seg=6):
+    """Catmull-Rom spline through the polyline → smooth, drivable curve."""
+    if len(points) < 3:
+        return points
+    pts = [points[0]] + list(points) + [points[-1]]
+    out = []
+    for i in range(1, len(pts) - 2):
+        p0, p1, p2, p3 = pts[i - 1], pts[i], pts[i + 1], pts[i + 2]
+        for s in range(per_seg):
+            t = s / per_seg
+            t2, t3 = t * t, t * t * t
+            x = 0.5 * ((2 * p1[0]) + (-p0[0] + p2[0]) * t +
+                       (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 +
+                       (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3)
+            z = 0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * t +
+                       (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 +
+                       (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)
+            out.append((x, z))
+    out.append(points[-1])
+    return out
+
+
 def _find_json(data_dir: str, category: str):
     """Find a <category>*.json file anywhere inside the dataset folder."""
     for root, _dirs, files in os.walk(data_dir):
@@ -199,4 +221,4 @@ class RoadNetwork:
             dirx, dirz = (nx - cx) / seg, (nz - cz) / seg
             visited.add(best)
             cur = best
-        return path
+        return _smooth(path)

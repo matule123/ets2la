@@ -42,10 +42,12 @@ class AROverlay(QWidget):
         if not self.state.get("ar_enabled", True):
             return None
         w, h = self.width(), self.height()
-        fov = self._cfg("ar_fov", 60.0)                 # degrees
-        cam_h = self._cfg("ar_height", 2.5)             # camera height (m)
-        pitch = math.radians(self._cfg("ar_pitch", 8.0))
-        behind = self._cfg("ar_behind", 6.0)
+        # Defaults tuned for ETS2's standard interior/chase camera so the route
+        # roughly lands on the road out-of-the-box (fine-tune in Settings → AR).
+        fov = self._cfg("ar_fov", 75.0)                 # degrees (ETS2 default ~75)
+        cam_h = self._cfg("ar_height", 2.6)             # camera height (m)
+        pitch = math.radians(self._cfg("ar_pitch", 4.0))
+        behind = self._cfg("ar_behind", 5.0)
         d = ahead + behind
         if d < 1.5:
             return None
