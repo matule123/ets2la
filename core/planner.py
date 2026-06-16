@@ -41,8 +41,11 @@ class UltraPilotPlanner:
             self.set_blinker("off")
             return self.current_state, voice_alert
 
-        # 2. Toll Payment
-        if perception_data.get('toll_detected', False):
+        # 2. Toll Payment — DISABLED by default.
+        #    Vision-based toll detection (yellow pixels) was firing constantly and
+        #    made the truck stop every second ("Stopping to pay" flicker), which
+        #    ruined normal driving. Only act on it when explicitly enabled.
+        if perception_data.get('toll_detected', False) and perception_data.get('enable_toll', False):
             if self.current_state != SystemState.PAY_TOLL:
                 voice_alert = "Toll booth detected. Stopping to pay."
             self.set_state(SystemState.PAY_TOLL)

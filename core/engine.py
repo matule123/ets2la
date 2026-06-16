@@ -91,6 +91,32 @@ class UltraPilotEngine:
         self.voice.stop()
         logging.info("ETS2-UltraPilot Engine stopped.")
 
+    # --- Traffic following ----------------------------------------------------
+    def _lead_brake(self, traffic, pos, heading):
+        """Brake (0..1) for the closest vehicle ahead in our lane, else 0."""
+        import math
+        if not traffic or not pos:
+            return 0.0
+        px, pz = pos
+        sin_h, cos_h = math.sin(heading), math.cos(heading)
+        nearest = None
+        for v in traffic:
+            dx, dz = v["x"] - px, v["z"] - pz
+            ahead = dx * (-sin_h) + dz * (-cos_h)
+            lateral = dx * cos_h - dz * sin_h
+            if 2.0 < ahead < 60.0 and abs(lateral) < 2.5:   # in our lane, in front
+                if nearest is None or ahead < nearest:
+                    nearest = ahead
+        if nearest is None:
+            return 0.0
+        self.shared_state.set("lead_distance", nearest)
+        # Gentle far away, firm when close: full brake under ~8 m.
+        if nearest <= 8.0:
+            return 1.0
+        if nearest >= 45.0:
+            return 0.0
+        return float(max(0.0, min(1.0, (45.0 - nearest) / 37.0)))
+
     # --- Hotkey ---------------------------------------------------------------
     def _check_hotkey(self):
         """Toggle autopilot_active on a rising edge of the 'N' key (app-wide)."""
@@ -178,9 +204,11 @@ class UltraPilotEngine:
                     traffic = self.ets2la.read_traffic()
                     lights = self.ets2la.read_traffic_lights()
                     pos = (truck.get("x", 0.0), truck.get("z", 0.0))
+                    hdg = truck.get("rotation", 0.0)
                     self.shared_state.set("traffic", traffic)
-                    self.shared_state.set("traffic_light",
-                                          nearest_light_ahead(lights, pos, truck.get("rotation", 0.0)))
+                    self.shared_state.set("traffic_light", nearest_light_ahead(lights, pos, hdg))
+                    # Lead-vehicle following: brake for the nearest car ahead in our lane.
+                    self.shared_state.set("traffic_brake", self._lead_brake(traffic, pos, hdg))
                 except Exception:
                     pass
 

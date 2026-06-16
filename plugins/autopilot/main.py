@@ -60,8 +60,10 @@ class Plugin(BasePlugin):
                 self.sdk.controller.pay_toll()
             return
 
-        # Collision plugin's independent brake request (combined via max below).
+        # Brake requests: collision plugin (CV) + traffic-following (real lead car).
         collision_brake = float(self.sdk.shared_state.get("collision_brake_request", 0.0) or 0.0)
+        traffic_brake = float(self.sdk.shared_state.get("traffic_brake", 0.0) or 0.0)
+        collision_brake = max(collision_brake, traffic_brake)
 
         if system_state == "AVOID_OBSTACLE":
             self.sdk.controller.set_throttle(0)

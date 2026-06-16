@@ -17,6 +17,8 @@ pyttsx3>=2.90
 pypresence>=4.3          # Discord Rich Presence (plugin: discord)
 beautifulsoup4>=4.12     # HF model index scraping (core/ai_model)
 PyYAML>=6.0              # parse the ETS2LA map-data index (core/navigation/map_data)
+pyqtgraph>=0.13          # real GPU 3D visualization (ui/gpu_view)
+PyOpenGL>=3.1            # OpenGL backend for the 3D view
 
 # --- Windows helpers (installer / SCS plugin install) ---
 pywin32>=306; platform_system == "Windows"

@@ -25,8 +25,8 @@ def _gear_text(gear):
 class UltraPilotHUD(QWidget):
     """Animated driving-view HUD: ego truck, surrounding traffic, route, lights."""
 
-    W, H = 340, 460
-    VIEW_M = 75.0          # metres shown ahead in the driving view
+    W, H = 460, 300       # wider driving view, anchored bottom-centre
+    VIEW_M = 90.0          # metres shown ahead in the driving view
 
     def __init__(self, shared_state):
         super().__init__()
@@ -40,7 +40,8 @@ class UltraPilotHUD(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.resize(self.W, self.H)
         screen = QApplication.primaryScreen().geometry()
-        self.move(screen.width() - self.W - 20, 40)
+        # Bottom-centre of the screen (like the ETS2LA layout).
+        self.move((screen.width() - self.W) // 2, screen.height() - self.H - 60)
         self.timer = QTimer()
         self.timer.timeout.connect(self._tick)
         self.timer.start(80)   # ~12 fps animation
@@ -172,26 +173,45 @@ class UltraPilotHUD(QWidget):
             return ahead, lateral
 
         if pos:
-            # Lane markings (dashed white) receding into the distance.
-            for lat in (-6, -2, 2, 6):
-                pts = [self._project(a, lat, view) for a in range(2, 84, 4)]
+            # Convert the route to truck-frame (ahead, lateral) points once.
+            path = d["nav_path"]
+            al = []
+            for px, pz in path:
+                al.append(to_truck(px, pz))
+
+            if len(al) >= 2:
+                # Lane markings FOLLOW the road curve: offset the path sideways.
+                for off in (-6.0, -2.0, 2.0, 6.0):
+                    pts = []
+                    for i, (a, l) in enumerate(al):
+                        # perpendicular direction from the local path heading
+                        j = min(i + 1, len(al) - 1)
+                        da, dl = al[j][0] - a, al[j][1] - l
+                        n = math.hypot(da, dl) or 1.0
+                        px_, lateral_ = l + (-da / n) * off, a  # offset lateral, keep ahead
+                        p = self._project(a, l + (-da / n) * off, view)
+                        if p:
+                            pts.append(p)
+                    if len(pts) >= 2:
+                        qp.setPen(QPen(QColor(255, 255, 255, 55), 1, Qt.PenStyle.DashLine))
+                        qp.drawPolyline(QPolygonF(pts))
+
+                # Anticipated route (blue) painted along the curved road.
+                pts = [self._project(a, l, view) for a, l in al]
                 pts = [p for p in pts if p is not None]
                 if len(pts) >= 2:
-                    qp.setPen(QPen(QColor(255, 255, 255, 45), 1, Qt.PenStyle.DashLine))
+                    qp.setPen(QPen(QColor(59, 130, 246, 90), 13))
                     qp.drawPolyline(QPolygonF(pts))
-
-            # Anticipated route (blue) painted on the road.
-            path = d["nav_path"]
-            if len(path) >= 2:
-                pts = []
-                for px, pz in path:
-                    a, l = to_truck(px, pz)
-                    p = self._project(a, l, view)
-                    if p:
-                        pts.append(p)
-                if len(pts) >= 2:
-                    qp.setPen(QPen(QColor("#3B82F6"), 7))
+                    qp.setPen(QPen(QColor("#3B82F6"), 6))
                     qp.drawPolyline(QPolygonF(pts))
+            else:
+                # No route yet: straight guide lines.
+                for lat in (-6, -2, 2, 6):
+                    pts = [self._project(a, lat, view) for a in range(2, 90, 4)]
+                    pts = [p for p in pts if p is not None]
+                    if len(pts) >= 2:
+                        qp.setPen(QPen(QColor(255, 255, 255, 45), 1, Qt.PenStyle.DashLine))
+                        qp.drawPolyline(QPolygonF(pts))
 
             # Surrounding vehicles as grey 3D boxes (far → near for overlap).
             vehs = []

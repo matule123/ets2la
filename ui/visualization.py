@@ -82,6 +82,14 @@ class VisualizationPage(QWidget):
         title = QLabel("🛰️ Visualization")
         title.setStyleSheet("font-size: 24px; font-weight: bold; color: #065F46;")
         lay.addWidget(title)
+
+        # Real GPU 3D driving scene (degrades to a hint if libs are missing).
+        try:
+            from ui.gpu_view import GpuView
+            lay.addWidget(GpuView(state), stretch=1)
+        except Exception:
+            pass
+
         self.island = _GlassIsland(state)
         lay.addWidget(self.island)
         lay.addStretch()

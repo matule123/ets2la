@@ -21,6 +21,7 @@ build_exe_options = {
     "packages": [
         "os", "sys", "multiprocessing", "logging", "json", "math", "time",
         "numpy", "cv2", "mss", "PyQt6", "psutil", "requests", "yaml",
+        "pyqtgraph", "OpenGL",
         "core", "core.sdk", "core.ipc", "core.modules", "core.settings",
         "core.voice", "core.navigation",
         "sdk", "ui",

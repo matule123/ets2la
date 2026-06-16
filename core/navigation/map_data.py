@@ -146,12 +146,21 @@ def download(key: str, progress_cb=None) -> bool:
             return False
         total = int(r.headers.get("content-length", 0)) or 1
         done = 0
+        import time as _t
+        t0 = _t.time()
+        last = 0.0
         with open(zip_path, "wb") as f:
             for chunk in r.iter_content(1024 * 256):
                 f.write(chunk)
                 done += len(chunk)
-                report(min(0.95, done / total),
-                       f"Downloading {key}: {done/1e6:.0f} / {total/1e6:.0f} MB")
+                now = _t.time()
+                if now - last >= 0.2:          # throttle UI updates
+                    last = now
+                    el = max(0.1, now - t0)
+                    spd = done / el / 1e6      # MB/s
+                    pct = done / total * 100
+                    report(min(0.95, done / total),
+                           f"{key}: {pct:.0f}%  ·  {done/1e6:.0f} / {total/1e6:.0f} MB  ·  {spd:.1f} MB/s")
 
         report(0.96, "Unpacking…")
         if os.path.isdir(out_dir):
