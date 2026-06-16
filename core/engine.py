@@ -28,7 +28,11 @@ class UltraPilotEngine:
     """
 
     def __init__(self, shared_dict=None):
-        logging.basicConfig(level=logging.INFO)
+        try:
+            from core.logger import setup as _ls
+            _ls()
+        except Exception:
+            logging.basicConfig(level=logging.INFO)
         logging.info("Starting ETS2-UltraPilot Engine...")
 
         self.settings = SettingsManager()

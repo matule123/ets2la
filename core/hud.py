@@ -142,49 +142,90 @@ class UltraPilotHUD(QWidget):
             qp.setPen(QColor(col)); qp.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
             qp.drawText(QRectF(x - 8, y + 52, 38, 14), Qt.AlignmentFlag.AlignCenter, f"{tl:.0f}s")
 
-    def _to_view(self, wx, wz, tx, tz, h, view, scale):
-        """World -> driving-view coords (truck near bottom, forward = up)."""
-        dx, dz = wx - tx, wz - tz
-        fx, fz = -math.sin(h), -math.cos(h)         # forward
-        ahead = dx * fx + dz * fz
-        lateral = dx * math.cos(h) - dz * math.sin(h)
-        sx = view.center().x() + lateral * scale
-        sy = view.bottom() - 70 - ahead * scale     # truck sits 70px from bottom
-        return QPointF(sx, sy), ahead, lateral
+    def _project(self, ahead, lateral, view, height=0.0):
+        """Ground-plane perspective projection (chase-cam looking forward)."""
+        H = 6.0          # camera height above road
+        cam_back = 8.0   # camera distance behind the truck
+        f = view.height() * 1.15
+        horizon = view.top() + view.height() * 0.30
+        d = ahead + cam_back
+        if d < 1.6:
+            return None
+        s = f / d
+        return QPointF(view.center().x() + lateral * s, horizon + (H - height) * s)
 
     def _draw_driving_view(self, qp, view, d, accent):
-        qp.setBrush(QColor("#EEF1F4")); qp.setPen(QPen(QColor("#E5E7EB"), 1))
+        # Dark 3D scene (sky + ground), like the ETS2LA visualization.
+        qp.setBrush(QColor("#0F1318")); qp.setPen(Qt.PenStyle.NoPen)
         qp.drawRoundedRect(view, 10, 10)
         qp.save(); qp.setClipRect(view)
+        horizon_y = view.top() + view.height() * 0.30
+        qp.setBrush(QColor("#1A2027"))
+        qp.drawRect(QRectF(view.left(), horizon_y, view.width(), view.bottom() - horizon_y))
 
-        scale = (view.height() - 80) / self.VIEW_M
         pos, h = d["pos"], d["heading"]
 
+        def to_truck(wx, wz):
+            dx, dz = wx - pos[0], wz - pos[1]
+            ahead = dx * (-math.sin(h)) + dz * (-math.cos(h))
+            lateral = dx * math.cos(h) - dz * math.sin(h)
+            return ahead, lateral
+
         if pos:
-            tx, tz = pos
-            # route path (where to go)
+            # Lane markings (dashed white) receding into the distance.
+            for lat in (-6, -2, 2, 6):
+                pts = [self._project(a, lat, view) for a in range(2, 84, 4)]
+                pts = [p for p in pts if p is not None]
+                if len(pts) >= 2:
+                    qp.setPen(QPen(QColor(255, 255, 255, 45), 1, Qt.PenStyle.DashLine))
+                    qp.drawPolyline(QPolygonF(pts))
+
+            # Anticipated route (blue) painted on the road.
             path = d["nav_path"]
             if len(path) >= 2:
-                qp.setPen(QPen(QColor(16, 185, 129, 180), 6))
-                poly = QPolygonF([self._to_view(px, pz, tx, tz, h, view, scale)[0]
-                                  for px, pz in path])
-                qp.drawPolyline(poly)
+                pts = []
+                for px, pz in path:
+                    a, l = to_truck(px, pz)
+                    p = self._project(a, l, view)
+                    if p:
+                        pts.append(p)
+                if len(pts) >= 2:
+                    qp.setPen(QPen(QColor("#3B82F6"), 7))
+                    qp.drawPolyline(QPolygonF(pts))
 
-            # surrounding vehicles
+            # Surrounding vehicles as grey 3D boxes (far → near for overlap).
+            vehs = []
             for v in d["traffic"]:
-                p, ahead, lateral = self._to_view(v["x"], v["z"], tx, tz, h, view, scale)
-                if ahead < -20 or ahead > self.VIEW_M or abs(lateral) > 45:
-                    continue
-                self._draw_vehicle(qp, p, v, h, scale)
+                a, l = to_truck(v["x"], v["z"])
+                if -6 < a < 84 and abs(l) < 22:
+                    vehs.append((a, l, v))
+            vehs.sort(key=lambda t: -t[0])
+            for a, l, v in vehs:
+                self._draw_box(qp, view, a, l, v)
 
-        # ego truck (always centre-bottom, pointing up)
-        ex, ey = view.center().x(), view.bottom() - 70
+        # Ego truck marker at the bottom.
+        ex, ey = view.center().x(), view.bottom() - 24
         qp.setBrush(QColor(accent)); qp.setPen(QPen(QColor("#065F46"), 1))
-        qp.drawRoundedRect(QRectF(ex - 8, ey - 16, 16, 30), 4, 4)
-        qp.setBrush(QColor("#065F46"))
-        qp.drawPolygon(QPolygonF([QPointF(ex, ey - 22), QPointF(ex - 6, ey - 14),
-                                  QPointF(ex + 6, ey - 14)]))
+        qp.drawRoundedRect(QRectF(ex - 16, ey - 26, 32, 44), 6, 6)
         qp.restore()
+
+    def _draw_box(self, qp, view, ahead, lateral, v):
+        hgt = {"car": 1.5, "van": 2.3, "bus": 3.0, "truck": 3.2}.get(v["type"], 1.6)
+        hw = max(0.9, v["width"] / 2)
+        n, fr = ahead - v["length"] / 2, ahead + v["length"] / 2
+        c = [self._project(n, lateral - hw, view), self._project(n, lateral + hw, view),
+             self._project(fr, lateral - hw, view), self._project(fr, lateral + hw, view),
+             self._project(n, lateral - hw, view, hgt), self._project(n, lateral + hw, view, hgt),
+             self._project(fr, lateral - hw, view, hgt), self._project(fr, lateral + hw, view, hgt)]
+        if any(p is None for p in c):
+            return
+        bl, br, fl, fr_, blt, brt, flt, frt = c
+        qp.setPen(QPen(QColor("#3A4049"), 1))
+        qp.setBrush(QColor("#6B7280")); qp.drawPolygon(QPolygonF([bl, br, brt, blt]))   # back
+        qp.setBrush(QColor("#9CA3AF")); qp.drawPolygon(QPolygonF([bl, fl, flt, blt]))   # left
+        qp.drawPolygon(QPolygonF([br, fr_, frt, brt]))                                  # right
+        qp.setBrush(QColor("#7C828B")); qp.drawPolygon(QPolygonF([fl, fr_, frt, flt]))  # front
+        qp.setBrush(QColor("#B6BCC4")); qp.drawPolygon(QPolygonF([blt, brt, frt, flt])) # top
 
     def _draw_vehicle(self, qp, center, v, ego_h, scale):
         # All grey; the silhouette tells car / van / bus / truck apart.

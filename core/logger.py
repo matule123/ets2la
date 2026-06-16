@@ -37,11 +37,24 @@ class _ColorFormatter(logging.Formatter):
 
 
 def setup(level=logging.INFO):
-    """Install the colour formatter on the root logger (idempotent)."""
+    """Install the colour formatter on the root logger + a shared log file."""
     root = logging.getLogger()
     root.setLevel(level)
     for h in list(root.handlers):
         root.removeHandler(h)
+
+    # Coloured console output.
     handler = logging.StreamHandler()
     handler.setFormatter(_ColorFormatter())
     root.addHandler(handler)
+
+    # Plain log FILE so errors from every process are captured and can be shared.
+    try:
+        from core.paths import app_dir
+        path = os.path.join(app_dir(), "ultrapilot.log")
+        fh = logging.FileHandler(path, mode="a", encoding="utf-8")
+        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)-8s %(processName)s %(message)s"))
+        root.addHandler(fh)
+        root.info("Logging to %s", path)
+    except Exception:
+        pass
