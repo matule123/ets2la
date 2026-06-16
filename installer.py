@@ -35,26 +35,47 @@ def _res(*parts):
 ICON_PATH = _res("assets", "favicon.ico")
 LOGO_PATH = _res("assets", "logo.png")
 
-# --- Theme ------------------------------------------------------------------
+# --- Themes (light is the default) ------------------------------------------
+LIGHT_QSS = """
+QWizard, QWizardPage, QWidget { background-color: #FFFFFF; color: #1A1D21;
+    font-family: 'Segoe UI', sans-serif; font-size: 14px; }
+QLabel#Title { font-size: 26px; font-weight: 800; color: #065F46; }
+QLabel#Subtitle { font-size: 14px; color: #6B7280; }
+QLabel#Step { font-size: 16px; font-weight: 700; color: #065F46; }
+QPushButton { background-color: #F3F4F6; border: 1px solid #DfE3E8; border-radius: 8px;
+    padding: 8px 16px; color: #1A1D21; }
+QPushButton:hover { border-color: #10B981; color: #065F46; }
+QPushButton:disabled { color: #9CA3AF; border-color: #EEF1F4; }
+QComboBox, QLineEdit { background-color: #FFFFFF; border: 1px solid #DfE3E8;
+    border-radius: 8px; padding: 7px; }
+QComboBox QAbstractItemView { background-color: #FFFFFF; selection-background-color: #10B981; }
+QTextEdit { background-color: #0A0B0E; color: #C8F7D6; border: 1px solid #2C2F36;
+    border-radius: 8px; font-family: 'Consolas', monospace; font-size: 12px; }
+QCheckBox { spacing: 8px; }
+QProgressBar { background-color: #EEF1F4; border: 1px solid #DfE3E8; border-radius: 6px;
+    height: 18px; text-align: center; color: #1A1D21; }
+QProgressBar::chunk { background-color: #10B981; border-radius: 5px; }
+"""
+
 DARK_QSS = """
 QWizard, QWizardPage, QWidget { background-color: #0E0F13; color: #E6E6E6;
     font-family: 'Segoe UI', sans-serif; font-size: 14px; }
-QLabel#Title { font-size: 26px; font-weight: 800; color: #00FF7F; }
+QLabel#Title { font-size: 26px; font-weight: 800; color: #34D399; }
 QLabel#Subtitle { font-size: 14px; color: #9AA0A6; }
-QLabel#Step { font-size: 16px; font-weight: 700; color: #00FF7F; }
-QPushButton { background-color: #1B1D22; border: 1px solid #2C2F36; border-radius: 6px;
+QLabel#Step { font-size: 16px; font-weight: 700; color: #34D399; }
+QPushButton { background-color: #1B1D22; border: 1px solid #2C2F36; border-radius: 8px;
     padding: 8px 16px; color: #E6E6E6; }
-QPushButton:hover { border-color: #00FF7F; color: #FFFFFF; }
+QPushButton:hover { border-color: #10B981; color: #FFFFFF; }
 QPushButton:disabled { color: #5A5F66; border-color: #1B1D22; }
 QComboBox, QLineEdit { background-color: #16181D; border: 1px solid #2C2F36;
-    border-radius: 6px; padding: 7px; }
+    border-radius: 8px; padding: 7px; }
 QComboBox QAbstractItemView { background-color: #16181D; selection-background-color: #00663A; }
 QTextEdit { background-color: #0A0B0E; color: #C8F7D6; border: 1px solid #2C2F36;
-    border-radius: 6px; font-family: 'Consolas', monospace; font-size: 12px; }
+    border-radius: 8px; font-family: 'Consolas', monospace; font-size: 12px; }
 QCheckBox { spacing: 8px; }
 QProgressBar { background-color: #16181D; border: 1px solid #2C2F36; border-radius: 6px;
     height: 18px; text-align: center; color: #0E0F13; }
-QProgressBar::chunk { background-color: #00FF7F; border-radius: 5px; }
+QProgressBar::chunk { background-color: #10B981; border-radius: 5px; }
 """
 
 # --- Translations -----------------------------------------------------------
@@ -69,10 +90,27 @@ TR = {
         "lang": "Language / Jazyk:",
         "lic_t": "License Agreement",
         "lic_s": "Please accept the terms to continue.",
-        "lic_text": "UltraPilot is provided for educational and entertainment use with "
-                    "Euro Truck Simulator 2. Use it responsibly — keep your hands ready to "
-                    "take over. The authors are not liable for any in-game incidents.",
-        "lic_accept": "I accept the terms and conditions",
+        "lic_text": (
+            "ULTRAPILOT — END USER LICENSE AGREEMENT\n\n"
+            "1. PURPOSE. UltraPilot is a driver-assistance and automation tool intended "
+            "solely for educational and entertainment use within the video game Euro "
+            "Truck Simulator 2 / American Truck Simulator. It is not intended for, and "
+            "must not be used in, any real-world vehicle or safety-critical system.\n\n"
+            "2. RESPONSIBLE USE. You remain fully responsible for supervising the "
+            "software at all times. Keep your hands ready to take over and disable the "
+            "autopilot whenever necessary. The software may behave unpredictably.\n\n"
+            "3. NO WARRANTY. The software is provided \"AS IS\", without warranty of any "
+            "kind, express or implied, including but not limited to the warranties of "
+            "merchantability and fitness for a particular purpose.\n\n"
+            "4. LIMITATION OF LIABILITY. In no event shall the authors be liable for any "
+            "in-game incidents, data loss, or any direct, indirect or consequential "
+            "damages arising from the use of this software.\n\n"
+            "5. THIRD-PARTY COMPONENTS. This installer may set up third-party drivers "
+            "(e.g. ViGEmBus) and game SDK plugins, each subject to their own licenses.\n\n"
+            "By installing UltraPilot you acknowledge that you have read and agree to "
+            "these terms."
+        ),
+        "lic_accept": "I have read and accept the terms and conditions",
         "path_t": "Choose Install Location",
         "path_s": "Select where UltraPilot will be installed.",
         "path_lbl": "Installation folder:",
@@ -105,10 +143,27 @@ TR = {
         "lang": "Jazyk / Language:",
         "lic_t": "Licenčná dohoda",
         "lic_s": "Pre pokračovanie prosím prijmite podmienky.",
-        "lic_text": "UltraPilot je určený na vzdelávacie a zábavné použitie s hrou "
-                    "Euro Truck Simulator 2. Používaj zodpovedne — maj ruky pripravené prevziať "
-                    "riadenie. Autori nezodpovedajú za žiadne incidenty v hre.",
-        "lic_accept": "Súhlasím s podmienkami",
+        "lic_text": (
+            "ULTRAPILOT — LICENČNÁ ZMLUVA S KONCOVÝM POUŽÍVATEĽOM\n\n"
+            "1. ÚČEL. UltraPilot je nástroj na asistenciu a automatizáciu jazdy určený "
+            "výhradne na vzdelávacie a zábavné použitie v hre Euro Truck Simulator 2 / "
+            "American Truck Simulator. Nie je určený a nesmie byť použitý v žiadnom "
+            "skutočnom vozidle ani bezpečnostne kritickom systéme.\n\n"
+            "2. ZODPOVEDNÉ POUŽÍVANIE. Za dohľad nad softvérom nesieš plnú zodpovednosť "
+            "po celý čas. Maj ruky pripravené prevziať riadenie a autopilota kedykoľvek "
+            "vypni, ak je to potrebné. Softvér sa môže správať nepredvídateľne.\n\n"
+            "3. BEZ ZÁRUKY. Softvér je poskytovaný „TAK AKO JE\", bez akýchkoľvek záruk, "
+            "výslovných či implicitných, vrátane záruk predajnosti a vhodnosti na "
+            "konkrétny účel.\n\n"
+            "4. OBMEDZENIE ZODPOVEDNOSTI. Autori v žiadnom prípade nezodpovedajú za "
+            "žiadne incidenty v hre, stratu dát ani žiadne priame, nepriame či následné "
+            "škody vyplývajúce z používania tohto softvéru.\n\n"
+            "5. KOMPONENTY TRETÍCH STRÁN. Tento inštalátor môže nainštalovať ovládače "
+            "tretích strán (napr. ViGEmBus) a herné SDK pluginy s vlastnými licenciami.\n\n"
+            "Inštaláciou UltraPilot potvrdzuješ, že si si tieto podmienky prečítal a "
+            "súhlasíš s nimi."
+        ),
+        "lic_accept": "Prečítal som si podmienky a súhlasím s nimi",
         "path_t": "Vyber miesto inštalácie",
         "path_s": "Zvoľ, kam sa UltraPilot nainštaluje.",
         "path_lbl": "Inštalačný priečinok:",
@@ -130,7 +185,55 @@ TR = {
         "s_done": "Hotovo! UltraPilot bol úspešne nainštalovaný.",
         "s_err": "Niečo sa pokazilo: {0}",
     },
+    "Čeština": {
+        "win": "Instalace UltraPilot", "welcome_t": "Vítejte v UltraPilot",
+        "welcome_s": "Pokročilý autopilot pro Euro Truck Simulator 2.",
+        "welcome_d": "Průvodce nainstaluje UltraPilot, nastaví SDK pluginy ve hře a vytvoří zástupce.",
+        "lang": "Jazyk / Language:", "lic_t": "Licenční smlouva",
+        "lic_s": "Pro pokračování přijměte podmínky.",
+        "lic_accept": "Přečetl jsem si podmínky a souhlasím",
+        "path_t": "Vyber místo instalace", "path_s": "Zvol, kam se UltraPilot nainstaluje.",
+        "path_lbl": "Instalační složka:", "browse": "Procházet…",
+        "inst_t": "Instaluji UltraPilot", "inst_s": "Počkej, než se komponenty nastaví.",
+        "fin_t": "Instalace dokončena", "fin_s": "UltraPilot je připraven.",
+        "fin_launch": "Spustit UltraPilot", "install_btn": "Instalovat",
+    },
+    "Deutsch": {
+        "win": "UltraPilot Setup", "welcome_t": "Willkommen bei UltraPilot",
+        "welcome_s": "Der fortschrittliche Autopilot für Euro Truck Simulator 2.",
+        "welcome_d": "Dieser Assistent installiert UltraPilot, richtet die SDK-Plugins im Spiel ein und erstellt Verknüpfungen.",
+        "lang": "Sprache / Language:", "lic_t": "Lizenzvereinbarung",
+        "lic_s": "Bitte akzeptieren Sie die Bedingungen.",
+        "lic_accept": "Ich habe die Bedingungen gelesen und akzeptiere sie",
+        "path_t": "Installationsort wählen", "path_s": "Wählen Sie, wohin UltraPilot installiert wird.",
+        "path_lbl": "Installationsordner:", "browse": "Durchsuchen…",
+        "inst_t": "UltraPilot wird installiert", "inst_s": "Bitte warten…",
+        "fin_t": "Installation abgeschlossen", "fin_s": "UltraPilot ist bereit.",
+        "fin_launch": "UltraPilot jetzt starten", "install_btn": "Installieren",
+    },
+    "Polski": {
+        "win": "Instalator UltraPilot", "welcome_t": "Witaj w UltraPilot",
+        "welcome_s": "Zaawansowany autopilot do Euro Truck Simulator 2.",
+        "welcome_d": "Kreator zainstaluje UltraPilot, skonfiguruje wtyczki SDK w grze i utworzy skróty.",
+        "lang": "Język / Language:", "lic_t": "Umowa licencyjna",
+        "lic_s": "Zaakceptuj warunki, aby kontynuować.",
+        "lic_accept": "Przeczytałem i akceptuję warunki",
+        "path_t": "Wybierz lokalizację", "path_s": "Wybierz, gdzie zainstalować UltraPilot.",
+        "path_lbl": "Folder instalacji:", "browse": "Przeglądaj…",
+        "inst_t": "Instalowanie UltraPilot", "inst_s": "Proszę czekać…",
+        "fin_t": "Instalacja zakończona", "fin_s": "UltraPilot jest gotowy.",
+        "fin_launch": "Uruchom UltraPilot", "install_btn": "Instaluj",
+    },
 }
+
+# Translation coverage (% of English keys present).
+_EN_KEYS = set(TR["English"].keys())
+def tr_coverage(lang):
+    keys = set(TR.get(lang, {}).keys())
+    return round(100 * len(keys & _EN_KEYS) / len(_EN_KEYS)) if _EN_KEYS else 100
+
+def tr_get(lang, key):
+    return TR.get(lang, {}).get(key) or TR["English"].get(key, key)
 
 
 # --- Install worker ---------------------------------------------------------
@@ -142,7 +245,7 @@ class InstallWorker(QThread):
     def __init__(self, install_path: str, lang: str):
         super().__init__()
         self.install_path = install_path
-        self.t = TR[lang]
+        self.t = {**TR["English"], **TR.get(lang, {})}  # English fallback for missing keys
 
     # locate the app payload to install
     def _payload(self):
@@ -459,12 +562,20 @@ class Installer(QWizard):
         super().__init__()
         self.lang = "Slovenský"
         self.exe_path = ""
+        self.theme = "light"   # default white background
         self.setWizardStyle(QWizard.WizardStyle.ModernStyle)
         self.setOption(QWizard.WizardOption.NoBackButtonOnStartPage, True)
-        self.setStyleSheet(DARK_QSS)
+        self.apply_theme()
         if os.path.exists(ICON_PATH):
             self.setWindowIcon(QIcon(ICON_PATH))
         self.setFixedSize(640, 560)
+
+        # Sun / Moon theme toggle (bottom-left).
+        self.theme_btn = QPushButton("🌙", self)
+        self.theme_btn.setFixedSize(34, 28)
+        self.theme_btn.clicked.connect(self.toggle_theme)
+        self.theme_btn.move(14, 520)
+        self.theme_btn.setToolTip("Light / Dark")
 
         self.welcome = WelcomePage(self)
         self.license = LicensePage()
@@ -474,26 +585,38 @@ class Installer(QWizard):
         for p in (self.welcome, self.license, self.path_page, self.install_page, self.finish):
             self.addPage(p)
 
-        self.button(QWizard.WizardButton.CommitButton).setText(TR[self.lang]["install_btn"])
+        self.button(QWizard.WizardButton.CommitButton).setText(self.tr()["install_btn"])
         self.set_language(self.lang)
 
+    def apply_theme(self):
+        self.setStyleSheet(LIGHT_QSS if self.theme == "light" else DARK_QSS)
+
+    def toggle_theme(self):
+        self.theme = "dark" if self.theme == "light" else "light"
+        self.apply_theme()
+        if hasattr(self, "theme_btn"):
+            self.theme_btn.setText("☀️" if self.theme == "dark" else "🌙")
+
     def tr(self):
-        return TR[self.lang]
+        return {**TR["English"], **TR.get(self.lang, {})}
 
     def set_language(self, lang):
         self.lang = lang
-        t = TR[lang]
+        t = {**TR["English"], **TR.get(lang, {})}  # English fallback for missing keys
         self.setWindowTitle(t["win"])
         for p in (self.welcome, self.license, self.path_page, self.install_page, self.finish):
             p.retranslate(t)
-        self.setButtonText(QWizard.WizardButton.NextButton,
-                           {"English": "Next ›", "Slovenský": "Ďalej ›"}[lang])
-        self.setButtonText(QWizard.WizardButton.BackButton,
-                           {"English": "‹ Back", "Slovenský": "‹ Späť"}[lang])
-        self.setButtonText(QWizard.WizardButton.FinishButton,
-                           {"English": "Finish", "Slovenský": "Dokončiť"}[lang])
-        self.setButtonText(QWizard.WizardButton.CancelButton,
-                           {"English": "Cancel", "Slovenský": "Zrušiť"}[lang])
+        nav = {
+            "English": ("Next ›", "‹ Back", "Finish", "Cancel"),
+            "Slovenský": ("Ďalej ›", "‹ Späť", "Dokončiť", "Zrušiť"),
+            "Čeština": ("Další ›", "‹ Zpět", "Dokončit", "Zrušit"),
+            "Deutsch": ("Weiter ›", "‹ Zurück", "Fertig", "Abbrechen"),
+            "Polski": ("Dalej ›", "‹ Wstecz", "Zakończ", "Anuluj"),
+        }.get(lang, ("Next ›", "‹ Back", "Finish", "Cancel"))
+        self.setButtonText(QWizard.WizardButton.NextButton, nav[0])
+        self.setButtonText(QWizard.WizardButton.BackButton, nav[1])
+        self.setButtonText(QWizard.WizardButton.FinishButton, nav[2])
+        self.setButtonText(QWizard.WizardButton.CancelButton, nav[3])
 
     def done(self, result):
         # Launch the app if requested on the finish page.
