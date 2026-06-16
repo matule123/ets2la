@@ -39,6 +39,18 @@ def run_hud(shared_dict):
     _run_hud(SharedState(shared_dict))
 
 
+def run_ar(shared_dict):
+    """Process for the click-through AR overlay drawn over the game."""
+    logging.basicConfig(level=logging.INFO)
+    from PyQt6.QtWidgets import QApplication
+    from core.ar_overlay import AROverlay
+    from core.ipc.shared_state import SharedState
+    app = QApplication(sys.argv)
+    ov = AROverlay(SharedState(shared_dict))
+    ov.show()
+    sys.exit(app.exec())
+
+
 def _ensure_game_dlls():
     """Best-effort: install the SCS telemetry + controller DLLs into the game.
 
@@ -80,6 +92,7 @@ def main():
         "Engine": run_engine,
         "UI": run_ui,
         "HUD": run_hud,
+        "AR": run_ar,
     }
 
     def spawn(name):
@@ -108,7 +121,7 @@ def main():
                 logging.info("UI closed — exiting UltraPilot.")
                 shutdown()
                 break
-            for name in ("Engine", "HUD"):
+            for name in ("Engine", "HUD", "AR"):
                 p = processes[name]
                 if not p.is_alive():
                     logging.warning(f"Process {name} crashed (code {p.exitcode}) — restarting.")
