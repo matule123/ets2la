@@ -127,5 +127,17 @@ class Plugin(BasePlugin):
             idx = self.active_route.closest_index(pos)
             self.sdk.set("nav_path", [list(p) for p in self.active_route.points[idx:idx + 25]])
         else:
-            self.sdk.set("nav_active", False)
+            # No recorded route: drive by the downloaded MAP if a road path is
+            # available (published by the UI as map_path). This is automatic
+            # map-based driving — no recording needed.
+            map_path = self.sdk.get("map_path", []) or []
+            if len(map_path) >= 2:
+                route = Route([tuple(p) for p in map_path])
+                steer = route.steering(pos, heading, speed)
+                self.sdk.set("nav_steering", float(steer))
+                self.sdk.set("nav_active", True)
+                self.sdk.set("nav_path", [list(p) for p in map_path[:25]])
+                self.tags.nav_steering = round(steer, 3)
+            else:
+                self.sdk.set("nav_active", False)
             self.sdk.set("nav_path", [])

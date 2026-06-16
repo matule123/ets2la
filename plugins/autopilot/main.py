@@ -78,8 +78,9 @@ class Plugin(BasePlugin):
             self._apply_throttle(0.0 if brake > 0.01 else float(acc_throttle))
             self.sdk.controller.set_brake(brake)
         else:
-            # Fallback if ACC plugin is disabled / not running yet.
-            self._apply_throttle(0.0 if collision_brake > 0.01 else 0.1)
+            # Fallback if ACC plugin is disabled / not running yet: hold a gentle
+            # cruise so the truck keeps rolling (0.1 was too low — it stalled).
+            self._apply_throttle(0.0 if collision_brake > 0.01 else 0.35)
             self.sdk.controller.set_brake(collision_brake)
 
         # 4. Lateral control.
@@ -90,28 +91,32 @@ class Plugin(BasePlugin):
         nav_active = bool(self.sdk.shared_state.get("nav_active", False))
         if nav_active:
             nav_steering = float(self.sdk.shared_state.get("nav_steering", 0.0) or 0.0)
-            # Heavier low-pass + per-tick rate limit so the wheel never snaps
-            # (this is what made it lurch violently into corners).
+            # Heavier low-pass + per-tick rate limit so the wheel never snaps.
             target = (0.18 * nav_steering) + (0.82 * self._last_steering)
             max_step = 0.05  # max steering change per tick
             delta = float(np.clip(target - self._last_steering, -max_step, max_step))
             self._last_steering = float(np.clip(self._last_steering + delta, -1.0, 1.0))
             steering_val = self._last_steering
         else:
-            # Fallback: vision-based lane centering + navigation arrow direction.
+            # No reliable lateral source (no route, no lane detection).
+            # Decay smoothly toward straight instead of reacting to CV noise —
+            # that random jitter is what made the wheel twitch with no route.
             nav_direction = self.sdk.shared_state.get("nav_direction", 0) or 0
-            target_offset = nav_direction * 0.6 if abs(nav_direction) > 0.2 else 0.0
-
-            self.steering_pid.set_setpoint(target_offset)
-            steering_output = self.steering_pid.update(lane_offset, delta_time)
-
-            speed_damping = float(np.clip(1.0 - (speed_kmh / 120.0) * 0.3, 0.7, 1.0))
-            center_force = -lane_offset * 0.05
-            recovery_factor = 1.5 + (abs(lane_offset) * 0.5) if abs(lane_offset) > 0.4 else 1.0
-
-            steering_val = float(np.clip(
-                (steering_output * speed_damping) + center_force * recovery_factor, -1.0, 1.0))
-            self._last_steering = steering_val
+            have_lane = abs(lane_offset) > 0.02 or abs(nav_direction) > 0.05
+            if have_lane:
+                target_offset = nav_direction * 0.6 if abs(nav_direction) > 0.2 else 0.0
+                self.steering_pid.set_setpoint(target_offset)
+                steering_output = self.steering_pid.update(lane_offset, delta_time)
+                speed_damping = float(np.clip(1.0 - (speed_kmh / 120.0) * 0.3, 0.7, 1.0))
+                center_force = -lane_offset * 0.05
+                recovery = 1.5 + (abs(lane_offset) * 0.5) if abs(lane_offset) > 0.4 else 1.0
+                raw = float(np.clip((steering_output * speed_damping) + center_force * recovery, -1.0, 1.0))
+            else:
+                raw = 0.0  # hold straight
+            # Rate-limit this branch too, so it can never snap the wheel.
+            delta = float(np.clip(raw - self._last_steering, -0.05, 0.05))
+            self._last_steering = float(np.clip(self._last_steering + delta, -1.0, 1.0))
+            steering_val = self._last_steering
 
         self.sdk.controller.set_steering(steering_val)
 
