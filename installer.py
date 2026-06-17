@@ -271,44 +271,23 @@ class InstallWorker(QThread):
 
     def run(self):
         try:
-            src, mode = self._payload()
+            mode = "source"   # installed app runs from source via Python
             self.log.emit(self.t["s_prep"])
             os.makedirs(self.install_path, exist_ok=True)
-            self.progress.emit(5)
+            self.progress.emit(3)
 
-            # --- copy files ---
-            self.log.emit(self.t["s_copy"])
-            if mode == "frozen":
-                files = []
-                for root, _dirs, fnames in os.walk(src):
-                    for fn in fnames:
-                        files.append(os.path.join(root, fn))
-                total = max(1, len(files))
-                for i, f in enumerate(files):
-                    rel = os.path.relpath(f, src)
-                    dst = os.path.join(self.install_path, rel)
-                    os.makedirs(os.path.dirname(dst), exist_ok=True)
-                    shutil.copy2(f, dst)
-                    if i % 25 == 0:
-                        self.log.emit(self.t["s_copying"].format(rel))
-                    self.progress.emit(5 + int(60 * (i + 1) / total))
-                exe_path = os.path.join(self.install_path, "UltraPilot.exe")
-            else:
-                # Copy the source tree needed to run with Python.
-                for item in ("core", "plugins", "sdk", "ui", "assets",
-                             "main.py", "bootloader.py", "requirements.txt"):
-                    s = os.path.join(src, item)
-                    if not os.path.exists(s):
-                        continue
-                    self.log.emit(self.t["s_copying"].format(item))
-                    d = os.path.join(self.install_path, item)
-                    if os.path.isdir(s):
-                        shutil.copytree(s, d, dirs_exist_ok=True,
-                                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-                    else:
-                        shutil.copy2(s, d)
-                exe_path = os.path.join(self.install_path, "main.py")
-                self.progress.emit(65)
+            # --- get the app from GitHub (clone or zip download) ---
+            self.log.emit("Downloading UltraPilot from GitHub…")
+            if not self._fetch_repo():
+                self.log.emit("  GitHub download failed — copying bundled files instead…")
+                self._copy_bundled()
+            self.progress.emit(45)
+
+            # --- install Python dependencies (incl. the 3D libraries) ---
+            self.log.emit("Installing Python dependencies (this can take a few minutes)…")
+            self._pip_install()
+            exe_path = os.path.join(self.install_path, "main.py")
+            self.progress.emit(75)
 
             # --- DLLs into the game ---
             self.log.emit(self.t["s_dll"])
@@ -350,13 +329,96 @@ class InstallWorker(QThread):
             self.log.emit(self.t["s_err"].format(e))
             self.finished_ok.emit(False, "")
 
+    # --- fetching / dependencies ---------------------------------------------
+    REPO_GIT = "https://github.com/matule123/ets2la.git"
+    REPO_ZIP = "https://github.com/matule123/ets2la/archive/refs/heads/main.zip"
+
+    def _fetch_repo(self):
+        """Clone the repo (or download the zip) into install_path. True on success."""
+        # 1) git clone if git is available
+        try:
+            tmp = self.install_path + "_clone"
+            if os.path.isdir(tmp):
+                shutil.rmtree(tmp, ignore_errors=True)
+            r = subprocess.run(["git", "clone", "--depth", "1", self.REPO_GIT, tmp],
+                               capture_output=True, text=True, timeout=600)
+            if r.returncode == 0 and os.path.exists(os.path.join(tmp, "main.py")):
+                for item in os.listdir(tmp):
+                    s, d = os.path.join(tmp, item), os.path.join(self.install_path, item)
+                    if os.path.isdir(s):
+                        shutil.copytree(s, d, dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(s, d)
+                shutil.rmtree(tmp, ignore_errors=True)
+                self.log.emit("  Cloned from GitHub.")
+                return True
+        except Exception as e:
+            self.log.emit(f"  git clone unavailable ({e}).")
+
+        # 2) download the zip
+        try:
+            import requests, zipfile, io
+            self.log.emit("  Downloading source zip…")
+            resp = requests.get(self.REPO_ZIP, timeout=120)
+            if resp.status_code == 200:
+                zf = zipfile.ZipFile(io.BytesIO(resp.content))
+                zf.extractall(self.install_path)
+                # the zip extracts to a 'ets2la-main' subfolder — flatten it
+                root = os.path.join(self.install_path, "ets2la-main")
+                if os.path.isdir(root):
+                    for item in os.listdir(root):
+                        shutil.move(os.path.join(root, item),
+                                    os.path.join(self.install_path, item))
+                    shutil.rmtree(root, ignore_errors=True)
+                self.log.emit("  Downloaded and extracted.")
+                return True
+        except Exception as e:
+            self.log.emit(f"  Zip download failed ({e}).")
+        return False
+
+    def _copy_bundled(self):
+        """Fallback: copy whatever ships next to the installer (at least assets)."""
+        here = getattr(sys, "_MEIPASS", None) or \
+            (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
+             else os.path.dirname(os.path.abspath(__file__)))
+        for item in ("core", "plugins", "sdk", "ui", "assets",
+                     "main.py", "bootloader.py", "requirements.txt"):
+            s = os.path.join(here, item)
+            if not os.path.exists(s):
+                continue
+            d = os.path.join(self.install_path, item)
+            try:
+                if os.path.isdir(s):
+                    shutil.copytree(s, d, dirs_exist_ok=True,
+                                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+                else:
+                    shutil.copy2(s, d)
+            except Exception:
+                pass
+
+    def _pip_install(self):
+        req = os.path.join(self.install_path, "requirements.txt")
+        pkgs = ["pyqtgraph", "PyOpenGL"]
+        try:
+            if os.path.exists(req):
+                subprocess.run([sys.executable, "-m", "pip", "install", "-r", req],
+                               capture_output=True, timeout=1800)
+            subprocess.run([sys.executable, "-m", "pip", "install", *pkgs],
+                           capture_output=True, timeout=600)
+            self.log.emit("  Dependencies installed.")
+        except Exception as e:
+            self.log.emit(f"  pip install issue ({e}) — install manually if needed.")
+
     def _make_shortcuts(self, exe_path, mode):
         icon = os.path.join(self.install_path, "assets", "favicon.ico")
         if mode == "frozen":
             target, args, workdir = exe_path, "", self.install_path
         else:
-            pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-            target = pyw if os.path.exists(pyw) else "pythonw.exe"
+            # The installer is itself a frozen exe, so sys.executable is NOT the
+            # Python interpreter — find the real pythonw on PATH (or a launcher).
+            pyw = (shutil.which("pythonw") or shutil.which("pythonw.exe")
+                   or shutil.which("python") or "pythonw.exe")
+            target = pyw
             args = f'"{exe_path}"'
             workdir = self.install_path
 
@@ -562,7 +624,7 @@ class Installer(QWizard):
         super().__init__()
         self.lang = "Slovenský"
         self.exe_path = ""
-        self.theme = "light"   # default white background
+        self.theme = "dark"    # default black background
         self.setWizardStyle(QWizard.WizardStyle.ModernStyle)
         self.setOption(QWizard.WizardOption.NoBackButtonOnStartPage, True)
         self.apply_theme()
@@ -570,12 +632,15 @@ class Installer(QWizard):
             self.setWindowIcon(QIcon(ICON_PATH))
         self.setFixedSize(640, 560)
 
-        # Sun / Moon theme toggle (bottom-left).
-        self.theme_btn = QPushButton("🌙", self)
-        self.theme_btn.setFixedSize(34, 28)
-        self.theme_btn.clicked.connect(self.toggle_theme)
-        self.theme_btn.move(14, 520)
-        self.theme_btn.setToolTip("Light / Dark")
+        # Sun / Moon theme toggle as a real wizard button (always visible in the
+        # button row; a free-floating child gets hidden behind the page).
+        self.setOption(QWizard.WizardOption.HaveCustomButton1, True)
+        self.setButtonText(QWizard.WizardButton.CustomButton1, "☀️")
+        self.customButtonClicked.connect(self._on_custom)
+
+    def _on_custom(self, which):
+        if which == QWizard.WizardButton.CustomButton1:
+            self.toggle_theme()
 
         self.welcome = WelcomePage(self)
         self.license = LicensePage()
@@ -594,8 +659,8 @@ class Installer(QWizard):
     def toggle_theme(self):
         self.theme = "dark" if self.theme == "light" else "light"
         self.apply_theme()
-        if hasattr(self, "theme_btn"):
-            self.theme_btn.setText("☀️" if self.theme == "dark" else "🌙")
+        self.setButtonText(QWizard.WizardButton.CustomButton1,
+                           "☀️" if self.theme == "dark" else "🌙")
 
     def tr(self):
         return {**TR["English"], **TR.get(self.lang, {})}

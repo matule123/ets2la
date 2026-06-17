@@ -25,8 +25,8 @@ def _gear_text(gear):
 class UltraPilotHUD(QWidget):
     """Animated driving-view HUD: ego truck, surrounding traffic, route, lights."""
 
-    W, H = 460, 300       # wider driving view, anchored bottom-centre
-    VIEW_M = 90.0          # metres shown ahead in the driving view
+    W, H = 760, 460       # large immersive scene, anchored top-centre
+    VIEW_M = 110.0         # metres shown ahead in the driving view
 
     def __init__(self, shared_state):
         super().__init__()
@@ -72,63 +72,104 @@ class UltraPilotHUD(QWidget):
             "heading": s.get("truck_heading", 0.0) or 0.0,
             "traffic": s.get("traffic", []) or [],
             "light": s.get("traffic_light"),
-            "nav_path": s.get("nav_path", []) or [],
+            # The route to draw: active navigation, else the map road ahead.
+            "nav_path": (s.get("nav_path", []) or s.get("map_path", []) or []),
             "limit_ms": truck.get("speedLimit", 0.0) or 0.0,
         }
 
     # --- Painting -------------------------------------------------------------
     def paintEvent(self, event):
+        # In PyQt6 an exception escaping paintEvent aborts the whole process
+        # (exit code 0xC0000409). Catch + log so the HUD can never crash-loop.
+        try:
+            self._do_paint(event)
+        except Exception as e:
+            import logging
+            logging.error("HUD paint error: %s", e)
+
+    def _do_paint(self, event):
         d = self._read()
         qp = QPainter(self)
         qp.setRenderHint(QPainter.RenderHint.Antialiasing)
         accent = QColor(_STATE_COLORS.get(d["state"], "#10B981"))
 
-        # Card.
-        qp.setBrush(QColor(255, 255, 255, 238))
-        qp.setPen(QPen(QColor(0, 0, 0, 28), 1))
-        qp.drawRoundedRect(QRectF(1, 1, self.W - 2, self.H - 2), 16, 16)
+        # 1) Full-bleed 3D driving scene as the whole background (like ETS2LA).
+        scene = QRectF(0, 0, self.W, self.H)
+        self._draw_driving_view(qp, scene, d, accent)
 
-        # ---- Top bar: speed + autopilot pill ----
-        qp.setPen(QColor("#111827"))
-        qp.setFont(QFont("Segoe UI", 40, QFont.Weight.Bold))
-        qp.drawText(QRectF(18, 12, 150, 56), Qt.AlignmentFlag.AlignLeft, f"{d['speed_kmh']:.0f}")
-        qp.setPen(QColor("#6B7280"))
-        qp.setFont(QFont("Segoe UI", 10))
-        qp.drawText(QRectF(20, 64, 80, 16), Qt.AlignmentFlag.AlignLeft, "km/h")
+        # 2) Throttle (green) + brake (red) strips on the far-left edge.
+        t = max(0.0, min(1.0, d["throttle"]))
+        b = max(0.0, min(1.0, d["brake"]))
+        midy = self.H / 2
+        qp.setPen(Qt.PenStyle.NoPen)
+        qp.setBrush(QColor(34, 197, 94, 230))
+        qp.drawRect(QRectF(0, midy - t * (midy - 60), 7, t * (midy - 60)))
+        qp.setBrush(QColor(239, 68, 68, 230))
+        qp.drawRect(QRectF(0, midy, 7, b * (midy - 60)))
 
+        # 3) Current speed (big white, top-left) + KM/H.
+        qp.setPen(QColor("#FFFFFF"))
+        qp.setFont(QFont("Segoe UI", 58, QFont.Weight.Bold))
+        qp.drawText(QRectF(16, 6, 220, 76), Qt.AlignmentFlag.AlignLeft, f"{d['speed_kmh']:.0f}")
+        qp.setPen(QColor(255, 255, 255, 160))
+        qp.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        qp.drawText(QRectF(20, 80, 120, 18), Qt.AlignmentFlag.AlignLeft, "KM/H")
+
+        # 4) Speed-limit sign (red circle, top-centre).
+        if d["limit_ms"] and d["limit_ms"] > 1:
+            self._draw_limit_sign(qp, self.W / 2 - 26, 14, d["limit_ms"] * 3.6, big=True)
+
+        # 5) Cruise-control target (teal, under the sign).
+        if d["acc_speed"] is not None:
+            try:
+                qp.setPen(QColor("#22D3EE"))
+                qp.setFont(QFont("Segoe UI", 26, QFont.Weight.Bold))
+                qp.drawText(QRectF(self.W / 2 + 18, 70, 110, 34),
+                            Qt.AlignmentFlag.AlignLeft, f"{float(d['acc_speed']):.0f}")
+                qp.setPen(QColor(34, 211, 238, 170))
+                qp.setFont(QFont("Segoe UI", 9))
+                qp.drawText(QRectF(self.W / 2 + 20, 100, 80, 16),
+                            Qt.AlignmentFlag.AlignLeft, "auto" if d["active"] else "set")
+            except (TypeError, ValueError):
+                pass
+
+        # 6) Direction / gear chip (top-right).
+        qp.setBrush(QColor(40, 44, 52, 220)); qp.setPen(QPen(QColor(90, 96, 104, 200), 1))
+        qp.drawRoundedRect(QRectF(self.W - 64, 14, 48, 48), 8, 8)
+        qp.setPen(QColor("#FFFFFF")); qp.setFont(QFont("Segoe UI", 20, QFont.Weight.Bold))
+        qp.drawText(QRectF(self.W - 64, 16, 48, 44), Qt.AlignmentFlag.AlignCenter, _gear_text(d["gear"]))
+
+        # 7) Autopilot status pill (top-right, under the chip).
         on = d["active"]
-        pill = QRectF(self.W - 116, 16, 96, 22)
-        qp.setBrush(QColor("#10B981") if on else QColor("#9CA3AF"))
+        pill = QRectF(self.W - 116, 70, 100, 22)
+        qp.setBrush(QColor("#10B981") if on else QColor(120, 120, 128, 220))
         qp.setPen(Qt.PenStyle.NoPen)
         qp.drawRoundedRect(pill, 11, 11)
-        qp.setPen(QColor("#FFFFFF"))
-        qp.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        qp.setPen(QColor("#FFFFFF")); qp.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         qp.drawText(pill, Qt.AlignmentFlag.AlignCenter, "AUTOPILOT" if on else "MANUAL")
 
-        # gear + speed-limit chips
-        qp.setPen(accent)
-        qp.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
-        qp.drawText(QRectF(118, 24, 40, 30), Qt.AlignmentFlag.AlignLeft, _gear_text(d["gear"]))
-        if d["limit_ms"] and d["limit_ms"] > 1:
-            self._draw_limit_sign(qp, self.W - 116, 44, d["limit_ms"] * 3.6)
-
-        # ---- Traffic light widget (top, under pill) ----
-        if d["light"]:
-            self._draw_traffic_light(qp, self.W - 60, 70, d["light"])
-
-        # ---- Driving view ----
-        view = QRectF(14, 96, self.W - 70, self.H - 112)
-        self._draw_driving_view(qp, view, d, accent)
-
-        # ---- Throttle / brake vertical bar (right side) ----
-        self._draw_pedal_bar(qp, QRectF(self.W - 46, 96, 30, self.H - 112), d)
+        # 8) Traffic-light countdown text in the scene ("12.4s  RED > YELLOW").
+        lt = d["light"]
+        if lt and lt.get("time_left", 0) > 0:
+            col = {"red": "#F87171", "green": "#4ADE80", "yellow": "#FBBF24"}.get(lt.get("color"), "#D1D5DB")
+            cx = self.W / 2 - 40
+            qp.setPen(QColor("#FFFFFF")); qp.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
+            qp.drawText(QRectF(cx, self.H * 0.42, 140, 26), Qt.AlignmentFlag.AlignLeft,
+                        f"{lt['time_left']:.1f}s")
+            qp.setPen(QColor(col)); qp.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+            nxt = {"red": "RED → GREEN", "green": "GREEN → YELLOW",
+                   "yellow": "YELLOW"}.get(lt.get("color"), "")
+            qp.drawText(QRectF(cx, self.H * 0.42 + 24, 160, 16), Qt.AlignmentFlag.AlignLeft, nxt)
 
     # --- Sub-widgets ----------------------------------------------------------
-    def _draw_limit_sign(self, qp, x, y, kmh):
-        qp.setBrush(QColor("#FFFFFF")); qp.setPen(QPen(QColor("#EF4444"), 3))
-        qp.drawEllipse(QRectF(x, y, 34, 34))
-        qp.setPen(QColor("#111827")); qp.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-        qp.drawText(QRectF(x, y, 34, 34), Qt.AlignmentFlag.AlignCenter, f"{kmh:.0f}")
+    def _draw_limit_sign(self, qp, x, y, kmh, big=False):
+        sz = 52 if big else 34
+        ring = 5 if big else 3
+        qp.setBrush(QColor("#FFFFFF")); qp.setPen(QPen(QColor("#EF4444"), ring))
+        qp.drawEllipse(QRectF(x, y, sz, sz))
+        qp.setPen(QColor("#111827"))
+        qp.setFont(QFont("Segoe UI", 17 if big else 11, QFont.Weight.Bold))
+        qp.drawText(QRectF(x, y, sz, sz), Qt.AlignmentFlag.AlignCenter, f"{kmh:.0f}")
 
     def _draw_traffic_light(self, qp, x, y, light):
         col = {"red": "#EF4444", "green": "#22C55E", "yellow": "#F59E0B"}.get(light.get("color"), "#9CA3AF")

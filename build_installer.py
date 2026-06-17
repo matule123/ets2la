@@ -83,17 +83,24 @@ def build_app():
 
 
 def build_installer_exe():
-    """Build a small branded installer exe (no payload bundled)."""
-    step(2, 3, "Building UltraPilot_Installer.exe (PyInstaller)…")
+    """Build the single branded installer exe.
+
+    The installer clones the app from GitHub at install time, so we don't bundle
+    a frozen payload — only the source tree as an offline fallback + assets."""
+    step(1, 1, "Building UltraPilot_Installer.exe (PyInstaller)…")
     if not _ensure("pyinstaller", "PyInstaller"):
         return None
     sep = ";" if os.name == "nt" else ":"
+    data = [f"--add-data=assets{sep}assets"]
+    # Source tree as an offline fallback (small) if GitHub is unreachable.
+    for item in ("core", "plugins", "sdk", "ui"):
+        data.append(f"--add-data={item}{sep}{item}")
+    for f in ("main.py", "bootloader.py", "requirements.txt"):
+        data.append(f"--add-data={f}{sep}.")
     cmd = [
         sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
-        "--onefile", "--windowed",
-        "--name", "UltraPilot_Installer",
-        f"--icon={ICON}",
-        f"--add-data=assets{sep}assets",
+        "--onefile", "--windowed", "--name", "UltraPilot_Installer",
+        f"--icon={ICON}", *data,
         "--hidden-import=core.sdk.game_utils",
         "--hidden-import=core.sdk.vigembus",
         "installer.py",
@@ -102,7 +109,7 @@ def build_installer_exe():
     subprocess.run(cmd, check=True)
     exe = os.path.join("dist", "UltraPilot_Installer.exe")
     if os.path.exists(exe):
-        cprint("g", "  ✓ Installer exe built.")
+        cprint("g", f"  ✓ Done!  Installer: {exe}")
         return exe
     cprint("r", "  ERROR: installer exe not produced.")
     return None
@@ -121,14 +128,8 @@ def assemble(payload_dir, installer_exe):
 
 
 def main():
-    payload = build_app()
-    if not payload:
-        return 1
-    installer_exe = build_installer_exe()
-    if not installer_exe:
-        return 1
-    assemble(payload, installer_exe)
-    return 0
+    # No heavy app freeze needed — the installer fetches the app from GitHub.
+    return 0 if build_installer_exe() else 1
 
 
 if __name__ == "__main__":

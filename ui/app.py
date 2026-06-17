@@ -243,26 +243,25 @@ class UltraPilotApp(QMainWindow):
         from PyQt6.QtGui import QPixmap
         from core.paths import resource as _res
         logo = QLabel()
-        _pm = QPixmap(_res("assets", "logo.png"))
+        _pm = QPixmap(_res("assets", "favicon.ico"))   # icon only, not the wordmark
+        if _pm.isNull():
+            _pm = QPixmap(_res("assets", "logo.png"))
         if not _pm.isNull():
-            logo.setPixmap(_pm.scaledToWidth(150, Qt.TransformationMode.SmoothTransformation))
+            logo.setPixmap(_pm.scaledToWidth(96, Qt.TransformationMode.SmoothTransformation))
         logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sb.addWidget(logo)
         sb.addSpacing(10)
-        btn_dash = QPushButton("Dashboard")
-        btn_map = QPushButton("Navigation")
-        btn_viz = QPushButton("Visualization")
-        btn_plugins = QPushButton("Plugins")
-        btn_settings = QPushButton("Settings")
-        btn_about = QPushButton("About")
-        btn_dash.clicked.connect(lambda: self.pages.setCurrentIndex(0))
-        btn_map.clicked.connect(lambda: self.pages.setCurrentIndex(1))
-        btn_viz.clicked.connect(lambda: self.pages.setCurrentIndex(2))
-        btn_plugins.clicked.connect(lambda: self.pages.setCurrentIndex(3))
-        btn_settings.clicked.connect(lambda: self.pages.setCurrentIndex(4))
-        btn_about.clicked.connect(lambda: self.pages.setCurrentIndex(5))
-        for b in (btn_dash, btn_map, btn_viz, btn_plugins, btn_settings, btn_about):
+        nav = [("  🏠  Dashboard", 0), ("  🗺️  Navigation", 1),
+               ("  🛰️  Visualization", 2), ("  🧩  Plugins", 3),
+               ("  ⚙️  Settings", 4), ("  ℹ️  About", 5)]
+        self._nav_btns = []
+        for text, idx in nav:
+            b = QPushButton(text)
+            b.setCheckable(True)
+            b.clicked.connect(lambda _=False, i=idx: self._goto(i))
             sb.addWidget(b)
+            self._nav_btns.append(b)
+        self._nav_btns[0].setChecked(True)
         sb.addStretch()
         main_layout.addWidget(self.sidebar)
 
@@ -310,6 +309,11 @@ class UltraPilotApp(QMainWindow):
         self.state.set("autopilot_active", not current)
         logging.info(f"Autopilot master switch -> {not current}")
         self._render_start_btn()
+
+    def _goto(self, index):
+        self.pages.setCurrentIndex(index)
+        for i, b in enumerate(getattr(self, "_nav_btns", [])):
+            b.setChecked(i == index)
 
     def update_ui(self):
         # Live theme switching from the Settings page.

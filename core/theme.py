@@ -40,24 +40,55 @@ def palette(mode: str) -> dict:
 
 def stylesheet(mode: str = "light") -> str:
     c = palette(mode)
+    accent2 = "#34D399"
     return f"""
 QMainWindow {{ background-color: {c['bg']}; }}
-QWidget {{ background-color: {c['bg']}; color: {c['text']}; font-family: 'Segoe UI', sans-serif; }}
+QWidget {{ background-color: {c['bg']}; color: {c['text']};
+    font-family: 'Segoe UI', 'Inter', sans-serif; font-size: 14px; }}
+
+/* Sidebar nav buttons: flat, pill highlight on hover/active */
+QFrame#Sidebar {{ background-color: {c['sidebar']}; border: none;
+    border-right: 1px solid {c['border']}; }}
+QFrame#Sidebar QPushButton {{ background-color: transparent; border: none;
+    border-radius: 10px; padding: 11px 14px; margin: 2px 8px; text-align: left;
+    color: {c['muted']}; font-weight: 600; }}
+QFrame#Sidebar QPushButton:hover {{ background-color: {c['field']}; color: {c['text']}; }}
+QFrame#Sidebar QPushButton:checked {{ background-color: {ACCENT}; color: #FFFFFF; }}
+
+/* General buttons: soft, rounded */
 QPushButton {{ background-color: {c['surface']}; border: 1px solid {c['border']};
-    border-radius: 8px; padding: 10px; color: {c['text']}; }}
+    border-radius: 10px; padding: 9px 16px; color: {c['text']}; font-weight: 600; }}
 QPushButton:hover {{ border-color: {ACCENT}; color: {ACCENT}; }}
-QPushButton:pressed {{ background-color: {ACCENT}; color: #FFFFFF; }}
-QLabel {{ color: {c['text']}; }}
-QFrame#Sidebar {{ background-color: {c['sidebar']}; border-right: 1px solid {c['border']}; }}
+QPushButton:pressed {{ background-color: {ACCENT}; color: #FFFFFF; border-color: {ACCENT}; }}
+
+QLabel {{ color: {c['text']}; background: transparent; }}
+QFrame {{ border-radius: 14px; }}
+
 QComboBox, QLineEdit {{ background-color: {c['field']}; border: 1px solid {c['border']};
-    border-radius: 8px; padding: 7px; color: {c['text']}; }}
-QComboBox QAbstractItemView {{ background-color: {c['field']}; color: {c['text']};
-    selection-background-color: {ACCENT}; }}
-QCheckBox {{ spacing: 8px; }}
+    border-radius: 10px; padding: 8px 10px; color: {c['text']}; }}
+QComboBox:hover, QLineEdit:focus {{ border-color: {ACCENT}; }}
+QComboBox::drop-down {{ border: none; width: 22px; }}
+QComboBox QAbstractItemView {{ background-color: {c['surface']}; color: {c['text']};
+    border: 1px solid {c['border']}; border-radius: 8px; outline: none;
+    selection-background-color: {ACCENT}; selection-color: #FFFFFF; }}
+
+QCheckBox {{ spacing: 9px; color: {c['text']}; }}
+QCheckBox::indicator {{ width: 18px; height: 18px; border: 1px solid {c['border']};
+    border-radius: 5px; background: {c['field']}; }}
+QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
+
 QSlider::groove:horizontal {{ height: 6px; background: {c['border']}; border-radius: 3px; }}
-QSlider::handle:horizontal {{ background: {ACCENT}; width: 16px; margin: -6px 0; border-radius: 8px; }}
-QStatusBar {{ background-color: {c['surface']}; border-top: 1px solid {c['border']}; }}
-QProgressBar {{ background-color: {c['field']}; border: 1px solid {c['border']};
-    border-radius: 6px; height: 18px; text-align: center; color: {c['text']}; }}
-QProgressBar::chunk {{ background-color: {ACCENT}; border-radius: 5px; }}
+QSlider::sub-page:horizontal {{ background: {ACCENT}; border-radius: 3px; }}
+QSlider::handle:horizontal {{ background: #FFFFFF; border: 2px solid {ACCENT};
+    width: 16px; height: 16px; margin: -7px 0; border-radius: 9px; }}
+
+QStatusBar {{ background-color: {c['sidebar']}; border-top: 1px solid {c['border']}; }}
+
+QProgressBar {{ background-color: {c['field']}; border: none;
+    border-radius: 8px; height: 18px; text-align: center; color: {c['text']}; font-weight: 600; }}
+QProgressBar::chunk {{ background-color: {accent2}; border-radius: 8px; }}
+
+QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
+QScrollBar::handle:vertical {{ background: {c['border']}; border-radius: 5px; min-height: 30px; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
 """

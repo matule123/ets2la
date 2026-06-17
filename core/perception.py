@@ -15,18 +15,10 @@ class Perception:
         # monitors[0] is the virtual "all monitors" entry; [1] is the primary.
         self.monitor = self.sct.monitors[1] if len(self.sct.monitors) > 1 else self.sct.monitors[0]
 
-        # Initialize AI Model for lane detection (optional — degrade to CV).
+        # Lane detection uses our own OpenCV pipeline (detect_lanes).
+        # The old ETS2LA HuggingFace model no longer exists and 404'd on every
+        # start, so we don't try to download it anymore.
         self.model = None
-        try:
-            from core.ai_model import Model, MODEL_CONFIG
-            self.model = Model(
-                HF_owner=MODEL_CONFIG["HF_OWNER"],
-                HF_repository=MODEL_CONFIG["HF_REPOSITORY"],
-                HF_model_folder=MODEL_CONFIG["HF_FOLDER"],
-            )
-            self.model.load_model()
-        except Exception as e:
-            logging.warning(f"AI lane model unavailable, using classic CV only: {e}")
 
         # Temporal smoothing for danger level
         self._last_danger_level = 0.0
