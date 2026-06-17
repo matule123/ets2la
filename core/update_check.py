@@ -103,8 +103,13 @@ def run_with_splash():
         QTimer.singleShot(700, w.close)
 
     QTimer.singleShot(150, work)
-    # Run the splash event loop until it closes.
-    while w.isVisible():
+    # Run the splash, but with a HARD time cap so it can NEVER block startup.
+    import time
+    t0 = time.time()
+    while w.isVisible() and (time.time() - t0) < 12.0:
         app.processEvents()
-        import time
         time.sleep(0.02)
+    try:
+        w.close()
+    except Exception:
+        pass

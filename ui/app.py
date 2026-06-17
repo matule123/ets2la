@@ -212,12 +212,22 @@ class UltraPilotApp(QMainWindow):
         from core.theme import stylesheet
         self._theme = (state.get("ui_theme", "light") or "light")
         self.setStyleSheet(stylesheet(self._theme))
-        # Window/taskbar icon.
+        # Window + taskbar icon. On Windows the taskbar icon only shows if we
+        # set an explicit AppUserModelID before any window appears.
         from PyQt6.QtGui import QIcon
         from core.paths import resource
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("UltraPilot.App")
+        except Exception:
+            pass
         _ico = resource("assets", "favicon.ico")
         if os.path.exists(_ico):
-            self.setWindowIcon(QIcon(_ico))
+            icon = QIcon(_ico)
+            self.setWindowIcon(icon)
+            app = QApplication.instance()
+            if app is not None:
+                app.setWindowIcon(icon)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -256,14 +266,24 @@ class UltraPilotApp(QMainWindow):
         sb.addStretch()
         main_layout.addWidget(self.sidebar)
 
-        from ui.visualization import VisualizationPage
         self.pages = QStackedWidget()
-        self.pages.addWidget(DashboardPage(state))
-        self.pages.addWidget(MapPage(state))
-        self.pages.addWidget(VisualizationPage(state))
-        self.pages.addWidget(PluginsPage(state))
-        self.pages.addWidget(SettingsMenu(state))
-        self.pages.addWidget(AboutPage(state))
+        # Build each page defensively so one broken page can't stop the app.
+        def _add(factory, name):
+            try:
+                self.pages.addWidget(factory())
+            except Exception as e:
+                logging.error("UI page '%s' failed: %s", name, e)
+                err = QLabel(f"{name} unavailable:\n{e}")
+                err.setWordWrap(True)
+                self.pages.addWidget(err)
+
+        from ui.visualization import VisualizationPage
+        _add(lambda: DashboardPage(state), "Dashboard")
+        _add(lambda: MapPage(state), "Navigation")
+        _add(lambda: VisualizationPage(state), "Visualization")
+        _add(lambda: PluginsPage(state), "Plugins")
+        _add(lambda: SettingsMenu(state), "Settings")
+        _add(lambda: AboutPage(state), "About")
         main_layout.addWidget(self.pages)
 
         self.start_btn = QPushButton("ENABLE AUTOPILOT")
