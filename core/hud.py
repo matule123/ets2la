@@ -115,13 +115,13 @@ class UltraPilotHUD(QWidget):
         qp.setBrush(QColor(239, 68, 68, 230))
         qp.drawRect(QRectF(0, midy, 7, b * (midy - 60)))
 
-        # 3) Current speed (big white, top-left) + KM/H.
+        # 3) Current speed (big white, top-left) + KM/H — full height panel.
         qp.setPen(QColor("#FFFFFF"))
-        qp.setFont(QFont("Segoe UI", 58, QFont.Weight.Bold))
-        qp.drawText(QRectF(16, 6, 220, 76), Qt.AlignmentFlag.AlignLeft, f"{d['speed_kmh']:.0f}")
+        qp.setFont(QFont("Segoe UI", 60, QFont.Weight.Bold))
+        qp.drawText(QRectF(18, 14, 240, 86), Qt.AlignmentFlag.AlignVCenter, f"{d['speed_kmh']:.0f}")
         qp.setPen(QColor(255, 255, 255, 160))
         qp.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
-        qp.drawText(QRectF(20, 80, 120, 18), Qt.AlignmentFlag.AlignLeft, "KM/H")
+        qp.drawText(QRectF(22, 100, 120, 18), Qt.AlignmentFlag.AlignLeft, "KM/H")
 
         # 4) Speed-limit sign (red circle, top-centre).
         if d["limit_ms"] and d["limit_ms"] > 1:
@@ -289,23 +289,44 @@ class UltraPilotHUD(QWidget):
         qp.drawRoundedRect(QRectF(ex - 16, ey - 26, 32, 44), 6, 6)
         qp.restore()
 
-    def _draw_box(self, qp, view, ahead, lateral, v):
-        hgt = {"car": 1.5, "van": 2.3, "bus": 3.0, "truck": 3.2}.get(v["type"], 1.6)
-        hw = max(0.9, v["width"] / 2)
-        n, fr = ahead - v["length"] / 2, ahead + v["length"] / 2
-        c = [self._project(n, lateral - hw, view), self._project(n, lateral + hw, view),
-             self._project(fr, lateral - hw, view), self._project(fr, lateral + hw, view),
-             self._project(n, lateral - hw, view, hgt), self._project(n, lateral + hw, view, hgt),
-             self._project(fr, lateral - hw, view, hgt), self._project(fr, lateral + hw, view, hgt)]
+    def _box3d(self, qp, n, fr, hw, lateral, z0, z1, view, faces):
+        """Draw one shaded cuboid between heights z0..z1. faces=(side,top) colors."""
+        c = [self._project(n, lateral - hw, view, z0), self._project(n, lateral + hw, view, z0),
+             self._project(fr, lateral - hw, view, z0), self._project(fr, lateral + hw, view, z0),
+             self._project(n, lateral - hw, view, z1), self._project(n, lateral + hw, view, z1),
+             self._project(fr, lateral - hw, view, z1), self._project(fr, lateral + hw, view, z1)]
         if any(p is None for p in c):
-            return
+            return False
         bl, br, fl, fr_, blt, brt, flt, frt = c
-        qp.setPen(QPen(QColor("#3A4049"), 1))
-        qp.setBrush(QColor("#6B7280")); qp.drawPolygon(QPolygonF([bl, br, brt, blt]))   # back
-        qp.setBrush(QColor("#9CA3AF")); qp.drawPolygon(QPolygonF([bl, fl, flt, blt]))   # left
-        qp.drawPolygon(QPolygonF([br, fr_, frt, brt]))                                  # right
-        qp.setBrush(QColor("#7C828B")); qp.drawPolygon(QPolygonF([fl, fr_, frt, flt]))  # front
-        qp.setBrush(QColor("#B6BCC4")); qp.drawPolygon(QPolygonF([blt, brt, frt, flt])) # top
+        side, top = faces
+        qp.setPen(QPen(QColor("#34393F"), 1))
+        qp.setBrush(QColor(side).darker(115)); qp.drawPolygon(QPolygonF([bl, br, brt, blt]))   # back
+        qp.setBrush(QColor(side)); qp.drawPolygon(QPolygonF([bl, fl, flt, blt]))               # left
+        qp.drawPolygon(QPolygonF([br, fr_, frt, brt]))                                         # right
+        qp.setBrush(QColor(side).darker(108)); qp.drawPolygon(QPolygonF([fl, fr_, frt, flt]))  # front
+        qp.setBrush(QColor(top)); qp.drawPolygon(QPolygonF([blt, brt, frt, flt]))              # top
+        return True
+
+    def _draw_box(self, qp, view, ahead, lateral, v):
+        # Vehicle = lower body + a smaller cabin on top → reads as a real model.
+        t = v.get("type", "car")
+        body_h = {"car": 1.1, "van": 1.7, "bus": 2.8, "truck": 2.6}.get(t, 1.2)
+        hw = max(0.9, v["width"] / 2)
+        ln = max(3.5, v["length"])
+        n, fr = ahead - ln / 2, ahead + ln / 2
+        if not self._box3d(qp, n, fr, hw, lateral, 0.0, body_h, view,
+                           ("#8A9099", "#AEB4BC")):
+            return
+        # Cabin / cab on top (cars & vans: middle; trucks: front; bus: full).
+        if t == "bus":
+            self._box3d(qp, n + 0.3, fr - 0.3, hw * 0.92, lateral, body_h, body_h + 0.7, view,
+                        ("#9AA0A8", "#C2C8D0"))
+        elif t == "truck":
+            self._box3d(qp, fr - ln * 0.28, fr - 0.2, hw * 0.95, lateral, body_h, body_h + 1.0, view,
+                        ("#9AA0A8", "#C2C8D0"))
+        else:  # car / van cabin in the middle
+            self._box3d(qp, n + ln * 0.28, fr - ln * 0.22, hw * 0.9, lateral, body_h, body_h + 0.8, view,
+                        ("#9AA0A8", "#C2C8D0"))
 
     def _draw_vehicle(self, qp, center, v, ego_h, scale):
         # All grey; the silhouette tells car / van / bus / truck apart.

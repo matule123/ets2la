@@ -78,10 +78,26 @@ class PluginsPage(Page):
         plugin_dir = os.path.join(app_dir(), "plugins")
         if not os.path.isdir(plugin_dir):
             return
-        for folder in sorted(os.listdir(plugin_dir)):
-            full = os.path.join(plugin_dir, folder)
-            if os.path.isdir(full) and os.path.exists(os.path.join(full, "main.py")):
-                self.add_plugin_row(folder)
+        names = [f for f in sorted(os.listdir(plugin_dir))
+                 if os.path.isdir(os.path.join(plugin_dir, f))
+                 and os.path.exists(os.path.join(plugin_dir, f, "main.py"))]
+        # Enabled plugins on top, disabled below.
+        names.sort(key=lambda n: (not self.state.get(f"plugin_enabled.{n}", True), n))
+        enabled = [n for n in names if self.state.get(f"plugin_enabled.{n}", True)]
+        disabled = [n for n in names if not self.state.get(f"plugin_enabled.{n}", True)]
+        if enabled:
+            self._section("● ACTIVE")
+            for n in enabled:
+                self.add_plugin_row(n)
+        if disabled:
+            self._section("○ DISABLED")
+            for n in disabled:
+                self.add_plugin_row(n)
+
+    def _section(self, text):
+        lbl = QLabel(text)
+        lbl.setStyleSheet("color:#6B7280; font-size:12px; font-weight:700; margin-top:8px;")
+        self.plugin_list.addWidget(lbl)
 
     _DESC = {
         "autopilot": "Steering + throttle/brake control",
@@ -123,7 +139,7 @@ class PluginsPage(Page):
             current = self.state.get(f"plugin_enabled.{name}", True)
             self.state.set(f"plugin_enabled.{name}", not current)
             logging.info(f"Toggled plugin '{name}' -> {not current}")
-            render()
+            self.refresh_plugins()   # re-sort: active up, disabled down
 
         btn.clicked.connect(toggle)
         l.addWidget(btn)
@@ -255,15 +271,17 @@ class UltraPilotApp(QMainWindow):
         self.sidebar.setObjectName("Sidebar")
         self.sidebar.setFixedWidth(200)
         sb = QVBoxLayout(self.sidebar)
-        # Logo at the top of the sidebar.
-        from PyQt6.QtGui import QPixmap
+        # Logo at the top of the sidebar. Use QIcon.pixmap for reliable .ico
+        # rendering (QPixmap on a multi-size .ico can pick a tiny/empty frame).
+        from PyQt6.QtGui import QPixmap, QIcon
         from core.paths import resource as _res
         logo = QLabel()
-        _pm = QPixmap(_res("assets", "favicon.ico"))   # icon only, not the wordmark
+        _pm = QIcon(_res("assets", "favicon.ico")).pixmap(72, 72)
         if _pm.isNull():
-            _pm = QPixmap(_res("assets", "logo.png"))
+            _pm = QPixmap(_res("assets", "logo.png")).scaledToWidth(
+                96, Qt.TransformationMode.SmoothTransformation)
         if not _pm.isNull():
-            logo.setPixmap(_pm.scaledToWidth(96, Qt.TransformationMode.SmoothTransformation))
+            logo.setPixmap(_pm)
         logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sb.addWidget(logo)
         sb.addSpacing(10)

@@ -183,6 +183,12 @@ class UltraPilotEngine:
         if self.shared_state.get("steering_invert", False):
             steering = -steering
 
+        # Speed-dependent steering clamp: the faster we go, the less the wheel
+        # may turn — this stops the truck from yanking into a barrier in curves.
+        spd_kmh = abs(float(self.shared_state.get("truck_speed_ms", 0.0) or 0.0)) * 3.6
+        max_steer = 1.0 if spd_kmh < 30 else max(0.25, 1.0 - (spd_kmh - 30) / 110.0)
+        steering = max(-max_steer, min(max_steer, steering))
+
         self.controller.set_steering(steering)
         self.controller.set_throttle(throttle)
         self.controller.set_brake(brake)
