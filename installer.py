@@ -395,11 +395,11 @@ class WelcomePage(QWizardPage):
         lay.setSpacing(14)
 
         logo = QLabel()
-        pm = QPixmap(LOGO_PATH)
+        pm = QPixmap(ICON_PATH)          # symbol only (no wordmark)
         if pm.isNull():
-            pm = QPixmap(ICON_PATH)
+            pm = QPixmap(LOGO_PATH)
         if not pm.isNull():
-            logo.setPixmap(pm.scaled(150, 150, Qt.AspectRatioMode.KeepAspectRatio,
+            logo.setPixmap(pm.scaled(120, 120, Qt.AspectRatioMode.KeepAspectRatio,
                                      Qt.TransformationMode.SmoothTransformation))
         logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(logo)
@@ -535,11 +535,11 @@ class FinishPage(QWizardPage):
         lay.setContentsMargins(40, 40, 40, 40)
         lay.setSpacing(16)
         self.icon = QLabel()
-        pm = QPixmap(LOGO_PATH)
+        pm = QPixmap(ICON_PATH)          # symbol only (no wordmark)
         if pm.isNull():
-            pm = QPixmap(ICON_PATH)
+            pm = QPixmap(LOGO_PATH)
         if not pm.isNull():
-            self.icon.setPixmap(pm.scaled(110, 110, Qt.AspectRatioMode.KeepAspectRatio,
+            self.icon.setPixmap(pm.scaled(96, 96, Qt.AspectRatioMode.KeepAspectRatio,
                                           Qt.TransformationMode.SmoothTransformation))
         self.icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.title_lbl = QLabel(); self.title_lbl.setObjectName("Title")

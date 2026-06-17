@@ -21,7 +21,9 @@ build_exe_options = {
     "packages": [
         "os", "sys", "multiprocessing", "logging", "json", "math", "time",
         "numpy", "cv2", "mss", "PyQt6", "psutil", "requests", "yaml",
-        "pyqtgraph", "OpenGL",
+        # pyqtgraph / OpenGL are optional (3D view); cx_Freeze auto-includes them
+        # only if installed. Listing them as required packages broke the build
+        # when PyOpenGL wasn't installed, so they're intentionally NOT here.
         "core", "core.sdk", "core.ipc", "core.modules", "core.settings",
         "core.voice", "core.navigation",
         "sdk", "ui",
@@ -47,6 +49,14 @@ build_exe_options = {
     ],
     "include_msvcr": True,
 }
+
+# Bundle the optional 3D libs only if they're installed (avoids build failure).
+for _opt_pkg, _opt_import in (("pyqtgraph", "pyqtgraph"), ("OpenGL", "OpenGL")):
+    try:
+        __import__(_opt_import)
+        build_exe_options["packages"].append(_opt_pkg)
+    except Exception:
+        pass
 
 base = "gui" if sys.platform == "win32" else None
 

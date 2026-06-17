@@ -68,6 +68,10 @@ def build_app():
     step(1, 3, "Freezing the application (cx_Freeze)…")
     if not _ensure("cx_Freeze", "cx_Freeze"):
         return None
+    # Make sure the optional 3D-view libs are present so they get bundled.
+    cprint("y", "  Ensuring 3D libraries (pyqtgraph, PyOpenGL)…")
+    _ensure("pyqtgraph", "pyqtgraph")
+    _ensure("PyOpenGL", "OpenGL")
     subprocess.run([sys.executable, "freeze_app.py", "build"], check=True)
     builds = [b for b in glob.glob(os.path.join("build", "exe.win-amd64-*"))
               if os.path.exists(os.path.join(b, "UltraPilot.exe"))]
