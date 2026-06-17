@@ -43,13 +43,15 @@ def dataset_dir(key: str) -> str:
 
 
 def is_downloaded(key: str) -> bool:
-    """A dataset is ready if its folder exists and contains a nodes json."""
+    """A dataset is ready if its folder exists and holds extracted json data."""
     d = dataset_dir(key)
     if not os.path.isdir(d):
         return False
+    # Mark complete if our download wrote the config, or any json data exists.
     for root, _dirs, files in os.walk(d):
-        if any(f.startswith("nodes") and f.endswith(".json") for f in files):
-            return True
+        for f in files:
+            if f == "config.json" or f.endswith(".json"):
+                return True
     return False
 
 

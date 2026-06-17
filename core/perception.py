@@ -30,6 +30,13 @@ class Perception:
             "width": int(self.monitor["width"] * 0.4),
             "height": int(self.monitor["height"] * 0.3)
         }
+        # Road ahead — used for vision lane-keeping when driving WITHOUT a map.
+        self.lane_region = {
+            "top": int(self.monitor["height"] * 0.55),
+            "left": int(self.monitor["width"] * 0.20),
+            "width": int(self.monitor["width"] * 0.60),
+            "height": int(self.monitor["height"] * 0.32),
+        }
         # Define the region for obstacle detection (center of the screen, horizon)
         self.obstacle_region = {
             "top": int(self.monitor["height"] * 0.4),
@@ -102,41 +109,59 @@ class Perception:
             return 0.0
 
     def detect_lanes(self) -> float:
-        """Detects lane offset using AI with traditional CV fallback.
-        Updates 'ai_confidence' in shared state.
         """
-        frame = self.get_frame()
+        Vision lane-keeping (used when driving WITHOUT a map).
 
-        # 1. Try AI Model
-        if self.model and self.model.loaded:
-            try:
-                predictions = self.model.detect(frame)
-                if predictions:
-                    self._publish("ai_confidence", 0.95)
-                    return self._process_ai_output(predictions, frame.shape[1])
-            except Exception as e:
-                logging.error(f"AI Lane Detection failed: {e}")
-                self._publish("ai_confidence", 0.0)
-
-        # 2. Fallback to Traditional CV
-        self._publish("ai_confidence", 0.3)  # Lower confidence for traditional CV
+        Splits detected edges into left/right lane lines by slope, estimates the
+        lane centre, and returns the truck's offset from it in ``[-1, 1]``
+        (negative = truck left of centre, positive = right).  Temporally smoothed.
+        """
+        frame = self.get_frame(self.lane_region)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray, 50, 150)
-        height, width = edges.shape
-        mask = np.zeros_like(edges)
-        polygon = np.array([
-            (0, height), (width, height),
-            (width // 2 + 150, height // 2), (width // 2 - 150, height // 2),
-        ], np.int32)
-        cv2.fillPoly(mask, [polygon], 255)
-        cropped_edges = cv2.bitwise_and(edges, mask)
-        lines = cv2.HoughLinesP(cropped_edges, 1, np.pi/180, 50, minLineLength=50, maxLineGap=10)
-        if lines is not None:
-            avg_x = np.mean([line[0][0] for line in lines])
-            return (avg_x - (width // 2)) / (width // 2)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(gray, 60, 160)
+        h, w = edges.shape
 
-        self._publish("ai_confidence", 0.0)
-        return 0.0
+        # Trapezoid ROI focused on the road ahead.
+        mask = np.zeros_like(edges)
+        poly = np.array([[(int(0.02 * w), h), (int(0.98 * w), h),
+                          (int(0.62 * w), int(0.30 * h)), (int(0.38 * w), int(0.30 * h))]], np.int32)
+        cv2.fillPoly(mask, poly, 255)
+        edges = cv2.bitwise_and(edges, mask)
+
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, 40, minLineLength=40, maxLineGap=60)
+        cx = w / 2.0
+        left_x, right_x = [], []
+        if lines is not None:
+            for x1, y1, x2, y2 in lines[:, 0]:
+                if x2 == x1:
+                    continue
+                slope = (y2 - y1) / (x2 - x1)
+                if abs(slope) < 0.4:      # ignore near-horizontal edges
+                    continue
+                mx = (x1 + x2) / 2.0
+                (left_x if slope < 0 else right_x).append(mx)
+
+        offset = None
+        if left_x and right_x:
+            lane_center = (np.mean(left_x) + np.mean(right_x)) / 2.0
+            offset = (cx - lane_center) / cx
+        elif left_x:                       # only left line → bias right a bit
+            offset = (cx - (np.mean(left_x) + w * 0.18)) / cx
+        elif right_x:
+            offset = (cx - (np.mean(right_x) - w * 0.18)) / cx
+
+        if offset is None:
+            self._publish("ai_confidence", 0.0)
+            # decay toward 0 (no lines → hold straight)
+            self._last_lane = getattr(self, "_last_lane", 0.0) * 0.7
+            return self._last_lane
+
+        self._publish("ai_confidence", 0.5)
+        offset = float(np.clip(offset, -1.0, 1.0))
+        prev = getattr(self, "_last_lane", 0.0)
+        self._last_lane = 0.4 * offset + 0.6 * prev   # temporal smoothing
+        return self._last_lane
 
     def _publish(self, key, value):
         """Safely write to shared state (no-op if running standalone)."""

@@ -25,7 +25,7 @@ def _gear_text(gear):
 class UltraPilotHUD(QWidget):
     """Animated driving-view HUD: ego truck, surrounding traffic, route, lights."""
 
-    W, H = 760, 460       # large immersive scene, anchored top-centre
+    W, H = 860, 520       # large immersive scene, anchored bottom-centre
     VIEW_M = 110.0         # metres shown ahead in the driving view
 
     def __init__(self, shared_state):
@@ -75,6 +75,8 @@ class UltraPilotHUD(QWidget):
             # The route to draw: active navigation, else the map road ahead.
             "nav_path": (s.get("nav_path", []) or s.get("map_path", []) or []),
             "limit_ms": truck.get("speedLimit", 0.0) or 0.0,
+            "acc_speed": s.get("tags.acc.acc_speed"),
+            "nav_dist": s.get("distance_to_dest"),
         }
 
     # --- Painting -------------------------------------------------------------
@@ -96,6 +98,12 @@ class UltraPilotHUD(QWidget):
         # 1) Full-bleed 3D driving scene as the whole background (like ETS2LA).
         scene = QRectF(0, 0, self.W, self.H)
         self._draw_driving_view(qp, scene, d, accent)
+
+        # 1b) Dark top panel so the overlaid numbers stay fully readable
+        #     (fixes "half the numbers cut off").
+        qp.setPen(Qt.PenStyle.NoPen)
+        qp.setBrush(QColor(8, 11, 15, 190))
+        qp.drawRect(QRectF(0, 0, self.W, 132))
 
         # 2) Throttle (green) + brake (red) strips on the far-left edge.
         t = max(0.0, min(1.0, d["throttle"]))
@@ -148,18 +156,29 @@ class UltraPilotHUD(QWidget):
         qp.setPen(QColor("#FFFFFF")); qp.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         qp.drawText(pill, Qt.AlignmentFlag.AlignCenter, "AUTOPILOT" if on else "MANUAL")
 
-        # 8) Traffic-light countdown text in the scene ("12.4s  RED > YELLOW").
+        # 8) Traffic light: a 3-bulb signal + countdown in the scene.
         lt = d["light"]
-        if lt and lt.get("time_left", 0) > 0:
-            col = {"red": "#F87171", "green": "#4ADE80", "yellow": "#FBBF24"}.get(lt.get("color"), "#D1D5DB")
-            cx = self.W / 2 - 40
-            qp.setPen(QColor("#FFFFFF")); qp.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
-            qp.drawText(QRectF(cx, self.H * 0.42, 140, 26), Qt.AlignmentFlag.AlignLeft,
-                        f"{lt['time_left']:.1f}s")
-            qp.setPen(QColor(col)); qp.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-            nxt = {"red": "RED → GREEN", "green": "GREEN → YELLOW",
-                   "yellow": "YELLOW"}.get(lt.get("color"), "")
-            qp.drawText(QRectF(cx, self.H * 0.42 + 24, 160, 16), Qt.AlignmentFlag.AlignLeft, nxt)
+        if lt:
+            color = lt.get("color", "off")
+            cx, cy = self.W / 2 + 70, self.H * 0.34
+            # housing
+            qp.setPen(Qt.PenStyle.NoPen); qp.setBrush(QColor(20, 24, 30, 230))
+            qp.drawRoundedRect(QRectF(cx, cy, 26, 64), 6, 6)
+            for i, (cname, on_c) in enumerate((("red", "#EF4444"),
+                                               ("yellow", "#FBBF24"),
+                                               ("green", "#22C55E"))):
+                lit = (color == cname)
+                qp.setBrush(QColor(on_c) if lit else QColor(55, 60, 66))
+                qp.drawEllipse(QRectF(cx + 5, cy + 5 + i * 19, 16, 16))
+            tl = lt.get("time_left", 0) or 0
+            if tl > 0:
+                col = {"red": "#F87171", "green": "#4ADE80", "yellow": "#FBBF24"}.get(color, "#D1D5DB")
+                qp.setPen(QColor("#FFFFFF")); qp.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+                qp.drawText(QRectF(cx + 32, cy + 8, 90, 24), Qt.AlignmentFlag.AlignLeft, f"{tl:.1f}s")
+                qp.setPen(QColor(col)); qp.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+                nxt = {"red": "RED → GREEN", "green": "GREEN → YELLOW",
+                       "yellow": "YELLOW"}.get(color, "")
+                qp.drawText(QRectF(cx + 32, cy + 32, 110, 14), Qt.AlignmentFlag.AlignLeft, nxt)
 
     # --- Sub-widgets ----------------------------------------------------------
     def _draw_limit_sign(self, qp, x, y, kmh, big=False):

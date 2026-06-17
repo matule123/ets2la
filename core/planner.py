@@ -62,24 +62,28 @@ class UltraPilotPlanner:
             self.set_blinker("off")
             return self.current_state, voice_alert
 
-        # 4. Lane Following / Navigation
-        if abs(perception_data.get('lane_offset', 0)) > 0.1 or abs(perception_data.get('nav_direction', 0)) > 0.2:
-            if self.current_state == SystemState.CRUISE:
-                voice_alert = "Adjusting steering for navigation."
-            self.set_state(SystemState.FOLLOW_LANE)
+        # 4. Lane Following / Navigation — with HYSTERESIS so the state doesn't
+        #    flicker CRUISE<->FOLLOW_LANE on tiny offset noise (that flicker also
+        #    spammed the voice and jittered the wheel).
+        lane = abs(perception_data.get('lane_offset', 0))
+        nav = abs(perception_data.get('nav_direction', 0))
+        if self.current_state == SystemState.FOLLOW_LANE:
+            following = lane > 0.06 or nav > 0.12   # stay following until well centred
+        else:
+            following = lane > 0.18 or nav > 0.28   # only start following on a real deviation
 
-            # Signal if navigation direction is strong
+        if following:
+            self.set_state(SystemState.FOLLOW_LANE)
             nav_dir = perception_data.get('nav_direction', 0)
             if abs(nav_dir) > 0.6:
                 self.set_blinker("left" if nav_dir < 0 else "right")
             else:
                 self.set_blinker("off")
         else:
-            if self.current_state != SystemState.CRUISE:
-                voice_alert = "Lanes centered. Cruising."
             self.set_state(SystemState.CRUISE)
             self.set_blinker("off")
 
+        # No voice on routine lane adjustments (it was talking non-stop).
         return self.current_state, voice_alert
 
     def set_state(self, new_state):

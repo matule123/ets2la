@@ -63,9 +63,11 @@ def run_with_splash():
     lay = QVBoxLayout(w); lay.setContentsMargins(30, 26, 30, 26); lay.setSpacing(12)
 
     logo = QLabel(); logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    pm = QPixmap(os.path.join(_app_dir(), "assets", "logo.png"))
+    pm = QPixmap(os.path.join(_app_dir(), "assets", "favicon.ico"))   # icon, not wordmark
+    if pm.isNull():
+        pm = QPixmap(os.path.join(_app_dir(), "assets", "logo.png"))
     if not pm.isNull():
-        logo.setPixmap(pm.scaledToWidth(150, Qt.TransformationMode.SmoothTransformation))
+        logo.setPixmap(pm.scaledToWidth(96, Qt.TransformationMode.SmoothTransformation))
     lay.addWidget(logo)
 
     status = QLabel("Checking for updates…")

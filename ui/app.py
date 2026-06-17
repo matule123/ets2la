@@ -83,26 +83,41 @@ class PluginsPage(Page):
             if os.path.isdir(full) and os.path.exists(os.path.join(full, "main.py")):
                 self.add_plugin_row(folder)
 
+    _DESC = {
+        "autopilot": "Steering + throttle/brake control",
+        "acc": "Adaptive cruise control",
+        "collision": "Emergency braking & collision avoidance",
+        "map": "Coordinate / map navigation",
+        "tts": "Voice announcements",
+        "discord": "Discord rich presence",
+        "ecodrive": "Fuel-saving throttle smoothing",
+        "hud": "On-screen HUD elements",
+    }
+
     def add_plugin_row(self, name):
         row = QFrame()
-        row.setStyleSheet("background-color: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 8px; padding: 4px;")
+        row.setStyleSheet("background-color:#FFFFFF; border:1px solid #E5E7EB; border-radius:10px;")
         l = QHBoxLayout(row)
+        l.setContentsMargins(14, 10, 14, 10)
 
+        info = QVBoxLayout()
         lbl = QLabel(name.capitalize())
-        lbl.setFixedWidth(150)
-        l.addWidget(lbl)
-
-        status = QLabel()
-        l.addWidget(status)
+        lbl.setStyleSheet("color:#111827; font-size:15px; font-weight:700; border:none;")
+        desc = QLabel(self._DESC.get(name, ""))
+        desc.setStyleSheet("color:#6B7280; font-size:12px; border:none;")
+        info.addWidget(lbl); info.addWidget(desc)
+        l.addLayout(info)
         l.addStretch()
 
-        btn = QPushButton("Toggle")
-        btn.setFixedWidth(100)
+        btn = QPushButton()
+        btn.setFixedWidth(120)
 
         def render():
             enabled = self.state.get(f"plugin_enabled.{name}", True)
-            status.setText("● ON" if enabled else "○ OFF")
-            status.setStyleSheet(f"color: {'#34C759' if enabled else '#FF453A'}; font-weight: bold;")
+            btn.setText("● ENABLED" if enabled else "○ DISABLED")
+            btn.setStyleSheet(
+                f"background-color:{'#10B981' if enabled else '#9CA3AF'}; color:#FFFFFF;"
+                "border:none; border-radius:8px; padding:8px; font-weight:700;")
 
         def toggle():
             current = self.state.get(f"plugin_enabled.{name}", True)
@@ -208,7 +223,8 @@ class UltraPilotApp(QMainWindow):
         super().__init__()
         self.state = state
         self.setWindowTitle("ETS2 UltraPilot Pro Edition")
-        self.setFixedSize(800, 500)
+        self.resize(1000, 640)
+        self.setMinimumSize(880, 560)
         from core.theme import stylesheet
         self._theme = (state.get("ui_theme", "light") or "light")
         self.setStyleSheet(stylesheet(self._theme))

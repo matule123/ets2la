@@ -19,11 +19,12 @@ from typing import List, Optional, Sequence, Tuple
 
 Point = Tuple[float, float]
 
-# Tuning (anticipate curves early + gentle, so corrections stay small/smooth).
-ANGLE_GAIN = 1.05         # rad of heading error → steering
-CTE_GAIN = 0.045          # per-metre lateral correction
-MIN_LOOKAHEAD = 16.0      # metres — look well ahead so curves are anticipated
-MAX_LOOKAHEAD = 60.0
+# Tuning: gentle + far lookahead so the truck anticipates curves smoothly
+# instead of jerking late into them (which caused it to crash on bends).
+ANGLE_GAIN = 0.65         # rad of heading error → steering (was too strong)
+CTE_GAIN = 0.025          # per-metre lateral correction (softer)
+MIN_LOOKAHEAD = 22.0      # look further ahead → smoother, earlier turning
+MAX_LOOKAHEAD = 75.0
 ARRIVAL_RADIUS = 12.0     # metres from the last point counts as "arrived"
 
 

@@ -25,6 +25,7 @@ class Plugin(BasePlugin):
         self.steering_pid.set_setpoint(0.0)
         self._last_throttle = 0.0
         self._last_steering = 0.0
+        self._blinker = "off"
 
     def on_stop(self):
         logging.info("Autopilot Plugin stopped.")
@@ -60,11 +61,14 @@ class Plugin(BasePlugin):
                 self.sdk.controller.pay_toll()
             return
 
-        # Brake requests: collision plugin (CV) + traffic-following (real lead car).
+        # Brake requests, combined via max():
+        #   collision plugin, real lead car, red light, AND any camera obstacle.
         collision_brake = float(self.sdk.shared_state.get("collision_brake_request", 0.0) or 0.0)
         traffic_brake = float(self.sdk.shared_state.get("traffic_brake", 0.0) or 0.0)
         light_brake = float(self.sdk.shared_state.get("light_brake", 0.0) or 0.0)
-        collision_brake = max(collision_brake, traffic_brake, light_brake)
+        # Vision obstacle (anything ahead, not just vehicles): brake on high danger.
+        obstacle_brake = float(np.clip((danger_level - 0.35) * 1.8, 0.0, 1.0)) if danger_level > 0.35 else 0.0
+        collision_brake = max(collision_brake, traffic_brake, light_brake, obstacle_brake)
 
         if system_state == "AVOID_OBSTACLE":
             self.sdk.controller.set_throttle(0)
@@ -94,9 +98,10 @@ class Plugin(BasePlugin):
         nav_active = bool(self.sdk.shared_state.get("nav_active", False))
         if nav_active:
             nav_steering = float(self.sdk.shared_state.get("nav_steering", 0.0) or 0.0)
-            # Heavier low-pass + per-tick rate limit so the wheel never snaps.
-            target = (0.18 * nav_steering) + (0.82 * self._last_steering)
-            max_step = 0.05  # max steering change per tick
+            # Strong low-pass + tight rate limit so the wheel turns smoothly and
+            # can never snap (snapping was what threw the truck into barriers).
+            target = (0.10 * nav_steering) + (0.90 * self._last_steering)
+            max_step = 0.02  # max steering change per tick (slower, smoother)
             delta = float(np.clip(target - self._last_steering, -max_step, max_step))
             self._last_steering = float(np.clip(self._last_steering + delta, -1.0, 1.0))
             steering_val = self._last_steering
@@ -122,6 +127,19 @@ class Plugin(BasePlugin):
             steering_val = self._last_steering
 
         self.sdk.controller.set_steering(steering_val)
+
+        # Turn signals: indicate during a sustained turn (with hysteresis so it
+        # doesn't flicker on tiny corrections).
+        want = self._blinker
+        if steering_val > 0.16:
+            want = "right"
+        elif steering_val < -0.16:
+            want = "left"
+        elif abs(steering_val) < 0.06:
+            want = "off"
+        if want != self._blinker:
+            self._blinker = want
+            self.sdk.controller.set_blinker(want)
 
         # Publish UI tags.
         self.tags.steering = round(steering_val, 3)

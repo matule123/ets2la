@@ -104,9 +104,16 @@ class UltraPilotEngine:
             dx, dz = v["x"] - px, v["z"] - pz
             ahead = dx * (-sin_h) + dz * (-cos_h)
             lateral = dx * cos_h - dz * sin_h
-            if 2.0 < ahead < 60.0 and abs(lateral) < 2.5:   # in our lane, in front
-                if nearest is None or ahead < nearest:
-                    nearest = ahead
+            if not (2.0 < ahead < 60.0 and abs(lateral) < 2.5):  # in our lane, in front
+                continue
+            # Skip ONCOMING vehicles (facing roughly opposite to us) — only brake
+            # for cars going the same way, so we don't stop for the other lane.
+            vyaw = v.get("yaw", heading)
+            facing = math.cos(vyaw - heading)   # ~1 same dir, ~-1 oncoming
+            if facing < -0.3:
+                continue
+            if nearest is None or ahead < nearest:
+                nearest = ahead
         if nearest is None:
             return 0.0
         self.shared_state.set("lead_distance", nearest)
