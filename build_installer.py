@@ -23,9 +23,18 @@ Usage:
 
 import os
 import sys
-import glob
 import shutil
 import subprocess
+
+# Enable ANSI colours on Windows AND fix the cp1250 console crash: a bare
+# `print("\u2714 ...")` raised UnicodeEncodeError under Windows-1250 consoles,
+# which killed the whole build right at the final "done" line. Force UTF-8 on
+# stdout/stderr so all the tick / arrow glyphs print fine everywhere.
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
 
 try:
     os.system("")  # enable ANSI colours on Windows
@@ -37,7 +46,11 @@ _C = {"g": "\033[92m", "y": "\033[93m", "r": "\033[91m", "c": "\033[96m",
 
 
 def cprint(color, msg):
-    print(f"{_C.get(color, '')}{msg}{_C['x']}")
+    try:
+        print(f"{_C.get(color, '')}{msg}{_C['x']}")
+    except UnicodeEncodeError:
+        # Last-resort: strip anything the console can't render.
+        print(msg.encode("ascii", "replace").decode("ascii"))
 
 
 def step(n, total, msg):
@@ -46,6 +59,7 @@ def step(n, total, msg):
 
 ICON = os.path.join("assets", "favicon.ico")
 SETUP_DIR = os.path.join("dist", "UltraPilot-Setup")
+PAYLOAD_DIR = os.path.join(SETUP_DIR, "payload")
 
 
 def _ensure(pkg, import_name=None):
@@ -53,7 +67,7 @@ def _ensure(pkg, import_name=None):
         __import__(import_name or pkg)
         return True
     except ImportError:
-        print(f"Installing {pkg}…")
+        print(f"Installing {pkg}...")
         subprocess.run([sys.executable, "-m", "pip", "install", pkg], check=False)
         try:
             __import__(import_name or pkg)
@@ -63,36 +77,43 @@ def _ensure(pkg, import_name=None):
             return False
 
 
-def build_app():
-    """Freeze the application with cx_Freeze (creates build/exe.win-amd64-*)."""
-    step(1, 3, "Freezing the application (cx_Freeze)…")
-    if not _ensure("cx_Freeze", "cx_Freeze"):
-        return None
-    # Make sure the optional 3D-view libs are present so they get bundled.
-    cprint("y", "  Ensuring 3D libraries (pyqtgraph, PyOpenGL)…")
-    _ensure("pyqtgraph", "pyqtgraph")
-    _ensure("PyOpenGL", "OpenGL")
-    subprocess.run([sys.executable, "freeze_app.py", "build"], check=True)
-    builds = [b for b in glob.glob(os.path.join("build", "exe.win-amd64-*"))
-              if os.path.exists(os.path.join(b, "UltraPilot.exe"))]
-    if not builds:
-        cprint("r", "ERROR: frozen app not found after build.")
-        return None
-    cprint("g", f"  ✓ App frozen: {builds[0]}")
-    return builds[0]
+def build_payload():
+    """Assemble the offline payload (the source tree the installer falls back to
+    when GitHub is unreachable)."""
+    step(1, 3, "Assembling the offline payload...")
+    if os.path.exists(PAYLOAD_DIR):
+        shutil.rmtree(PAYLOAD_DIR, ignore_errors=True)
+    os.makedirs(PAYLOAD_DIR, exist_ok=True)
+    # Skip caches / build artefacts / huge caches so the payload stays small
+    # (the real map cache is downloaded at runtime).
+    skip = {"__pycache__", ".git", "build", "dist", ".claude",
+            "map-cache", "model-cache", "routes", "UltraPilot.egg-info"}
+
+    def _ignore(_d, names):
+        return [n for n in names if n in skip]
+
+    for item in ("core", "plugins", "sdk", "ui", "assets"):
+        src = os.path.abspath(item)
+        if os.path.isdir(src):
+            shutil.copytree(src, os.path.join(PAYLOAD_DIR, item),
+                            dirs_exist_ok=True, ignore=_ignore)
+    for f in ("main.py", "bootloader.py", "requirements.txt", "README.md"):
+        if os.path.exists(f):
+            shutil.copy2(f, os.path.join(PAYLOAD_DIR, f))
+    cprint("g", "  Payload assembled.")
+    return PAYLOAD_DIR
 
 
 def build_installer_exe():
-    """Build the single branded installer exe.
-
-    The installer clones the app from GitHub at install time, so we don't bundle
-    a frozen payload — only the source tree as an offline fallback + assets."""
-    step(1, 1, "Building UltraPilot_Installer.exe (PyInstaller)…")
+    """Build the single branded installer exe (PyInstaller, onefile/windowed)."""
+    step(2, 3, "Building UltraPilot_Installer.exe (PyInstaller)...")
     if not _ensure("pyinstaller", "PyInstaller"):
+        return None
+    if not os.path.exists(ICON):
+        cprint("r", f"  ERROR: icon not found at {ICON}")
         return None
     sep = ";" if os.name == "nt" else ":"
     data = [f"--add-data=assets{sep}assets"]
-    # Source tree as an offline fallback (small) if GitHub is unreachable.
     for item in ("core", "plugins", "sdk", "ui"):
         data.append(f"--add-data={item}{sep}{item}")
     for f in ("main.py", "bootloader.py", "requirements.txt"):
@@ -105,31 +126,37 @@ def build_installer_exe():
         "--hidden-import=core.sdk.vigembus",
         "installer.py",
     ]
-    cprint("y", "  Running PyInstaller…")
-    subprocess.run(cmd, check=True)
+    cprint("y", "  Running PyInstaller...")
+    r = subprocess.run(cmd)
+    if r.returncode != 0:
+        cprint("r", "  ERROR: PyInstaller failed.")
+        return None
     exe = os.path.join("dist", "UltraPilot_Installer.exe")
-    if os.path.exists(exe):
-        cprint("g", f"  ✓ Done!  Installer: {exe}")
-        return exe
-    cprint("r", "  ERROR: installer exe not produced.")
-    return None
+    if not os.path.exists(exe):
+        cprint("r", "  ERROR: installer exe not produced.")
+        return None
+    cprint("g", f"  Installer built: {exe}")
+    return exe
 
 
-def assemble(payload_dir, installer_exe):
-    """Assemble dist/UltraPilot-Setup/{UltraPilot_Installer.exe, payload/}."""
-    step(3, 3, "Assembling the setup folder…")
-    if os.path.exists(SETUP_DIR):
-        shutil.rmtree(SETUP_DIR)
+def assemble(installer_exe):
+    """Move the built exe into the setup folder (payload/ is already there)."""
+    step(3, 3, "Assembling the setup folder...")
     os.makedirs(SETUP_DIR, exist_ok=True)
     shutil.copy2(installer_exe, os.path.join(SETUP_DIR, "UltraPilot_Installer.exe"))
-    shutil.copytree(payload_dir, os.path.join(SETUP_DIR, "payload"))
-    print(f"\n[OK] Done!  Setup folder: {SETUP_DIR}")
-    print("  Run UltraPilot_Installer.exe inside it, or zip the folder to share.")
+    cprint("g", f"\nDone!  Setup folder: {os.path.abspath(SETUP_DIR)}")
+    cprint("c", "  Run UltraPilot_Installer.exe inside it, or zip the folder to share.")
 
 
 def main():
-    # No heavy app freeze needed — the installer fetches the app from GitHub.
-    return 0 if build_installer_exe() else 1
+    # Build in the right order: payload first (lives inside SETUP_DIR), then the
+    # installer exe (lives in dist/), then move the exe into the setup folder.
+    build_payload()
+    installer_exe = build_installer_exe()
+    if not installer_exe:
+        return 1
+    assemble(installer_exe)
+    return 0
 
 
 if __name__ == "__main__":

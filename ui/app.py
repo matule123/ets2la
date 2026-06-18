@@ -154,42 +154,68 @@ class DashboardPage(Page):
         title.setStyleSheet("font-size: 24px; font-weight: bold; color: #065F46; margin-bottom: 10px;")
         self.layout.addWidget(title)
 
-        container = QFrame()
-        container.setStyleSheet("background-color: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 12px; padding: 20px;")
-        cl = QVBoxLayout(container)
+        # --- Prominent autopilot status card (the eye-catcher of the page) ---
+        self.ap_card = QFrame()
+        self.ap_card.setObjectName("ApCard")
+        self.ap_card.setStyleSheet(
+            "#ApCard { background-color: #FFFFFF; border: 1px solid #E5E7EB; "
+            "border-radius: 16px; }")
+        ap_l = QVBoxLayout(self.ap_card)
+        ap_l.setContentsMargins(24, 20, 24, 20)
+        ap_l.setSpacing(6)
 
-        st = QLabel("CURRENT SPEED")
-        st.setStyleSheet("color: #6B7280; font-size: 12px; font-weight: bold;")
-        cl.addWidget(st)
-        self.speed_val = QLabel("0 km/h")
-        self.speed_val.setStyleSheet("font-size: 48px; font-weight: bold; color: #111827;")
-        cl.addWidget(self.speed_val)
+        ap_head = QHBoxLayout()
+        self.ap_dot = QLabel("●")
+        self.ap_dot.setStyleSheet("font-size: 22px; color: #9CA3AF; border:none;")
+        ap_head.addWidget(self.ap_dot)
+        self.ap_title = QLabel("Autopilot vypnutý")
+        self.ap_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #111827; border:none;")
+        ap_head.addWidget(self.ap_title)
+        ap_head.addStretch()
+        self.ap_state = QLabel("MANUÁL")
+        self.ap_state.setStyleSheet("color: #9CA3AF; font-size: 12px; font-weight: 700; border:none;")
+        ap_head.addWidget(self.ap_state)
+        ap_l.addLayout(ap_head)
 
-        self.state_val = QLabel("SYSTEM: IDLE")
-        self.state_val.setStyleSheet("color: #10B981; font-size: 16px; font-weight: bold;")
-        cl.addWidget(self.state_val)
+        # Big speed readout beside the system state.
+        speed_row = QHBoxLayout()
+        self.speed_val = QLabel("0")
+        self.speed_val.setStyleSheet("font-size: 56px; font-weight: bold; color: #065F46; border:none;")
+        speed_row.addWidget(self.speed_val)
+        sp_unit = QVBoxLayout()
+        sp_lbl = QLabel("Aktuálna rýchlosť")
+        sp_lbl.setStyleSheet("color: #6B7280; font-size: 11px; font-weight: 600; border:none;")
+        self.speed_unit = QLabel("km/h")
+        self.speed_unit.setStyleSheet("color: #111827; font-size: 16px; font-weight: 700; border:none;")
+        sp_unit.addWidget(sp_lbl); sp_unit.addWidget(self.speed_unit)
+        sp_unit.addStretch()
+        speed_row.addLayout(sp_unit)
+        speed_row.addStretch()
+        ap_l.addLayout(speed_row)
+        self.layout.addWidget(self.ap_card)
 
-        self.layout.addWidget(container)
-
-        # Live telemetry grid (gear / rpm / fuel / limit / position / nav).
+        # --- Live telemetry grid (gear / rpm / fuel / limit / nav) ---
         self.metrics = {}
         grid_frame = QFrame()
-        grid_frame.setStyleSheet("background-color: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 12px; padding: 15px;")
+        grid_frame.setStyleSheet("background-color: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 12px;")
         grid = QHBoxLayout(grid_frame)
-        for key, label in [("gear", "GEAR"), ("rpm", "RPM"), ("fuel", "FUEL"),
-                           ("limit", "LIMIT"), ("nav", "NAV")]:
+        grid.setContentsMargins(8, 12, 8, 12)
+        for key, icon, label in [("gear", "⚙️", "PREVOD"), ("rpm", "🔧", "OTÁČKY"),
+                                 ("fuel", "⛽", "PALIVO"), ("limit", "🚦", "LIMIT"),
+                                 ("nav", "🧭", "NAVIGÁCIA")]:
             col = QVBoxLayout()
-            cap = QLabel(label)
-            cap.setStyleSheet("color: #6B7280; font-size: 11px; font-weight: bold;")
+            col.setSpacing(2)
+            cap = QLabel(f"{icon}  {label}")
+            cap.setStyleSheet("color: #6B7280; font-size: 11px; font-weight: bold; border:none;")
             val = QLabel("—")
-            val.setStyleSheet("color: #111827; font-size: 20px; font-weight: bold;")
+            val.setStyleSheet("color: #111827; font-size: 22px; font-weight: bold; border:none;")
             col.addWidget(cap)
             col.addWidget(val)
             grid.addLayout(col)
             self.metrics[key] = val
         self.layout.addWidget(grid_frame)
 
-        self.conn_val = QLabel("● Waiting for game telemetry…")
+        self.conn_val = QLabel("● Čakám na telemetriu z hry…")
         self.conn_val.setStyleSheet("color: #9CA3AF; font-size: 12px; margin-top: 6px;")
         self.layout.addWidget(self.conn_val)
 
@@ -202,9 +228,33 @@ class DashboardPage(Page):
         except (TypeError, ValueError):
             speed = 0.0
         speed_kmh = speed * 3.6 if abs(speed) < 200 else speed
-        self.speed_val.setText(f"{abs(speed_kmh):.1f} km/h")
+        self.speed_val.setText(f"{abs(speed_kmh):.0f}")
+
         sysstate = self.state.get("system_state", "IDLE")
-        self.state_val.setText(f"SYSTEM: {sysstate}")
+        active = self.state.get("autopilot_active", False)
+        # The autopilot card reflects the master switch: green when driving,
+        # grey when manual. The system state (CRUISE / FOLLOW_LANE / …) is the
+        # fine-grained sub-state shown as the chip.
+        if active:
+            self.ap_dot.setStyleSheet("font-size: 22px; color: #10B981; border:none;")
+            self.ap_title.setText("Autopilot aktívny")
+            self.ap_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #065F46; border:none;")
+            self.ap_state.setText(str(sysstate))
+            self.ap_state.setStyleSheet("color: #10B981; font-size: 12px; font-weight: 700; border:none;")
+            self.ap_card.setStyleSheet(
+                "#ApCard { background-color: #ECFDF5; border: 1px solid #A7F3D0; "
+                "border-radius: 16px; }")
+            self.speed_val.setStyleSheet("font-size: 56px; font-weight: bold; color: #065F46; border:none;")
+        else:
+            self.ap_dot.setStyleSheet("font-size: 22px; color: #9CA3AF; border:none;")
+            self.ap_title.setText("Autopilot vypnutý")
+            self.ap_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #111827; border:none;")
+            self.ap_state.setText("MANUÁL")
+            self.ap_state.setStyleSheet("color: #9CA3AF; font-size: 12px; font-weight: 700; border:none;")
+            self.ap_card.setStyleSheet(
+                "#ApCard { background-color: #FFFFFF; border: 1px solid #E5E7EB; "
+                "border-radius: 16px; }")
+            self.speed_val.setStyleSheet("font-size: 56px; font-weight: bold; color: #111827; border:none;")
 
         truck = (self.state.get("telemetry", {}) or {}).get("truck", {}) or {}
         gear = truck.get("gear", 0)
@@ -223,10 +273,10 @@ class DashboardPage(Page):
         # Connection indicator: sdkActive in the latest telemetry snapshot.
         raw = (self.state.get("telemetry", {}) or {}).get("raw", {}) or {}
         if raw.get("sdkActive"):
-            self.conn_val.setText("● Telemetry connected")
+            self.conn_val.setText("● Telemetria pripojená")
             self.conn_val.setStyleSheet("color: #34C759; font-size: 12px; margin-top: 6px;")
         else:
-            self.conn_val.setText("● Waiting for game telemetry…")
+            self.conn_val.setText("● Čakám na telemetriu z hry…")
             self.conn_val.setStyleSheet("color: #8E8E93; font-size: 12px; margin-top: 6px;")
 
 
@@ -269,25 +319,44 @@ class UltraPilotApp(QMainWindow):
 
         self.sidebar = QFrame()
         self.sidebar.setObjectName("Sidebar")
-        self.sidebar.setFixedWidth(200)
+        self.sidebar.setFixedWidth(210)
         sb = QVBoxLayout(self.sidebar)
-        # Logo at the top of the sidebar. Use QIcon.pixmap for reliable .ico
-        # rendering (QPixmap on a multi-size .ico can pick a tiny/empty frame).
+        sb.setContentsMargins(0, 18, 0, 12)
+        sb.setSpacing(0)
+
+        # Brand block at the top: logo + wordmark + version.
         from PyQt6.QtGui import QPixmap, QIcon
         from core.paths import resource as _res
+        brand_row = QHBoxLayout()
+        brand_row.setContentsMargins(18, 0, 12, 0)
+        brand_row.setSpacing(10)
         logo = QLabel()
-        _pm = QIcon(_res("assets", "favicon.ico")).pixmap(72, 72)
+        _pm = QIcon(_res("assets", "favicon.ico")).pixmap(40, 40)
         if _pm.isNull():
             _pm = QPixmap(_res("assets", "logo.png")).scaledToWidth(
-                96, Qt.TransformationMode.SmoothTransformation)
+                40, Qt.TransformationMode.SmoothTransformation)
         if not _pm.isNull():
             logo.setPixmap(_pm)
-        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        sb.addWidget(logo)
-        sb.addSpacing(10)
-        nav = [("  🏠  Dashboard", 0), ("  🗺️  Navigation", 1),
-               ("  🛰️  Visualization", 2), ("  🧩  Plugins", 3),
-               ("  ⚙️  Settings", 4), ("  ℹ️  About", 5)]
+        logo.setStyleSheet("border:none;")
+        brand_row.addWidget(logo)
+        brand_txt = QVBoxLayout()
+        brand_txt.setSpacing(0)
+        word = QLabel("UltraPilot")
+        word.setStyleSheet("font-size: 18px; font-weight: 800; color: #065F46; border:none;")
+        ver = QLabel("Pro Edition")
+        ver.setStyleSheet("font-size: 10px; font-weight: 600; color: #9CA3AF; border:none;")
+        brand_txt.addWidget(word); brand_txt.addWidget(ver)
+        brand_row.addLayout(brand_txt)
+        brand_row.addStretch()
+        brand_w = QWidget()
+        brand_w.setLayout(brand_row)
+        brand_w.setStyleSheet("border:none;")
+        sb.addWidget(brand_w)
+        sb.addSpacing(18)
+
+        nav = [("🏠  Dashboard", 0), ("🗺️  Navigation", 1),
+               ("🛰️  Visualization", 2), ("🧩  Plugins", 3),
+               ("⚙️  Settings", 4), ("ℹ️  About", 5)]
         self._nav_btns = []
         for text, idx in nav:
             b = QPushButton(text)
@@ -297,6 +366,13 @@ class UltraPilotApp(QMainWindow):
             self._nav_btns.append(b)
         self._nav_btns[0].setChecked(True)
         sb.addStretch()
+
+        # Sidebar footer: live connection + autopilot indicator.
+        self.side_conn = QLabel("● Čakám na hru")
+        self.side_conn.setStyleSheet(
+            "color: #9CA3AF; font-size: 11px; font-weight: 600; border:none; "
+            "padding: 10px 18px;")
+        sb.addWidget(self.side_conn)
         main_layout.addWidget(self.sidebar)
 
         self.pages = QStackedWidget()
@@ -319,7 +395,7 @@ class UltraPilotApp(QMainWindow):
         _add(lambda: AboutPage(state), "About")
         main_layout.addWidget(self.pages)
 
-        self.start_btn = QPushButton("ENABLE AUTOPILOT")
+        self.start_btn = QPushButton("▶ ZAPNÚŤ AUTOPILOT")
         self.start_btn.clicked.connect(self.toggle_autopilot)
         self.statusBar().addWidget(self.start_btn)
         self.statusBar().setStyleSheet("background-color: #FFFFFF; color: #6B7280;")
@@ -332,10 +408,10 @@ class UltraPilotApp(QMainWindow):
     def _render_start_btn(self):
         active = self.state.get("autopilot_active", False)
         if active:
-            self.start_btn.setText("DISABLE AUTOPILOT")
+            self.start_btn.setText("■ VYPNÚŤ AUTOPILOT")
             self.start_btn.setStyleSheet("background-color: #EF4444; color: #FFFFFF; font-weight: bold; padding: 8px 18px; border-radius: 8px;")
         else:
-            self.start_btn.setText("ENABLE AUTOPILOT")
+            self.start_btn.setText("▶ ZAPNÚŤ AUTOPILOT")
             self.start_btn.setStyleSheet("background-color: #10B981; color: #FFFFFF; font-weight: bold; padding: 8px 18px; border-radius: 8px;")
 
     def toggle_autopilot(self):
@@ -360,6 +436,22 @@ class UltraPilotApp(QMainWindow):
         if isinstance(dash, DashboardPage):
             dash.refresh()
         self._render_start_btn()
+        # Sidebar footer: reflects telemetry connection + autopilot state.
+        raw = (self.state.get("telemetry", {}) or {}).get("raw", {}) or {}
+        connected = bool(raw.get("sdkActive"))
+        active = bool(self.state.get("autopilot_active", False))
+        if active:
+            self.side_conn.setText("● Autopilot aktívny")
+            self.side_conn.setStyleSheet(
+                "color: #10B981; font-size: 11px; font-weight: 700; border:none; padding: 10px 18px;")
+        elif connected:
+            self.side_conn.setText("● Hra pripojená")
+            self.side_conn.setStyleSheet(
+                "color: #34C759; font-size: 11px; font-weight: 600; border:none; padding: 10px 18px;")
+        else:
+            self.side_conn.setText("● Čakám na hru")
+            self.side_conn.setStyleSheet(
+                "color: #9CA3AF; font-size: 11px; font-weight: 600; border:none; padding: 10px 18px;")
 
 
 if __name__ == "__main__":

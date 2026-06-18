@@ -124,8 +124,216 @@ class _GlassIsland(QWidget):
                     Qt.AlignmentFlag.AlignRight, f"⏱ {rem_txt}")
 
 
+class _HUDPreview(QWidget):
+    """In-app preview of the left-side driving HUD (the same 3D scene the
+    transparent overlay draws over the game).
+
+    Mirrors core/hud.py's driving-scene rendering so what you see here is what
+    you get on the windshield — road ribbon, edge/centre lines, the blue
+    anticipated route, surrounding vehicles as 3D models, and the traffic light
+    + countdown.
+    """
+
+    def __init__(self, state):
+        super().__init__()
+        self.state = state
+        self.setMinimumHeight(420)
+
+    def paintEvent(self, event):
+        import math
+        qp = QPainter(self)
+        qp.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+
+        # Card background (same dark panel as the HUD).
+        qp.setPen(Qt.PenStyle.NoPen)
+        qp.setBrush(QColor(10, 13, 18, 235))
+        qp.drawRoundedRect(QRectF(0, 0, w, h), 16, 16)
+
+        d = self._read()
+        # Compact top readout (speed / KM/H / limit / gear).
+        qp.setPen(QColor("#FFFFFF"))
+        qp.setFont(QFont("Segoe UI", 40, QFont.Weight.Bold))
+        qp.drawText(QRectF(16, 8, 160, 56), Qt.AlignmentFlag.AlignVCenter,
+                    f"{d['speed_kmh']:.0f}")
+        qp.setPen(QColor(255, 255, 255, 150))
+        qp.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        qp.drawText(QRectF(18, 60, 120, 16), Qt.AlignmentFlag.AlignLeft, "KM/H")
+        if d["limit_ms"] > 1:
+            self._limit(qp, w - 100, 14, d["limit_ms"] * 3.6)
+        qp.setBrush(QColor(40, 44, 52, 220))
+        qp.setPen(QPen(QColor(90, 96, 104, 200), 1))
+        qp.drawRoundedRect(QRectF(w - 48, 14, 34, 34), 8, 8)
+        qp.setPen(QColor("#FFFFFF"))
+        qp.setFont(QFont("Segoe UI", 15, QFont.Weight.Bold))
+        g = d["gear"]
+        gt = "N" if not g else (str(int(g)) if g > 0 else "R")
+        qp.drawText(QRectF(w - 48, 15, 34, 32), Qt.AlignmentFlag.AlignCenter, gt)
+
+        # 3D driving scene.
+        scene = QRectF(8, 78, w - 16, h - 86)
+        qp.save(); qp.setClipRect(scene)
+        self._scene(qp, scene, d)
+        qp.restore()
+
+        # Status pill.
+        on = d["active"]
+        pill = QRectF(w / 2 - 60, h - 28, 120, 20)
+        qp.setBrush(QColor("#10B981") if on else QColor(120, 120, 128, 220))
+        qp.setPen(Qt.PenStyle.NoPen)
+        qp.drawRoundedRect(pill, 10, 10)
+        qp.setPen(QColor("#FFFFFF")); qp.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        qp.drawText(pill, Qt.AlignmentFlag.AlignCenter, "AUTOPILOT" if on else "MANUÁL")
+
+    def _read(self):
+        s = self.state
+        speed = s.get("speed", 0) or 0
+        try:
+            speed = float(speed)
+        except (TypeError, ValueError):
+            speed = 0.0
+        truck = (s.get("telemetry", {}) or {}).get("truck", {}) or {}
+        return {
+            "speed_kmh": abs(speed) * 3.6 if abs(speed) < 200 else abs(speed),
+            "gear": truck.get("gear", 0),
+            "active": bool(s.get("autopilot_active", False)),
+            "pos": s.get("truck_world_pos"),
+            "heading": s.get("truck_heading", 0.0) or 0.0,
+            "traffic": s.get("traffic", []) or [],
+            "light": s.get("traffic_light"),
+            "nav_path": (s.get("nav_path", []) or s.get("map_path", []) or []),
+            "limit_ms": truck.get("speedLimit", 0.0) or 0.0,
+        }
+
+    def _limit(self, qp, x, y, kmh):
+        qp.setBrush(QColor("#FFFFFF")); qp.setPen(QPen(QColor("#EF4444"), 4))
+        qp.drawEllipse(QRectF(x, y, 36, 36))
+        qp.setPen(QColor("#111827"))
+        qp.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        qp.drawText(QRectF(x, y, 36, 36), Qt.AlignmentFlag.AlignCenter, f"{kmh:.0f}")
+
+    def _proj(self, ahead, lateral, view, height=0.0):
+        cam_h = 8.0; cam_back = 14.0
+        f = view.height() * 1.05
+        horizon = view.top() + view.height() * 0.26
+        dist = ahead + cam_back
+        if dist < 1.6:
+            return None
+        s = f / dist
+        return QPointF(view.center().x() + lateral * s, horizon + (cam_h - height) * s)
+
+    def _scene(self, qp, view, d):
+        import math
+        horizon_y = view.top() + view.height() * 0.26
+        qp.setPen(Qt.PenStyle.NoPen)
+        qp.setBrush(QColor(20, 25, 32, 160))
+        qp.drawRect(QRectF(view.left(), horizon_y, view.width(), view.bottom() - horizon_y))
+
+        pos, h = d["pos"], d["heading"]
+
+        def to_truck(wx, wz):
+            dx, dz = wx - pos[0], wz - pos[1]
+            ahead = dx * (-math.sin(h)) + dz * (-math.cos(h))
+            lat = dx * math.cos(h) - dz * math.sin(h)
+            return ahead, lat
+
+        if pos:
+            al = [to_truck(px, pz) for px, pz in d["nav_path"]]
+
+            def offset_pt(i, off):
+                a, l = al[i]
+                j = min(i + 1, len(al) - 1)
+                da, dl = al[j][0] - a, al[j][1] - l
+                n = math.hypot(da, dl) or 1.0
+                return self._proj(a, l + (-da / n) * off, view)
+
+            if len(al) >= 2:
+                HALF = 6.5
+                left = [offset_pt(i, -HALF) for i in range(len(al))]
+                right = [offset_pt(i, HALF) for i in range(len(al))]
+                ribbon = [p for p in left if p] + [p for p in reversed(right) if p]
+                if len(ribbon) >= 3:
+                    qp.setPen(Qt.PenStyle.NoPen); qp.setBrush(QColor(36, 40, 46, 235))
+                    qp.drawPolygon(QPolygonF(ribbon))
+                for off, dash in ((-HALF, False), (HALF, False), (0.0, True)):
+                    pts = [p for p in [offset_pt(i, off) for i in range(len(al))] if p]
+                    if len(pts) >= 2:
+                        st = Qt.PenStyle.DashLine if dash else Qt.PenStyle.SolidLine
+                        qp.setPen(QPen(QColor(240, 240, 245, 200), 2, st))
+                        qp.drawPolyline(QPolygonF(pts))
+                pts = [self._proj(a, l, view) for a, l in al]
+                pts = [p for p in pts if p is not None]
+                if len(pts) >= 2:
+                    qp.setPen(QPen(QColor(59, 130, 246, 80), 10))
+                    qp.drawPolyline(QPolygonF(pts))
+                    qp.setPen(QPen(QColor("#3B82F6"), 4))
+                    qp.drawPolyline(QPolygonF(pts))
+            else:
+                left = [self._proj(a, -6.5, view) for a in range(2, 80, 6)]
+                right = [self._proj(a, 6.5, view) for a in range(2, 80, 6)]
+                ribbon = [p for p in left if p] + [p for p in reversed(right) if p]
+                if len(ribbon) >= 3:
+                    qp.setPen(Qt.PenStyle.NoPen); qp.setBrush(QColor(36, 40, 46, 220))
+                    qp.drawPolygon(QPolygonF(ribbon))
+
+            # Surrounding vehicles as 3D models (far → near for overlap).
+            vehs = []
+            for v in d["traffic"]:
+                a, l = to_truck(v["x"], v["z"])
+                if -6 < a < 70 and abs(l) < 18:
+                    vehs.append((a, l, v))
+            vehs.sort(key=lambda t: -t[0])
+            for a, l, v in vehs:
+                self._box(qp, view, a, l, v)
+            self._box(qp, view, 6.0, 0.0,
+                      {"type": "truck", "width": 2.6, "length": 14.0})
+
+        # Traffic light + countdown.
+        if d["light"]:
+            color = d["light"].get("color", "off")
+            cx, cy = view.right() - 66, view.top() + 12
+            qp.setPen(Qt.PenStyle.NoPen); qp.setBrush(QColor(20, 24, 30, 235))
+            qp.drawRoundedRect(QRectF(cx, cy, 22, 52), 6, 6)
+            for i, (cn, cc) in enumerate((("red", "#EF4444"), ("yellow", "#FBBF24"),
+                                          ("green", "#22C55E"))):
+                qp.setBrush(QColor(cc) if color == cn else QColor(55, 60, 66))
+                qp.drawEllipse(QRectF(cx + 3, cy + 3 + i * 15, 16, 16))
+            tl = d["light"].get("time_left", 0) or 0
+            if tl > 0:
+                qp.setPen(QColor("#FFFFFF")); qp.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+                qp.drawText(QRectF(cx + 26, cy + 2, 56, 20), Qt.AlignmentFlag.AlignLeft,
+                            f"{tl:.1f}s")
+
+    def _box(self, qp, view, ahead, lateral, v):
+        t = v.get("type", "car")
+        body_h = {"car": 1.1, "van": 1.7, "bus": 2.8, "truck": 2.6}.get(t, 1.2)
+        hw = max(0.9, v.get("width", 2.0) / 2)
+        ln = max(3.5, v.get("length", 4.5))
+        n, fr = ahead - ln / 2, ahead + ln / 2
+        self._box3d(qp, n, fr, hw, lateral, 0.0, body_h, view, ("#8A9099", "#AEB4BC"))
+        if t == "truck":
+            self._box3d(qp, fr - ln * 0.28, fr - 0.2, hw * 0.95, lateral, body_h, body_h + 1.0, view,
+                        ("#9AA0A8", "#C2C8D0"))
+
+    def _box3d(self, qp, n, fr, hw, lateral, z0, z1, view, faces):
+        c = [self._proj(n, lateral - hw, view, z0), self._proj(n, lateral + hw, view, z0),
+             self._proj(fr, lateral - hw, view, z0), self._proj(fr, lateral + hw, view, z0),
+             self._proj(n, lateral - hw, view, z1), self._proj(n, lateral + hw, view, z1),
+             self._proj(fr, lateral - hw, view, z1), self._proj(fr, lateral + hw, view, z1)]
+        if any(p is None for p in c):
+            return
+        bl, br, fl, fr_, blt, brt, flt, frt = c
+        side, top = faces
+        qp.setPen(QPen(QColor("#34393F"), 1))
+        qp.setBrush(QColor(side).darker(115)); qp.drawPolygon(QPolygonF([bl, br, brt, blt]))
+        qp.setBrush(QColor(side)); qp.drawPolygon(QPolygonF([bl, fl, flt, blt]))
+        qp.drawPolygon(QPolygonF([br, fr_, frt, brt]))
+        qp.setBrush(QColor(side).darker(108)); qp.drawPolygon(QPolygonF([fl, fr_, frt, flt]))
+        qp.setBrush(QColor(top)); qp.drawPolygon(QPolygonF([blt, brt, frt, flt]))
+
+
 class VisualizationPage(QWidget):
-    """Visualization tab: a glass island with ETA + remaining distance."""
+    """Visualization tab: left HUD preview + glass island with ETA/distance."""
 
     def __init__(self, state):
         super().__init__()
@@ -136,19 +344,21 @@ class VisualizationPage(QWidget):
         title.setStyleSheet("font-size: 24px; font-weight: bold; color: #065F46;")
         lay.addWidget(title)
 
-        # Real GPU 3D driving scene (degrades to a hint if libs are missing).
-        try:
-            from ui.gpu_view import GpuView
-            lay.addWidget(GpuView(state), stretch=1)
-        except Exception as e:
-            msg = QLabel(f"3D view unavailable:\n{e}\n\n"
-                        "Install the GPU libraries:\npip install pyqtgraph PyOpenGL")
-            msg.setStyleSheet("color:#6B7280; font-size:13px;")
-            lay.addWidget(msg, stretch=1)
+        sub = QLabel("Ľavý HUD panel — rovnaká 3D scéna, ktorá sa vykresľuje cez hru. "
+                     "Modrá čiara = plánovaná trasa, sivé modely = okolité vozidlá, "
+                     "semafor s odpočtom.")
+        sub.setStyleSheet("color:#6B7280; font-size:13px;")
+        sub.setWordWrap(True)
+        lay.addWidget(sub)
+
+        # Live preview of the left-side driving HUD.
+        self.hud_preview = _HUDPreview(state)
+        lay.addWidget(self.hud_preview, stretch=1)
 
         self.island = _GlassIsland(state)
         lay.addWidget(self.island)
         lay.addStretch()
         self.timer = QTimer()
+        self.timer.timeout.connect(self.hud_preview.update)
         self.timer.timeout.connect(self.island.update)
-        self.timer.start(500)
+        self.timer.start(120)

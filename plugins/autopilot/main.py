@@ -41,7 +41,6 @@ class Plugin(BasePlugin):
         self._last_throttle = 0.0
         self._last_steering = 0.0
         self._last_brake = 0.0          # smoothed brake command (the ramp)
-        self._blinker = "off"
         # Rolling speed estimate (for ramp scaling when telemetry lags).
         self._speed_kmh = 0.0
 
@@ -175,20 +174,16 @@ class Plugin(BasePlugin):
         steering_val = self._last_steering
         self.sdk.controller.set_steering(steering_val)
 
-        # Turn signals with hysteresis (don't flicker on tiny corrections).
-        want = self._blinker
-        if steering_val > 0.16:
-            want = "right"
-        elif steering_val < -0.16:
-            want = "left"
-        elif abs(steering_val) < 0.06:
-            want = "off"
-        if want != self._blinker:
-            self._blinker = want
-            self.sdk.controller.set_blinker(want)
+        # NOTE: turn signals are NOT driven from steering here anymore. Tying the
+        # blinkers to the steering value made them flicker on every curve and —
+        # worse — toggle a "lane change" during obstacle avoidance, which is
+        # exactly the "pruhy sa menia pri obchádzaní" bug. Indicator control now
+        # lives in the dedicated turn-signals logic (see plugins/turnsignals),
+        # which only signals a real lane change / turn when the route actually
+        # requires one. We still publish the steering so that logic can use it.
+        self.tags.steering = round(steering_val, 3)
 
         # Publish UI tags.
-        self.tags.steering = round(steering_val, 3)
         self.tags.speed_kmh = round(speed_kmh, 1)
         self.tags.nav_active = nav_active
         self.tags.brake = round(self._last_brake, 2)

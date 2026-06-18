@@ -62,7 +62,9 @@ class AROverlay(QWidget):
         if not self.state.get("ar_enabled", True):
             return
         pos = self.state.get("truck_world_pos")
-        path = self.state.get("nav_path", []) or []
+        # Draw the active navigation path; fall back to the map-computed road
+        # ahead so the line shows during map-based driving (no recorded route).
+        path = self.state.get("nav_path", []) or self.state.get("map_path", []) or []
         if not pos or len(path) < 2:
             return
         h = self.state.get("truck_heading", 0.0) or 0.0
