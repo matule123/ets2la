@@ -33,6 +33,9 @@ class Plugin(BasePlugin):
         self.enabled = True
         self.recording = None        # Route being recorded, or None
         self.active_route = None     # Route being followed, or None
+        self.road_net = None         # RoadNetwork loaded from a downloaded map
+        self._net_attempted = False  # tried to load the road network this run?
+        self._net_loading = False    # background load in progress (don't re-enter)
         os.makedirs(ROUTES_DIR, exist_ok=True)
         self._publish_route_list()
 
@@ -88,6 +91,78 @@ class Plugin(BasePlugin):
             self.sdk.set("nav_steering", 0.0)
             logging.info("Navigation: stopped.")
 
+    def _load_road_net(self):
+        """Load the downloaded road network once, in the background (non-blocking).
+
+        The full ETS2 map is ~1.1 M nodes / 250 k segments and takes ~20 s to
+        parse, so we must NOT do it on the engine tick thread (that would freeze
+        the whole autopilot).  Instead we kick off a worker thread once; while it
+        runs the truck keeps driving by whatever path is already available, and
+        map-based steering switches on the moment the network is ready.
+        """
+        if self.road_net is not None and self.road_net.loaded:
+            return
+        if self._net_attempted or self._net_loading:
+            return
+        self._net_attempted = True
+        self._net_loading = True
+        try:
+            import threading
+
+            def _worker():
+                try:
+                    from core.navigation import map_data
+                    from core.navigation.road_network import RoadNetwork
+                    downloaded = [d for d in map_data.list_datasets() if d["downloaded"]]
+                    if not downloaded:
+                        self.sdk.set("map_status", "No map downloaded yet.")
+                        return
+                    self.sdk.set("map_status",
+                                 f"Loading road network ({downloaded[0]['key']})…")
+                    net = RoadNetwork()
+                    if net.load(map_data.dataset_dir(downloaded[0]["key"])):
+                        self.road_net = net
+                        self.sdk.set("map_status",
+                                     f"Map ready ({len(net.segments)} segments). "
+                                     "Map-based steering active.")
+                        logging.info("Navigation: road network loaded engine-side "
+                                     "(%d segments).", len(net.segments))
+                    else:
+                        # Allow a retry on the next run, not this one.
+                        self._net_attempted = False
+                        self.sdk.set("map_status",
+                                     "Map data unreadable — will retry.")
+                except Exception as e:
+                    logging.error("Navigation: engine-side road network load failed: %s", e)
+                    self.sdk.set("map_status", f"Map load error: {e}")
+                finally:
+                    self._net_loading = False
+
+            threading.Thread(target=_worker, name="RoadNetLoader", daemon=True).start()
+        except Exception as e:
+            logging.error("Navigation: could not start road network loader: %s", e)
+            self._net_loading = False
+
+    def _ensure_map_path(self, pos, heading):
+        """Compute and publish the road-ahead polyline from the downloaded map.
+
+        Falls back to whatever the UI process publishes as ``map_path`` if the
+        engine-side network isn't available yet.
+        """
+        # Prefer the engine-side network (works regardless of which UI page is open).
+        if self.road_net is not None and self.road_net.loaded:
+            try:
+                path = self.road_net.path_ahead(pos, heading)
+            except Exception:
+                path = []
+            if len(path) >= 2:
+                self.sdk.set("map_path", [list(p) for p in path])
+                return [list(p) for p in path[:25]]
+            self.sdk.set("map_path", [])
+            return []
+        # Fallback: reuse a path the UI process may have published.
+        return self.sdk.get("map_path", []) or []
+
     # --- Tick -----------------------------------------------------------------
     def on_tick(self, delta_time: float):
         if not self.enabled:
@@ -101,6 +176,10 @@ class Plugin(BasePlugin):
 
         if not pos:
             return
+
+        # Lazily load the downloaded road network (engine process) the first
+        # time we have a position. Cheap no-op once attempted.
+        self._load_road_net()
 
         # Recording: drop a breadcrumb every ~10 m.
         if self.recording is not None:
@@ -127,10 +206,9 @@ class Plugin(BasePlugin):
             idx = self.active_route.closest_index(pos)
             self.sdk.set("nav_path", [list(p) for p in self.active_route.points[idx:idx + 25]])
         else:
-            # No recorded route: drive by the downloaded MAP if a road path is
-            # available (published by the UI as map_path). This is automatic
+            # No recorded route: drive by the downloaded MAP. This is automatic
             # map-based driving — no recording needed.
-            map_path = self.sdk.get("map_path", []) or []
+            map_path = self._ensure_map_path(pos, heading)
             if len(map_path) >= 2:
                 route = Route([tuple(p) for p in map_path])
                 steer = route.steering(pos, heading, speed)
@@ -140,4 +218,4 @@ class Plugin(BasePlugin):
                 self.tags.nav_steering = round(steer, 3)
             else:
                 self.sdk.set("nav_active", False)
-            self.sdk.set("nav_path", [])
+                self.sdk.set("nav_path", [])

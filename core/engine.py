@@ -91,20 +91,47 @@ class UltraPilotEngine:
         self.voice.stop()
         logging.info("ETS2-UltraPilot Engine stopped.")
 
+    def _autostart_truck(self, truck):
+        """If the truck's engine has died while the autopilot is on, start it."""
+        if not self.shared_state.get("autopilot_active", False):
+            return
+        if truck.get("engineEnabled", True):
+            return
+        now = time.time()
+        if now - getattr(self, "_last_engine_start", 0) < 3.0:
+            return   # cooldown so we don't spam the ignition
+        self._last_engine_start = now
+        try:
+            import pydirectinput
+            pydirectinput.press('e')   # ETS2 default "start engine"
+            logging.info("Truck engine off — auto-starting it.")
+            self.shared_state.set("tts_message", "Starting the engine.")
+        except Exception:
+            pass
+
     # --- Traffic following ----------------------------------------------------
     def _lead_brake(self, traffic, pos, heading):
-        """Brake (0..1) for the closest vehicle ahead in our lane, else 0."""
+        """Brake (0..1) for the closest vehicle ahead in our lane, else 0.
+
+        Phase 1 tuning — uses **time-to-collision** instead of a bare distance
+        ramp, so it brakes early when we are closing fast on a car (even one
+        that's far away) but holds a short gap when we're already matched in
+        speed.  This is what makes it actually stop *before* the car instead of
+        rear-ending it: the closing speed, not the distance, drives the brake.
+        """
         import math
         if not traffic or not pos:
             return 0.0
         px, pz = pos
         sin_h, cos_h = math.sin(heading), math.cos(heading)
-        nearest = None
+        # Our forward speed (m/s) for relative-velocity math.
+        my_speed = float(self.shared_state.get("truck_speed_ms", 0.0) or 0.0)
+        best = None  # (ahead, closing_speed)
         for v in traffic:
             dx, dz = v["x"] - px, v["z"] - pz
             ahead = dx * (-sin_h) + dz * (-cos_h)
             lateral = dx * cos_h - dz * sin_h
-            if not (2.0 < ahead < 60.0 and abs(lateral) < 2.5):  # in our lane, in front
+            if not (2.0 < ahead < 120.0 and abs(lateral) < 2.6):  # in our lane, ahead
                 continue
             # Skip ONCOMING vehicles (facing roughly opposite to us) — only brake
             # for cars going the same way, so we don't stop for the other lane.
@@ -112,31 +139,71 @@ class UltraPilotEngine:
             facing = math.cos(vyaw - heading)   # ~1 same dir, ~-1 oncoming
             if facing < -0.3:
                 continue
-            if nearest is None or ahead < nearest:
-                nearest = ahead
-        if nearest is None:
+            # Closing speed = how fast the gap is shrinking (m/s). Lead's speed
+            # projected onto our forward direction.
+            lead_speed = float(v.get("speed", 0.0) or 0.0)
+            closing = max(0.0, my_speed - lead_speed)
+            if best is None or ahead < best[0]:
+                best = (ahead, closing)
+        if best is None:
             return 0.0
-        self.shared_state.set("lead_distance", nearest)
-        # Gentle far away, firm when close: full brake under ~8 m.
-        if nearest <= 8.0:
+        ahead, closing = best
+        self.shared_state.set("lead_distance", ahead)
+
+        # Safety gap we always want to keep (scales a little with our speed).
+        safe_gap = 6.0 + 0.4 * abs(my_speed)          # ~6 m at rest, ~30 m at 60 km/h
+        # Effective gap once the car's length is accounted for.
+        gap = max(0.0, ahead - safe_gap)
+
+        # If we're not closing, a pure distance brake is enough (gentle).
+        if closing < 0.5:
+            if gap <= 0.0:
+                return 1.0
+            if gap >= 40.0:
+                return 0.0
+            return float((40.0 - gap) / 40.0)
+
+        # Closing: time-to-collision to the safe gap. Small TTC → strong brake.
+        ttc = gap / closing if closing > 1e-3 else 0.0
+        if ttc <= 1.0:        # <1s to gap — brake fully
             return 1.0
-        if nearest >= 45.0:
+        if ttc >= 5.0:        # >5s — no action yet
             return 0.0
-        return float(max(0.0, min(1.0, (45.0 - nearest) / 37.0)))
+        # Smooth 1→0 between TTC 1s..5s (square for a firmer near-range response).
+        return float(((5.0 - ttc) / 4.0) ** 2)
 
     def _light_brake(self, light):
-        """Brake (0..1) to stop at a red light ahead; 0 on green/yellow/none."""
+        """Brake (0..1) to stop smoothly at a red light ahead; 0 on green/none.
+
+        Phase 1 tuning — yellow now also eases the speed down (the old code kept
+        full throttle through yellow), and the red stop is approached with a
+        deceleration ramp instead of a hard 1.0 at the line, so the truck glides
+        to the stop line instead of lunging at it.
+        """
         if not light:
             return 0.0
         color = light.get("color")
         dist = light.get("distance", 999.0)
-        if color != "red":
-            return 0.0          # green / yellow → keep going
-        if dist <= 9.0:
-            return 1.0          # at the line → hold stop
-        if dist >= 50.0:
-            return 0.0          # too far to act yet
-        return float(max(0.0, min(1.0, (50.0 - dist) / 41.0)))
+        my_speed = float(self.shared_state.get("truck_speed_ms", 0.0) or 0.0)
+
+        if color == "red":
+            # Begin braking early; full hold once we're at the line.
+            if dist <= 6.0:
+                return 1.0
+            if dist >= 70.0:
+                return 0.0
+            # Steeper ramp than the old 50m so a fast truck still stops in time.
+            return float(max(0.0, min(1.0, (70.0 - dist) / 50.0)))
+
+        if color == "yellow":
+            # Only ease off for yellow if we can still stop comfortably; don't
+            # panic-brake a fast truck that's basically at the line.
+            stop_dist = (my_speed ** 2) / (2.0 * 4.0)   # ~4 m/s^2 comfortable
+            if dist > stop_dist + 6.0 and dist < 60.0:
+                return float(max(0.0, min(0.5, (60.0 - dist) / 80.0)))
+            return 0.0
+
+        return 0.0          # green / off → keep going
 
     # --- Hotkey ---------------------------------------------------------------
     def _check_hotkey(self):
@@ -216,6 +283,7 @@ class UltraPilotEngine:
             # 1. Telemetry
             if self.telemetry.update():
                 truck = self.telemetry.get("truck", {}) or {}
+                self._autostart_truck(truck)
                 self.shared_state.update_batch({
                     "telemetry": self.telemetry.data,
                     "speed": truck.get("speed", 0),
@@ -242,40 +310,44 @@ class UltraPilotEngine:
                 except Exception:
                     pass
 
-            # 2. Perception
-            obstacle_data = self.perception.detect_obstacles()
-            self.shared_state.set("obstacle", obstacle_data)
-            self.shared_state.set("nav_direction", self.perception.detect_navigation_arrow())
-            self.shared_state.set("lane_offset", self.perception.detect_lanes())
-            self.shared_state.set("toll_detected", self.perception.detect_toll())
-            self.shared_state.set("danger_level", obstacle_data.get("level", 0))
+            # A transient error in any one frame must NOT kill the engine — log
+            # it and keep looping (self-healing). The bootloader also restarts
+            # the whole Engine process if it ever does die.
+            try:
+                # 2. Perception
+                obstacle_data = self.perception.detect_obstacles()
+                self.shared_state.set("obstacle", obstacle_data)
+                self.shared_state.set("nav_direction", self.perception.detect_navigation_arrow())
+                self.shared_state.set("lane_offset", self.perception.detect_lanes())
+                self.shared_state.set("toll_detected", self.perception.detect_toll())
+                self.shared_state.set("danger_level", obstacle_data.get("level", 0))
 
-            # 3. Planning
-            perception_data = {
-                "lane_offset": self.shared_state.get("lane_offset"),
-                "nav_direction": self.shared_state.get("nav_direction"),
-                "obstacle": obstacle_data,
-                "danger_level": obstacle_data.get("level", 0),
-                "toll_detected": self.shared_state.get("toll_detected"),
-            }
-            telemetry_data = self.shared_state.get("telemetry", {})
+                # 3. Planning
+                perception_data = {
+                    "lane_offset": self.shared_state.get("lane_offset"),
+                    "nav_direction": self.shared_state.get("nav_direction"),
+                    "obstacle": obstacle_data,
+                    "danger_level": obstacle_data.get("level", 0),
+                    "toll_detected": self.shared_state.get("toll_detected"),
+                }
+                telemetry_data = self.shared_state.get("telemetry", {})
 
-            current_state, voice_alert = self.planner.update(
-                perception_data, telemetry_data, delta_time)
-            # Store the state name (string) so other processes read it cleanly.
-            self.shared_state.set("system_state",
-                                  getattr(current_state, "name", str(current_state)))
-            self.shared_state.set("active_blinker", self.planner.active_blinker)
+                current_state, voice_alert = self.planner.update(
+                    perception_data, telemetry_data, delta_time)
+                self.shared_state.set("system_state",
+                                      getattr(current_state, "name", str(current_state)))
+                self.shared_state.set("active_blinker", self.planner.active_blinker)
+                if voice_alert:
+                    self.voice.say(voice_alert)
 
-            if voice_alert:
-                self.voice.say(voice_alert)
+                # 4. Core modules + plugin supervision
+                self.module_manager.update_all(delta_time)
+                self.plugin_manager.tick(delta_time)
 
-            # 4. Core modules + plugin supervision
-            self.module_manager.update_all(delta_time)
-            self.plugin_manager.tick(delta_time)
-
-            # 5. Apply control intents to the device (safety-gated)
-            self._flush_controls()
+                # 5. Apply control intents to the device (safety-gated)
+                self._flush_controls()
+            except Exception as e:
+                logging.error("Engine frame error (recovered): %s", e)
 
             # 6. Maintain target FPS
             sleep_time = (1.0 / self.fps) - (time.time() - current_time)

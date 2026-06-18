@@ -205,8 +205,8 @@ class UltraPilotHUD(QWidget):
 
     def _project(self, ahead, lateral, view, height=0.0):
         """Ground-plane perspective projection (chase-cam looking forward)."""
-        H = 6.0          # camera height above road
-        cam_back = 8.0   # camera distance behind the truck
+        H = 8.0           # camera height above road
+        cam_back = 16.0   # camera further behind the truck (wider view)
         f = view.height() * 1.15
         horizon = view.top() + view.height() * 0.30
         d = ahead + cam_back
@@ -216,12 +216,12 @@ class UltraPilotHUD(QWidget):
         return QPointF(view.center().x() + lateral * s, horizon + (H - height) * s)
 
     def _draw_driving_view(self, qp, view, d, accent):
-        # Dark 3D scene (sky + ground), like the ETS2LA visualization.
-        qp.setBrush(QColor("#0F1318")); qp.setPen(Qt.PenStyle.NoPen)
-        qp.drawRoundedRect(view, 10, 10)
+        # Semi-transparent 3D scene so the game shows through a little.
+        qp.setBrush(QColor(15, 19, 24, 165)); qp.setPen(Qt.PenStyle.NoPen)
+        qp.drawRoundedRect(view, 14, 14)
         qp.save(); qp.setClipRect(view)
         horizon_y = view.top() + view.height() * 0.30
-        qp.setBrush(QColor("#1A2027"))
+        qp.setBrush(QColor(26, 32, 39, 150))
         qp.drawRect(QRectF(view.left(), horizon_y, view.width(), view.bottom() - horizon_y))
 
         pos, h = d["pos"], d["heading"]
@@ -239,41 +239,57 @@ class UltraPilotHUD(QWidget):
             for px, pz in path:
                 al.append(to_truck(px, pz))
 
-            if len(al) >= 2:
-                # Lane markings FOLLOW the road curve: offset the path sideways.
-                for off in (-6.0, -2.0, 2.0, 6.0):
-                    pts = []
-                    for i, (a, l) in enumerate(al):
-                        # perpendicular direction from the local path heading
-                        j = min(i + 1, len(al) - 1)
-                        da, dl = al[j][0] - a, al[j][1] - l
-                        n = math.hypot(da, dl) or 1.0
-                        px_, lateral_ = l + (-da / n) * off, a  # offset lateral, keep ahead
-                        p = self._project(a, l + (-da / n) * off, view)
-                        if p:
-                            pts.append(p)
-                    if len(pts) >= 2:
-                        qp.setPen(QPen(QColor(255, 255, 255, 55), 1, Qt.PenStyle.DashLine))
-                        qp.drawPolyline(QPolygonF(pts))
+            def offset_pt(i, off):
+                """Path point i shifted sideways by `off` metres (follows curve)."""
+                a, l = al[i]
+                j = min(i + 1, len(al) - 1)
+                da, dl = al[j][0] - a, al[j][1] - l
+                n = math.hypot(da, dl) or 1.0
+                return self._project(a, l + (-da / n) * off, view)
 
-                # Anticipated route (blue) painted along the curved road.
+            if len(al) >= 2:
+                HALF = 7.0   # half road width (m)
+                # 1) Filled asphalt ribbon (left edge → right edge), curving.
+                left = [offset_pt(i, -HALF) for i in range(len(al))]
+                right = [offset_pt(i, HALF) for i in range(len(al))]
+                ribbon = [p for p in left if p] + [p for p in reversed(right) if p]
+                if len(ribbon) >= 3:
+                    qp.setPen(Qt.PenStyle.NoPen)
+                    qp.setBrush(QColor(38, 42, 48, 230))
+                    qp.drawPolygon(QPolygonF(ribbon))
+                # 2) Solid white edge lines + dashed centre line.
+                for off, dash in ((-HALF, False), (HALF, False), (0.0, True)):
+                    pts = [offset_pt(i, off) for i in range(len(al))]
+                    pts = [p for p in pts if p]
+                    if len(pts) >= 2:
+                        style = Qt.PenStyle.DashLine if dash else Qt.PenStyle.SolidLine
+                        qp.setPen(QPen(QColor(240, 240, 245, 200), 2, style))
+                        qp.drawPolyline(QPolygonF(pts))
+                # 3) Anticipated route (blue) glow on the road.
                 pts = [self._project(a, l, view) for a, l in al]
                 pts = [p for p in pts if p is not None]
                 if len(pts) >= 2:
-                    qp.setPen(QPen(QColor(59, 130, 246, 90), 13))
+                    qp.setPen(QPen(QColor(59, 130, 246, 90), 12))
                     qp.drawPolyline(QPolygonF(pts))
-                    qp.setPen(QPen(QColor("#3B82F6"), 6))
+                    qp.setPen(QPen(QColor("#3B82F6"), 5))
                     qp.drawPolyline(QPolygonF(pts))
             else:
-                # No route yet: straight guide lines.
-                for lat in (-6, -2, 2, 6):
-                    pts = [self._project(a, lat, view) for a in range(2, 90, 4)]
+                # No route: a straight filled ribbon ahead so the road is visible.
+                left = [self._project(a, -7, view) for a in range(2, 95, 6)]
+                right = [self._project(a, 7, view) for a in range(2, 95, 6)]
+                ribbon = [p for p in left if p] + [p for p in reversed(right) if p]
+                if len(ribbon) >= 3:
+                    qp.setPen(Qt.PenStyle.NoPen); qp.setBrush(QColor(38, 42, 48, 220))
+                    qp.drawPolygon(QPolygonF(ribbon))
+                for lat, dash in ((-7, False), (7, False), (0, True)):
+                    pts = [self._project(a, lat, view) for a in range(2, 95, 6)]
                     pts = [p for p in pts if p is not None]
                     if len(pts) >= 2:
-                        qp.setPen(QPen(QColor(255, 255, 255, 45), 1, Qt.PenStyle.DashLine))
+                        st = Qt.PenStyle.DashLine if dash else Qt.PenStyle.SolidLine
+                        qp.setPen(QPen(QColor(240, 240, 245, 190), 2, st))
                         qp.drawPolyline(QPolygonF(pts))
 
-            # Surrounding vehicles as grey 3D boxes (far → near for overlap).
+            # Surrounding vehicles as solid 3D models (far → near for overlap).
             vehs = []
             for v in d["traffic"]:
                 a, l = to_truck(v["x"], v["z"])
@@ -283,10 +299,9 @@ class UltraPilotHUD(QWidget):
             for a, l, v in vehs:
                 self._draw_box(qp, view, a, l, v)
 
-        # Ego truck marker at the bottom.
-        ex, ey = view.center().x(), view.bottom() - 24
-        qp.setBrush(QColor(accent)); qp.setPen(QPen(QColor("#065F46"), 1))
-        qp.drawRoundedRect(QRectF(ex - 16, ey - 26, 32, 44), 6, 6)
+        # Ego truck as a 3D model at the bottom centre (cab + trailer).
+        self._draw_box(qp, view, 7.0, 0.0,
+                       {"type": "truck", "width": 2.6, "length": 14.0, "yaw": d["heading"]})
         qp.restore()
 
     def _box3d(self, qp, n, fr, hw, lateral, z0, z1, view, faces):

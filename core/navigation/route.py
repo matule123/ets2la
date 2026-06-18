@@ -166,9 +166,6 @@ class Route:
 
         steer = heading_error * ANGLE_GAIN + cte * CTE_GAIN
         steer *= speed_gain(speed_ms)
-
-        # Anti-weave deadzone: ignore tiny corrections so the truck tracks a
-        # straight road smoothly instead of constantly nudging the wheel.
-        if abs(steer) < 0.02:
-            steer = 0.0
+        # No deadzone: always correct proportionally so the wheel tracks the
+        # road continuously (a deadzone made it sit straight, then jerk late).
         return _clamp(steer, -1.0, 1.0)

@@ -33,7 +33,8 @@ class MapDownloadWorker(QThread):
 
 class RoadNetLoadWorker(QThread):
     """Loads the downloaded road network in the background (can be large)."""
-    done = pyqtSignal(object)
+    # (network, reason) — reason is "" on success, a human hint otherwise.
+    done = pyqtSignal(object, str)
 
     def run(self):
         try:
@@ -41,15 +42,17 @@ class RoadNetLoadWorker(QThread):
             from core.navigation.road_network import RoadNetwork
             downloaded = [d for d in map_data.list_datasets() if d["downloaded"]]
             if not downloaded:
-                self.done.emit(None)
+                self.done.emit(None, "no_map")
                 return
             net = RoadNetwork()
             if net.load(map_data.dataset_dir(downloaded[0]["key"])):
-                self.done.emit(net)
+                self.done.emit(net, "")
             else:
-                self.done.emit(None)
-        except Exception:
-            self.done.emit(None)
+                # Files present but couldn't be parsed — usually a corrupt or
+                # half-finished download. Suggesting a re-download fixes it.
+                self.done.emit(None, "corrupt")
+        except Exception as e:
+            self.done.emit(None, f"error:{e}")
 
 
 class MapView(QWidget):
@@ -304,13 +307,24 @@ class MapPage(QWidget):
         self._net_worker.done.connect(self._on_net_loaded)
         self._net_worker.start()
 
-    def _on_net_loaded(self, net):
+    def _on_net_loaded(self, net, reason=""):
         self._net_worker = None
         if net is not None:
             self.view.road_net = net
             self.dl_status.setText(f"✓ Map loaded ({len(net.segments)} road segments). "
                                    "Roads around the truck are shown above.")
             self.view.update()
+            return
+
+        # Tell the user *why* it failed and what to do, instead of a bare message.
+        if reason == "no_map":
+            self.dl_status.setText("No map downloaded yet. Pick your game version and download.")
+        elif reason == "corrupt":
+            self.dl_status.setText("Map files look incomplete or corrupt. "
+                                   "Please download the map again.")
+        elif reason.startswith("error:"):
+            self.dl_status.setText(f"Could not load map: {reason[6:]}. "
+                                   "Try downloading it again.")
         else:
             self.dl_status.setText("Map data present but could not be loaded.")
 
@@ -369,4 +383,14 @@ class MapPage(QWidget):
             dist = self.state.get("distance_to_dest")
             if dist is not None:
                 self.status.setText(f"Navigating — {float(dist) / 1000:.2f} km to destination.")
+            else:
+                # Map-based driving (no recorded route) — show a clear status so
+                # the user knows the autopilot is steering by the map.
+                self.status.setText("Map steering active — following the road ahead.")
+        else:
+            # Surface the map-loading status the engine publishes (loading /
+            # ready / error) so the user is never left guessing why nav is off.
+            ms = self.state.get("map_status")
+            if ms:
+                self.status.setText(str(ms))
         self.view.update()
