@@ -1,7 +1,60 @@
 import time
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel
-from PyQt6.QtGui import QPainter, QColor, QFont, QPen
-from PyQt6.QtCore import Qt, QTimer, QRectF
+import math
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
+from PyQt6.QtGui import QPainter, QColor, QFont, QPen, QPolygonF
+from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
+
+
+class _TopDown(QWidget):
+    """Top-down (map-style) view: road ahead + traffic around the truck."""
+
+    def __init__(self, state):
+        super().__init__()
+        self.state = state
+        self.setMinimumSize(280, 280)
+
+    def paintEvent(self, event):
+        qp = QPainter(self)
+        qp.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        qp.setBrush(QColor(18, 22, 28)); qp.setPen(Qt.PenStyle.NoPen)
+        qp.drawRoundedRect(QRectF(0, 0, w, h), 12, 12)
+
+        pos = self.state.get("truck_world_pos")
+        if not pos:
+            qp.setPen(QColor("#6B7280"))
+            qp.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Top-down map\n(needs telemetry)")
+            return
+        head = self.state.get("truck_heading", 0.0) or 0.0
+        scale = (min(w, h) - 40) / 200.0   # show ~200 m around the truck
+        cx, cy = w / 2, h * 0.62           # truck a bit below centre (see ahead)
+        sin_h, cos_h = math.sin(head), math.cos(head)
+
+        def to_screen(wx, wz):
+            dx, dz = wx - pos[0], wz - pos[1]
+            ahead = dx * (-sin_h) + dz * (-cos_h)
+            lat = dx * cos_h - dz * sin_h
+            return QPointF(cx + lat * scale, cy - ahead * scale)
+
+        # Road ahead (filled ribbon from the published path).
+        path = self.state.get("nav_path", []) or self.state.get("map_path", []) or []
+        if len(path) >= 2:
+            pts = [to_screen(px, pz) for px, pz in path]
+            qp.setPen(QPen(QColor("#2563EB"), max(6, int(7 * scale)), Qt.PenStyle.SolidLine,
+                           Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            qp.drawPolyline(QPolygonF(pts))
+
+        # Surrounding traffic (grey dots).
+        qp.setPen(Qt.PenStyle.NoPen); qp.setBrush(QColor("#9CA3AF"))
+        for v in (self.state.get("traffic", []) or []):
+            p = to_screen(v["x"], v["z"])
+            if 0 <= p.x() <= w and 0 <= p.y() <= h:
+                qp.drawEllipse(p, 4, 4)
+
+        # Ego truck (green arrow, always pointing up).
+        qp.setBrush(QColor("#10B981")); qp.setPen(QPen(QColor("#065F46"), 1))
+        qp.drawPolygon(QPolygonF([QPointF(cx, cy - 12), QPointF(cx - 8, cy + 8),
+                                  QPointF(cx + 8, cy + 8)]))
 
 
 class _GlassIsland(QWidget):
