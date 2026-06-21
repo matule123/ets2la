@@ -143,6 +143,22 @@ class Plugin(BasePlugin):
             logging.error("Navigation: could not start road network loader: %s", e)
             self._net_loading = False
 
+    def _lane_offset(self):
+        """How far (metres) to drive to the RIGHT of the road centreline.
+
+        ETS2 is right-hand traffic, so the autopilot must hold the right lane —
+        driving the bare centreline put it in the oncoming lane („protismer").
+        Default ~2.7 m (half a lane); can be overridden from shared state or set
+        negative for left-hand-traffic maps (UK / ATS mirror).
+        """
+        v = self.sdk.get("lane_offset_m", None)
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                pass
+        return 2.7
+
     def _ensure_map_path(self, pos, heading):
         """Compute and publish the road-ahead polyline from the downloaded map.
 
@@ -196,7 +212,8 @@ class Plugin(BasePlugin):
                 self.active_route = None
                 return
 
-            steer = self.active_route.steering(pos, heading, speed)
+            steer = self.active_route.steering(pos, heading, speed,
+                                               lane_offset_m=self._lane_offset())
             self.sdk.set("nav_steering", float(steer))
             self.sdk.set("nav_active", True)
             self.sdk.set("distance_to_dest", self.active_route.distance_to_end(pos))
@@ -211,7 +228,8 @@ class Plugin(BasePlugin):
             map_path = self._ensure_map_path(pos, heading)
             if len(map_path) >= 2:
                 route = Route([tuple(p) for p in map_path])
-                steer = route.steering(pos, heading, speed)
+                steer = route.steering(pos, heading, speed,
+                                       lane_offset_m=self._lane_offset())
                 self.sdk.set("nav_steering", float(steer))
                 self.sdk.set("nav_active", True)
                 self.sdk.set("nav_path", [list(p) for p in map_path[:25]])

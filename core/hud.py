@@ -2,7 +2,7 @@ import sys
 import math
 import logging
 from PyQt6.QtWidgets import QApplication, QWidget
-from PyQt6.QtGui import QPainter, QColor, QFont, QPen, QPolygonF
+from PyQt6.QtGui import QPainter, QColor, QFont, QPen, QPolygonF, QRadialGradient, QLinearGradient, QBrush
 from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
 
 # State → accent colour (left as-is; the whole HUD now lives on the left panel).
@@ -19,6 +19,26 @@ def _gear_text(gear):
     return str(int(gear)) if gear > 0 else "R"
 
 
+# Body colours cycled by vehicle id, so traffic isn't all grey. Each is a
+# (body, roof) pair; the roof (cabin/glass) is rendered darker for contrast.
+_CAR_PALETTE = [
+    ("#3B82F6", "#1E40AF"),  # blue
+    ("#EF4444", "#991B1B"),  # red
+    ("#F59E0B", "#B45309"),  # amber
+    ("#10B981", "#047857"),  # green
+    ("#8B5CF6", "#5B21B6"),  # purple
+    ("#E5E7EB", "#9CA3AF"),  # white
+    ("#374151", "#111827"),  # dark grey
+    ("#EC4899", "#9D174D"),  # pink
+]
+
+
+def _car_colour(v):
+    """Stable (body, roof) colour pair for a vehicle, keyed on its id."""
+    vid = v.get("id", 0) or 0
+    return _CAR_PALETTE[int(vid) % len(_CAR_PALETTE)]
+
+
 class UltraPilotHUD(QWidget):
     """Left-side driving-view HUD (per the reference photo).
 
@@ -33,8 +53,8 @@ class UltraPilotHUD(QWidget):
     without blocking the view of the road ahead.
     """
 
-    # Compact left-panel size, matching the reference photo (left side only).
-    W, H = 360, 470
+    # Left-panel size (wider than before for a richer scene + nicer models).
+    W, H = 440, 500
 
     def __init__(self, shared_state):
         super().__init__()
@@ -285,49 +305,135 @@ class UltraPilotHUD(QWidget):
         return True
 
     def _draw_box(self, qp, view, ahead, lateral, v):
-        # Vehicle = lower body + a smaller cabin on top → reads as a real model.
+        """A fuller, single-piece vehicle model.
+
+        Instead of two stacked cubes (body + cabin) that left visible seams, this
+        sculpts the car from overlapping volumes so it reads as one solid shape:
+          • a low floor/underbody slab (gives it ground presence, no floating)
+          • the main body, full-length and solid
+          • a green-tinted cabin/greenhouse (windows) set on top, smaller
+          • head lamps (warm) at the front, tail lamps (red) at the back
+        Drawn far→near so closer cars overlap correctly. All solid, no gaps.
+        """
         t = v.get("type", "car")
-        body_h = {"car": 1.1, "van": 1.7, "bus": 2.8, "truck": 2.6}.get(t, 1.2)
+        body_h = {"car": 1.2, "van": 1.8, "bus": 2.8, "truck": 2.6}.get(t, 1.3)
         hw = max(0.9, v.get("width", 2.0) / 2)
         ln = max(3.5, v.get("length", 4.5))
         n, fr = ahead - ln / 2, ahead + ln / 2
-        if not self._box3d(qp, n, fr, hw, lateral, 0.0, body_h, view, ("#8A9099", "#AEB4BC")):
-            return
-        # Cabin / cab on top (cars & vans: middle; trucks: front; bus: full).
-        if t == "bus":
-            self._box3d(qp, n + 0.3, fr - 0.3, hw * 0.92, lateral, body_h, body_h + 0.7, view,
-                        ("#9AA0A8", "#C2C8D0"))
-        elif t == "truck":
-            self._box3d(qp, fr - ln * 0.28, fr - 0.2, hw * 0.95, lateral, body_h, body_h + 1.0, view,
-                        ("#9AA0A8", "#C2C8D0"))
-        else:  # car / van cabin in the middle
-            self._box3d(qp, n + ln * 0.28, fr - ln * 0.22, hw * 0.9, lateral, body_h, body_h + 0.8, view,
-                        ("#9AA0A8", "#C2C8D0"))
+        body = "#C8CCD2"      # light silver-grey body
+        body_dark = "#9AA0A8"
+        glass = "#0F2A33"     # dark tinted glass
+
+        # Floor slab: wider/longer than the body so it pokes out a touch = wheels
+        # region, grounding the model so it never looks like it floats/has a hole.
+        self._box3d(qp, n - 0.2, fr + 0.2, hw + 0.15, lateral, 0.0, 0.35, view,
+                    (body_dark, body_dark))
+
+        if t == "truck":
+            # Tractor unit (front) + cargo box (back), as one connected shape.
+            self._box3d(qp, n, fr - ln * 0.35, hw, lateral, 0.35, body_h, view, (body, "#E5E7EB"))
+            self._box3d(qp, fr - ln * 0.40, fr - 0.2, hw * 0.96, lateral, 0.35, body_h + 1.0,
+                        view, (body_dark, body_dark))
+            # Cab on the tractor.
+            self._box3d(qp, fr - ln * 0.40, fr - 0.3, hw * 0.9, lateral, body_h, body_h + 0.8,
+                        view, (glass, "#1B3A44"))
+        elif t == "bus":
+            self._box3d(qp, n, fr, hw, lateral, 0.35, body_h, view, (body, "#E5E7EB"))
+            # Full-length tinted window band.
+            self._box3d(qp, n + 0.3, fr - 0.3, hw * 0.92, lateral, body_h * 0.45, body_h + 0.5,
+                        view, (glass, "#1B3A44"))
+        else:
+            # Car / van: one solid body + a cabin greenhouse set into the middle.
+            self._box3d(qp, n, fr, hw, lateral, 0.35, body_h, view, (body, "#E5E7EB"))
+            # Cabin narrower and shorter than the body, so the bonnet + boot read
+            # as solid extensions of the same shape (no gap between them).
+            cab_n = n + ln * 0.22
+            cab_f = fr - ln * 0.20
+            self._box3d(qp, cab_n, cab_f, hw * 0.86, lateral, body_h, body_h + 0.55,
+                        view, (glass, "#1B3A44"))
+
+        # Lights: small lamps at the front (warm white) and back (red). These are
+        # what make the silhouette read as a real vehicle facing a direction.
+        self._draw_lights(qp, view, n, fr, hw, lateral, body_h)
+
+    def _draw_lights(self, qp, view, n, fr, hw, lateral, body_h):
+        """Head/tail lamps as small bright quads projected onto the body's ends."""
+        head_y = body_h * 0.55   # roughly bumper-height
+        tail_y = body_h * 0.55
+        # Front (warm) — two lamps, left & right of centre, at the front face.
+        for off in (-hw * 0.6, hw * 0.6):
+            a = self._project(fr + 0.02, lateral + off, view, head_y)
+            b = self._project(fr + 0.02, lateral + off + 0.35, view, head_y)
+            c = self._project(fr + 0.02, lateral + off + 0.35, view, head_y + 0.25)
+            d = self._project(fr + 0.02, lateral + off, view, head_y + 0.25)
+            if None not in (a, b, c, d):
+                qp.setPen(Qt.PenStyle.NoPen)
+                qp.setBrush(QColor("#FFF7CC"))
+                qp.drawPolygon(QPolygonF([a, b, c, d]))
+        # Rear (red) — two lamps at the back face.
+        for off in (-hw * 0.6, hw * 0.6):
+            a = self._project(n - 0.02, lateral + off, view, tail_y)
+            b = self._project(n - 0.02, lateral + off + 0.35, view, tail_y)
+            c = self._project(n - 0.02, lateral + off + 0.35, view, tail_y + 0.25)
+            d = self._project(n - 0.02, lateral + off, view, tail_y + 0.25)
+            if None not in (a, b, c, d):
+                qp.setPen(Qt.PenStyle.NoPen)
+                qp.setBrush(QColor("#EF4444"))
+                qp.drawPolygon(QPolygonF([a, b, c, d]))
 
     # --- Traffic light --------------------------------------------------------
     def _draw_light(self, qp, view, light):
-        """3-bulb signal + countdown, anchored top-right of the scene."""
+        """Traffic-light with a glowing active bulb, housing + countdown.
+
+        The lit bulb gets a radial-gradient halo so it actually looks lit (the
+        flat-fill version read as three identical grey dots). Anchor: top-right
+        of the scene, like a real signal visible through the windshield."""
         color = light.get("color", "off")
-        cx, cy = view.right() - 70, view.top() + 14
-        # Housing.
-        qp.setPen(Qt.PenStyle.NoPen); qp.setBrush(QColor(20, 24, 30, 235))
-        qp.drawRoundedRect(QRectF(cx, cy, 24, 58), 6, 6)
-        for i, (cname, on_c) in enumerate((("red", "#EF4444"),
-                                           ("yellow", "#FBBF24"),
-                                           ("green", "#22C55E"))):
+        cx, cy = view.right() - 64, view.top() + 12
+        # Outer frame + inner housing (two rounded rects = bevelled look).
+        qp.setPen(Qt.PenStyle.NoPen)
+        qp.setBrush(QColor(8, 10, 14, 240))
+        qp.drawRoundedRect(QRectF(cx, cy, 26, 66), 7, 7)
+        qp.setBrush(QColor(22, 26, 32, 255))
+        qp.drawRoundedRect(QRectF(cx + 2, cy + 2, 22, 62), 5, 5)
+
+        on_col = {"red": "#EF4444", "yellow": "#FBBF24", "green": "#22C55E"}.get(color)
+        for i, cname in enumerate(("red", "yellow", "green")):
+            by = cy + 4 + i * 19
+            rect = QRectF(cx + 4, by, 18, 18)
             lit = (color == cname)
-            qp.setBrush(QColor(on_c) if lit else QColor(55, 60, 66))
-            qp.drawEllipse(QRectF(cx + 4, cy + 4 + i * 17, 16, 16))
-        # Countdown + next-state hint to the right of the housing.
+            if lit and on_col:
+                # Glow halo: radial gradient fading from the lit colour out.
+                grad = QRadialGradient(rect.center(), 22)
+                c = QColor(on_col)
+                grad.setColorAt(0.0, QColor(c.red(), c.green(), c.blue(), 235))
+                grad.setColorAt(0.4, QColor(c.red(), c.green(), c.blue(), 120))
+                grad.setColorAt(1.0, QColor(c.red(), c.green(), c.blue(), 0))
+                qp.setBrush(QBrush(grad))
+                qp.drawEllipse(QRectF(cx - 10, by - 10, 38, 38))
+                # Bright core.
+                qp.setBrush(QColor(255, 255, 255, 230))
+                qp.drawEllipse(rect.adjusted(5, 5, -5, -5))
+                qp.setBrush(on_col)
+                qp.drawEllipse(rect)
+            else:
+                off = QColor({"red": "#3A1414", "yellow": "#3A2E08",
+                              "green": "#0E3A1A"}.get(cname, "#2C3138"))
+                qp.setBrush(off)
+                qp.drawEllipse(rect)
+
+        # Countdown + next-state hint beside the housing.
         tl = light.get("time_left", 0) or 0
         if tl > 0:
-            qp.setPen(QColor("#FFFFFF")); qp.setFont(QFont("Segoe UI", 15, QFont.Weight.Bold))
-            qp.drawText(QRectF(cx + 28, cy + 4, 60, 22), Qt.AlignmentFlag.AlignLeft,
+            qp.setPen(QColor("#FFFFFF")); qp.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+            qp.drawText(QRectF(cx + 30, cy + 2, 64, 24), Qt.AlignmentFlag.AlignLeft,
                         f"{tl:.1f}s")
-            nxt_col = {"red": "#F87171", "green": "#4ADE80", "yellow": "#FBBF24"}.get(color, "#D1D5DB")
-            nxt_txt = {"red": "→ ZELENÁ", "green": "→ ŽLTÁ", "yellow": "→ ČERVENÁ"}.get(color, "")
+            nxt_col = {"red": "#F87171", "green": "#4ADE80",
+                       "yellow": "#FBBF24"}.get(color, "#D1D5DB")
+            nxt_txt = {"red": "→ ZELENÁ", "green": "→ ŽLTÁ",
+                       "yellow": "→ ČERVENÁ"}.get(color, "")
             qp.setPen(QColor(nxt_col)); qp.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
-            qp.drawText(QRectF(cx + 28, cy + 26, 80, 14), Qt.AlignmentFlag.AlignLeft, nxt_txt)
+            qp.drawText(QRectF(cx + 30, cy + 26, 86, 14), Qt.AlignmentFlag.AlignLeft, nxt_txt)
 
     # --- Pedals + status ------------------------------------------------------
     def _draw_pedals(self, qp, d):
@@ -433,24 +539,61 @@ class UltraPilotHUD(QWidget):
         qp.restore()
 
     def _draw_box_back(self, qp, view, behind, lateral, v, proj):
-        """A simplified vehicle model for the rear-cam inset (just a shaded box)."""
+        """A full, solid vehicle model for the rear-cam inset.
+
+        Same single-piece look as the main scene (floor + body + tinted cabin +
+        lamps), built from the rear-cam projection so it reads at small size
+        without looking like a hollow box."""
         t = v.get("type", "car")
-        body_h = {"car": 1.1, "van": 1.7, "bus": 2.8, "truck": 2.6}.get(t, 1.2)
+        body_h = {"car": 1.2, "van": 1.8, "bus": 2.8, "truck": 2.6}.get(t, 1.3)
         hw = max(0.9, v.get("width", 2.0) / 2)
         ln = max(3.5, v.get("length", 4.5))
         n, fr = behind - ln / 2, behind + ln / 2
-        # 8 corners of the cuboid in rear-cam space.
-        c = [proj(n, lateral - hw, 0.0), proj(n, lateral + hw, 0.0),
-             proj(fr, lateral - hw, 0.0), proj(fr, lateral + hw, 0.0),
-             proj(n, lateral - hw, body_h), proj(n, lateral + hw, body_h),
-             proj(fr, lateral - hw, body_h), proj(fr, lateral + hw, body_h)]
-        if any(p is None for p in c):
+
+        def box(z0, z1, n_off=0.0, fr_off=0.0, hwf=1.0, faces=("#C8CCD2", "#E5E7EB")):
+            """Draw one solid cuboid; all 5 faces so it's never see-through."""
+            nn, ff = n + n_off, fr + fr_off
+            hh = hw * hwf
+            c = [proj(nn, lateral - hh, z0), proj(nn, lateral + hh, z0),
+                 proj(ff, lateral - hh, z0), proj(ff, lateral + hh, z0),
+                 proj(nn, lateral - hh, z1), proj(nn, lateral + hh, z1),
+                 proj(ff, lateral - hh, z1), proj(ff, lateral + hh, z1)]
+            if any(p is None for p in c):
+                return False
+            bl, br, fl, fr_, blt, brt, flt, frt = c
+            side, top = faces
+            qp.setPen(QPen(QColor("#34393F"), 1))
+            qp.setBrush(QColor(side).darker(115)); qp.drawPolygon(QPolygonF([bl, br, brt, blt]))
+            qp.setBrush(QColor(side)); qp.drawPolygon(QPolygonF([bl, fl, flt, blt]))
+            qp.drawPolygon(QPolygonF([br, fr_, frt, brt]))
+            qp.setBrush(QColor(side).darker(108)); qp.drawPolygon(QPolygonF([fl, fr_, frt, flt]))
+            qp.setBrush(QColor(top)); qp.drawPolygon(QPolygonF([blt, brt, frt, flt]))
+            return True
+
+        # Floor slab + solid body + tinted cabin, so the silhouette is one shape.
+        if not box(0.0, 0.35, n_off=-0.2, fr_off=0.2, hwf=1.07,
+                   faces=("#9AA0A8", "#9AA0A8")):
             return
-        bl, br, fl, fr_, blt, brt, flt, frt = c
-        qp.setPen(QPen(QColor("#34393F"), 1))
-        qp.setBrush(QColor("#8A9099").darker(110)); qp.drawPolygon(QPolygonF([bl, br, brt, blt]))
-        qp.setBrush(QColor("#AEB4BC")); qp.drawPolygon(QPolygonF([bl, fl, flt, blt]))
-        qp.drawPolygon(QPolygonF([br, fr_, frt, brt]))
+        box(0.35, body_h, faces=("#C8CCD2", "#E5E7EB"))
+        if t == "truck":
+            box(body_h, body_h + 1.0, n_off=0.0, fr_off=-ln * 0.35,
+                hwf=0.96, faces=("#9AA0A8", "#9AA0A8"))
+            box(body_h, body_h + 0.8, n_off=0.0, fr_off=-ln * 0.35,
+                hwf=0.9, faces=("#0F2A33", "#1B3A44"))
+        else:
+            box(body_h, body_h + 0.55, n_off=ln * 0.22, fr_off=-ln * 0.20,
+                hwf=0.86, faces=("#0F2A33", "#1B3A44"))
+
+        # Lamps: we see the FRONT of these cars (they're behind us, facing our
+        # direction), so warm headlamps are the bright cue; tail lamps are hidden.
+        for off in (-hw * 0.6, hw * 0.6):
+            a = proj(fr + 0.02, lateral + off, body_h * 0.55)
+            b = proj(fr + 0.02, lateral + off + 0.35, body_h * 0.55)
+            c = proj(fr + 0.02, lateral + off + 0.35, body_h * 0.55 + 0.25)
+            d = proj(fr + 0.02, lateral + off, body_h * 0.55 + 0.25)
+            if None not in (a, b, c, d):
+                qp.setPen(Qt.PenStyle.NoPen); qp.setBrush(QColor("#FFF7CC"))
+                qp.drawPolygon(QPolygonF([a, b, c, d]))
 
     # --- Dragging -------------------------------------------------------------
     def mousePressEvent(self, event):

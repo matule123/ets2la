@@ -1,15 +1,14 @@
 import logging
 import math
-import numpy as np
 from sdk.base_plugin import BasePlugin
 
 
 # --- Tuning -----------------------------------------------------------------
-LOOKAHEAD_M = 45.0      # how far ahead we look to detect an upcoming turn
-TURN_ANGLE_RAD = 0.26   # ~15°: bend sharper than this counts as a turn
-CANCEL_ANGLE_RAD = 0.10  # once we're past the turn, cancel below this bend
-APPROACH_M = 55.0       # start signalling when the turn is within this distance
-SUSTAIN_S = 2.0         # keep the signal on this long after the bend fades
+NEAR_M = 15.0           # measure the path's lateral position this close ahead
+FAR_M = 60.0            # ...and this far ahead; the bend is the difference
+LATERAL_TURN_M = 6.0    # path drifts sideways by this many metres → it's a turn
+APPROACH_M = 90.0       # only look at points within this distance ahead
+SUSTAIN_S = 3.0         # keep the signal on this long after the bend fades
 MIN_SPEED_MS = 1.5      # don't fiddle with blinkers while parked / crawling
 
 
@@ -62,7 +61,7 @@ class Plugin(BasePlugin):
 
         target = "off"
         if pos and not avoiding and len(path) >= 3 and abs(speed) >= MIN_SPEED_MS:
-            target = self._signal_for_path(pos, heading, path, dt)
+            target = self._signal_for_path(pos, heading, path)
 
         # Sustain: keep the signal briefly after the bend so it doesn't strobe
         # on/off as the lookahead wobbles right at the turn threshold.
@@ -82,37 +81,45 @@ class Plugin(BasePlugin):
         self.sdk.set("active_blinker", target)
 
     # --- Geometry -------------------------------------------------------------
-    def _signal_for_path(self, pos, heading, path, dt):
-        """Return 'left' / 'right' / 'off' based on the bend ahead."""
+    def _signal_for_path(self, pos, heading, path):
+        """Return 'left' / 'right' / 'off' based on the bend ahead.
+
+        Measures how far the route drifts sideways between NEAR_M and FAR_M ahead
+        of the truck. A big lateral drift in one direction = a turn that way.
+        This is far more robust than a single-segment angle on a noisy polyline,
+        which rarely produced a usable signal."""
         px, pz = pos
         sin_h, cos_h = math.sin(heading), math.cos(heading)
 
-        def to_truck(wx, wz):
-            dx, dz = wx - px, wz - pz
-            ahead = dx * (-sin_h) + dz * (-cos_h)
-            lateral = dx * cos_h - dz * sin_h
-            return ahead, lateral
+        def lateral_at(target_a):
+            """Lateral offset (m, +right) of the path at ~target_a metres ahead."""
+            best = None
+            best_d = 1e18
+            for wx, wz in path:
+                dx, dz = wx - px, wz - pz
+                a = dx * (-sin_h) + dz * (-cos_h)
+                if a < 2.0 or a > APPROACH_M:
+                    continue
+                d = abs(a - target_a)
+                if d < best_d:
+                    best_d = d
+                    l = dx * cos_h - dz * sin_h
+                    best = (a, l)
+            return best
 
-        # Walk the path and find the lateral offset of the point ~LOOKAHEAD_M
-        # ahead of us — that's where we're heading. Sign tells left/right.
-        al = [to_truck(wx, wz) for wx, wz in path]
-        # Only consider points in front of us and within the approach window.
-        upcoming = [(a, l) for a, l in al if 3.0 < a < APPROACH_M]
-        if len(upcoming) < 2:
+        near = lateral_at(NEAR_M)
+        far = lateral_at(FAR_M)
+        if near is None or far is None:
             return "off"
 
-        # Bend = change in heading between the near segment and the far segment.
-        near = upcoming[0]
-        far = min(upcoming, key=lambda p: abs(p[0] - LOOKAHEAD_M))
-        a0, l0 = near
-        a1, l1 = far
-        if a1 - a0 < 2.0:
-            return "off"
-        # Heading of the path segment, relative to the truck's heading (0).
-        seg_dir = math.atan2(l1 - l0, a1 - a0)
-        if abs(seg_dir) >= TURN_ANGLE_RAD:
-            # positive lateral drift → path goes right → right indicator
-            return "right" if seg_dir > 0 else "left"
+        # Lateral drift of the path between near and far. The truck-frame
+        # lateral sign here is +left/−right for the heading convention used, so
+        # a negative drift means the road bends to our right.
+        drift = far[1] - near[1]
+        if drift <= -LATERAL_TURN_M:
+            return "right"
+        if drift >= LATERAL_TURN_M:
+            return "left"
         return "off"
 
     # --- Output ---------------------------------------------------------------

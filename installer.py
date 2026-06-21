@@ -276,11 +276,17 @@ class InstallWorker(QThread):
             os.makedirs(self.install_path, exist_ok=True)
             self.progress.emit(3)
 
-            # --- get the app from GitHub (clone or zip download) ---
-            self.log.emit("Downloading UltraPilot from GitHub…")
-            if not self._fetch_repo():
-                self.log.emit("  GitHub download failed — copying bundled files instead…")
-                self._copy_bundled()
+            # --- get the app ---
+            # Prefer the files bundled inside the installer (offline, fast,
+            # always available). Only fall back to a GitHub download if the
+            # bundle is somehow incomplete (e.g. a slim build).
+            self.log.emit("Copying UltraPilot files…")
+            self._copy_bundled()
+            if not os.path.exists(os.path.join(self.install_path, "main.py")):
+                self.log.emit("  Bundled files incomplete — downloading from GitHub…")
+                if not self._fetch_repo():
+                    raise RuntimeError("Could not obtain UltraPilot files "
+                                       "(no bundle and GitHub unreachable).")
             self.progress.emit(45)
 
             # --- install Python dependencies (incl. the 3D libraries) ---
@@ -396,14 +402,39 @@ class InstallWorker(QThread):
             except Exception:
                 pass
 
+    def _real_python(self):
+        """Find the real Python interpreter to run pip with.
+
+        In a frozen installer ``sys.executable`` is UltraPilot_Installer.exe
+        itself, so `pip install` would re-launch the installer. We look up the
+        real interpreter on PATH (python / py launcher) instead. Returns the
+        path, or '' if none is found.
+        """
+        # Prefer the version-agnostic `py` launcher (ships with official Python).
+        py = shutil.which("py") or shutil.which("py.exe")
+        if py:
+            return [py, "-3"]
+        # Otherwise a plain python on PATH.
+        for name in ("python", "python.exe", "python3", "python3.exe"):
+            found = shutil.which(name)
+            if found:
+                return [found]
+        return []
+
     def _pip_install(self):
         req = os.path.join(self.install_path, "requirements.txt")
         pkgs = ["pyqtgraph", "PyOpenGL"]
+        py = self._real_python()
+        if not py:
+            self.log.emit("  Python not found on PATH — install Python 3, "
+                          "then run: pip install -r requirements.txt")
+            return
         try:
+            self.log.emit(f"  Using Python: {py[0]}")
             if os.path.exists(req):
-                subprocess.run([sys.executable, "-m", "pip", "install", "-r", req],
+                subprocess.run([*py, "-m", "pip", "install", "-r", req],
                                capture_output=True, timeout=1800)
-            subprocess.run([sys.executable, "-m", "pip", "install", *pkgs],
+            subprocess.run([*py, "-m", "pip", "install", *pkgs],
                            capture_output=True, timeout=600)
             self.log.emit("  Dependencies installed.")
         except Exception as e:

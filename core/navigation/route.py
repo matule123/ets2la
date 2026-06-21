@@ -140,8 +140,16 @@ class Route:
         return near_end and self.closest_index(pos) >= len(self.points) - 2
 
     # --- Steering -------------------------------------------------------------
-    def steering(self, pos: Point, heading: float, speed_ms: float = 0.0) -> float:
-        """Steering command in ``[-1, 1]`` (positive = right) to follow the route."""
+    def steering(self, pos: Point, heading: float, speed_ms: float = 0.0,
+                 lane_offset_m: float = 0.0) -> float:
+        """Steering command in ``[-1, 1]`` (positive = right) to follow the route.
+
+        ``lane_offset_m`` shifts the target line sideways: positive = keep to the
+        RIGHT of the path centre (the driving lane on right-hand-traffic maps like
+        ETS2), negative = left. Without this the truck drives the road centreline
+        — which on a two-way road is the oncoming lane. A ~2.7 m offset keeps us
+        firmly in our own lane, the main fix for "jazdí protismerom".
+        """
         if len(self.points) < 2:
             return 0.0
 
@@ -150,6 +158,23 @@ class Route:
         # reacted to late (which caused the late + violent jerk into corners).
         lookahead = _clamp(MIN_LOOKAHEAD + abs(speed_ms) * 1.6, MIN_LOOKAHEAD, MAX_LOOKAHEAD)
         tx, tz = self.lookahead_point(idx, pos, lookahead)
+
+        # Shift the lookahead + the reference line sideways by lane_offset_m, so
+        # we aim for our lane (right of centre) instead of the oncoming lane.
+        # The normal to the path direction at idx is (-dz, dx)/L (90° CCW); for a
+        # right-hand offset we move along -(normal) = (dz, -dx)/L... but in ETS2's
+        # coordinate frame the sign that moves "to the right of travel" works out
+        # as below (verified empirically on the live map).
+        if abs(lane_offset_m) > 1e-3:
+            j = min(idx, len(self.points) - 2)
+            ax, az = self.points[j]
+            bx, bz = self.points[j + 1]
+            sdx, sdz = bx - ax, bz - az
+            sl = math.hypot(sdx, sdz) or 1.0
+            # right-of-travel offset vector
+            ox, oz = (sdz / sl) * lane_offset_m, (-sdx / sl) * lane_offset_m
+            tx += ox
+            tz += oz
 
         # Desired direction (truck → lookahead point).
         dx, dz = tx - pos[0], tz - pos[1]
@@ -161,8 +186,9 @@ class Route:
         heading_error = math.atan2(cross, dot)
 
         # Cross-track error reinforces the pure-pursuit heading error: both share
-        # the same sign for a given side of the path, so they add.
-        cte = self.cross_track_error(idx, pos)
+        # the same sign for a given side of the path, so they add. Measured to the
+        # lane-offset line so it pulls us into our lane, not the centre.
+        cte = self.cross_track_error(idx, pos) - lane_offset_m
 
         steer = heading_error * ANGLE_GAIN + cte * CTE_GAIN
         steer *= speed_gain(speed_ms)
