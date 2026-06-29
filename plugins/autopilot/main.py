@@ -1,4 +1,5 @@
 import logging
+import math
 import numpy as np
 from sdk.base_plugin import BasePlugin
 
@@ -12,6 +13,16 @@ BRAKE_RAMP_UP = 2.5          # brake can rise this fast per second (anti-jerk)
 BRAKE_RAMP_DOWN = 4.0        # brake releases faster than it engages
 BRAKE_MIN_HOLD = 0.04        # below this, treat brake as zero (avoid flutter)
 THROTTLE_RAMP = 3.0          # throttle slew rate per second
+
+# Anticipatory curve braking (Fáza 3c). The lateral acceleration a truck can
+# hold comfortably is ~2.5 m/s²; the safe speed for a bend of radius R is
+# v_safe = sqrt(A_LAT_MAX · R). We brake proactively when the MAP's measured
+# curvature radius ahead would put us over that, so we slow BEFORE the apex —
+# the old code only reacted once the steering was already wound in (too late,
+# the truck understeered wide / fish-tailed on corner entry).
+A_LAT_MAX = 2.5             # comfortable lateral accel (m/s²)
+CURVE_BRAKE_MAX = 0.4       # never brake harder than this for a curve alone
+CURVE_BRAKE_MARGIN_MS = 0.5 # start braking this much before v_safe (hysteresis)
 
 
 class Plugin(BasePlugin):
@@ -108,6 +119,7 @@ class Plugin(BasePlugin):
         collision_brake = float(self.sdk.shared_state.get("collision_brake_request", 0.0) or 0.0)
         traffic_brake = float(self.sdk.shared_state.get("traffic_brake", 0.0) or 0.0)
         light_brake = float(self.sdk.shared_state.get("light_brake", 0.0) or 0.0)
+        aux_brake = float(self.sdk.shared_state.get("aux_brake_request", 0.0) or 0.0)
         # Vision obstacle (screen CV). Only trust it as a *nudge*: when we have
         # real traffic data, heavily discount it so a shadow / sign can't cause
         # a phantom full stop.
@@ -116,15 +128,42 @@ class Plugin(BasePlugin):
             vision_brake *= (0.25 if have_real_traffic else 1.0)
         else:
             vision_brake = 0.0
-        requested_brake = max(collision_brake, traffic_brake, light_brake, vision_brake)
+        requested_brake = max(collision_brake, traffic_brake, light_brake,
+                              aux_brake, vision_brake)
 
         if system_state == "AVOID_OBSTACLE":
             requested_brake = max(requested_brake,
                                   float(np.clip(0.5 + (0.5 * danger_level), 0.5, 1.0)))
 
-        # --- Curve slowdown: ease off the throttle (light brake at speed) ---
+        # --- Anticipatory curve braking (Fáza 3c) -------------------------
+        # Slow BEFORE a sharp bend, using the MAP's measured path curvature
+        # ahead (path_curvature_radius), not the steering we're already turning
+        # (that was too late — the truck understeered into corners). The safe
+        # speed for radius R at comfortable lateral accel A_LAT_MAX is
+        # v_safe = sqrt(A_LAT_MAX · R); if our speed exceeds it, brake.
+        radius = self.sdk.shared_state.get("path_curvature_radius", None)
+        curve_factor = 1.0          # throttle multiplier (set below)
+        if radius is not None:
+            try:
+                R = float(radius)
+            except (TypeError, ValueError):
+                R = 1e6
+            if 30.0 < R < 2000.0:   # ignore straight / garbage radii
+                v_safe = math.sqrt(A_LAT_MAX * R)         # m/s
+                v_now = abs(speed)                        # m/s
+                if v_now > v_safe + CURVE_BRAKE_MARGIN_MS:
+                    over = (v_now - v_safe) / max(v_safe, 1.0)  # 0..1+ excess
+                    curve_brake = float(np.clip(over * 0.8, 0.0, CURVE_BRAKE_MAX))
+                    requested_brake = max(requested_brake, curve_brake)
+                    # Also ease the throttle so we don't fight the brake.
+                    curve_factor = max(0.3, 1.0 - over)
+
+        # --- Reactive curve slowdown: ease off the throttle (light brake at
+        # speed) — a back-up to the proactive brake above, in case the map
+        # curvature isn't published yet (e.g. no map loaded, vision only). ---
         turn = abs(self._last_steering)
-        curve_factor = 1.0 if turn < 0.18 else max(0.35, 1.0 - (turn - 0.18) * 1.6)
+        curve_factor = min(curve_factor,
+                           1.0 if turn < 0.18 else max(0.35, 1.0 - (turn - 0.18) * 1.6))
         if turn > 0.45 and speed_kmh > 45:
             requested_brake = max(requested_brake,
                                   float(np.clip((turn - 0.45) * 0.6, 0.0, 0.35)))

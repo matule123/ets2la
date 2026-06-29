@@ -21,10 +21,29 @@ Point = Tuple[float, float]
 
 # Tuning: gentle + far lookahead so the truck anticipates curves smoothly
 # instead of jerking late into them (which caused it to crash on bends).
-ANGLE_GAIN = 0.65         # rad of heading error → steering (was too strong)
-CTE_GAIN = 0.025          # per-metre lateral correction (softer)
+#
+# The lateral controller is now a **Stanley law** (Hoffmann/Stanford, the
+# standard for kinematic lane-keeping) instead of two hand-tuned gains:
+#     δ = heading_error + atan( k_cte · cte / (k_soft + speed) )
+# This couples the heading correction and the cross-track correction in a
+# physically meaningful way: at speed the CTE term is damped (no twitchy
+# over-correction), at crawl it's strong (precise low-speed placement). It
+# tracks curves far better than the old ANGLE_GAIN·h + CTE_GAIN·cte sum,
+# which oscillated in S-bends because the two terms fought each other.
+K_HEADING = 1.0           # heading-error weight (Stanley keeps this at 1.0)
+K_CTE = 0.55              # cross-track gain (Stanley: how hard we steer back)
+K_SOFT = 1.0              # softening constant → CTE term never explodes at v=0
 MIN_LOOKAHEAD = 22.0      # look further ahead → smoother, earlier turning
 MAX_LOOKAHEAD = 75.0
+# Curvature-aware lookahead: look FAR ahead on straights (anticipate), but
+# TIGHTEN the lookahead in sharp curves (react precisely to the apex). The
+# path's local curvature is measured over CURV_WINDOW_M of road ahead; a
+# tight radius shrinks the lookahead so we track the apex instead of cutting
+# across the oncoming lane / kerb.
+CURV_WINDOW_M = 40.0
+STRAIGHT_LOOKAHEAD = 70.0
+TIGHT_CURVE_LOOKAHEAD = 18.0
+TIGHT_CURVE_RADIUS = 60.0   # radius below this = "tight" (shrinks lookahead)
 ARRIVAL_RADIUS = 12.0     # metres from the last point counts as "arrived"
 
 
@@ -140,6 +159,42 @@ class Route:
         return near_end and self.closest_index(pos) >= len(self.points) - 2
 
     # --- Steering -------------------------------------------------------------
+    def curvature_ahead(self, pos: Point, heading: float,
+                        window_m: float = CURV_WINDOW_M) -> float:
+        """Radius (m) of the sharpest bend in the next ``window_m`` of path.
+
+        Returns a large number (≈straight) when the road is straight or there
+        isn't enough path. Used two ways: (1) to shrink the steering lookahead
+        into tight curves so the truck tracks the apex instead of cutting it,
+        and (2) by the autopilot to brake *before* a sharp bend rather than
+        mid-corner. The estimate is the discrete Menger curvature (circle
+        through three points: the truck, a near point, a far point)."""
+        if len(self.points) < 3:
+            return 1e6
+        idx = self.closest_index(pos)
+        # Sample the path at three positions along the upcoming window.
+        p0 = (pos[0], pos[1])
+        p1 = self.lookahead_point(idx, pos, window_m * 0.5)
+        p2 = self.lookahead_point(idx, pos, window_m)
+        # Menger curvature: k = 4·area / (|a||b||c|), radius = 1/|k|.
+        ax, ay = p1[0] - p0[0], p1[1] - p0[1]
+        bx, by = p2[0] - p0[0], p2[1] - p0[1]
+        cx, cy = p2[0] - p1[0], p2[1] - p1[1]
+        area = abs(ax * by - ay * bx) * 0.5   # triangle area
+        a = math.hypot(ax, ay)
+        b = math.hypot(bx, by)
+        c = math.hypot(cx, cy)
+        # Degenerate triangle (collinear → straight road, or coincident points)
+        # means "no curvature"; return a huge radius. area→0 with non-zero side
+        # lengths is the straight-line case and WOULD divide by zero without
+        # this guard, so we check both the sides and the area.
+        if a < 1e-3 or b < 1e-3 or c < 1e-3 or area < 1e-6:
+            return 1e6
+        prod = a * b * c
+        if prod < 1e-6:
+            return 1e6
+        return prod / (4.0 * area)            # circumradius (m)
+
     def steering(self, pos: Point, heading: float, speed_ms: float = 0.0,
                  lane_offset_m: float = 0.0) -> float:
         """Steering command in ``[-1, 1]`` (positive = right) to follow the route.
@@ -154,17 +209,26 @@ class Route:
             return 0.0
 
         idx = self.closest_index(pos)
-        # Look further ahead the faster we go, so curves are anticipated, not
-        # reacted to late (which caused the late + violent jerk into corners).
-        lookahead = _clamp(MIN_LOOKAHEAD + abs(speed_ms) * 1.6, MIN_LOOKAHEAD, MAX_LOOKAHEAD)
+
+        # --- Curvature-aware lookahead (Fáza 3b) ---------------------------
+        # Look far ahead on straights (so we anticipate the next bend early),
+        # but tighten the lookahead inside a sharp curve (so we track the apex
+        # instead of cutting across it). Radius → 0 shrinks toward the tight
+        # value; radius → ∞ relaxes toward the straight value. Speed still
+        # nudges the lookahead up a little so a fast truck sees further.
+        radius = self.curvature_ahead(pos, heading)
+        # 0 at straight (radius≥200), 1 at tight (radius≤TIGHT_CURVE_RADIUS).
+        tight = _clamp((200.0 - radius) / (200.0 - TIGHT_CURVE_RADIUS), 0.0, 1.0)
+        speed_look = abs(speed_ms) * 1.2
+        lookahead = _clamp(
+            STRAIGHT_LOOKAHEAD - tight * (STRAIGHT_LOOKAHEAD - TIGHT_CURVE_LOOKAHEAD)
+            + speed_look * (1.0 - tight),
+            TIGHT_CURVE_LOOKAHEAD, MAX_LOOKAHEAD,
+        )
         tx, tz = self.lookahead_point(idx, pos, lookahead)
 
         # Shift the lookahead + the reference line sideways by lane_offset_m, so
         # we aim for our lane (right of centre) instead of the oncoming lane.
-        # The normal to the path direction at idx is (-dz, dx)/L (90° CCW); for a
-        # right-hand offset we move along -(normal) = (dz, -dx)/L... but in ETS2's
-        # coordinate frame the sign that moves "to the right of travel" works out
-        # as below (verified empirically on the live map).
         if abs(lane_offset_m) > 1e-3:
             j = min(idx, len(self.points) - 2)
             ax, az = self.points[j]
@@ -185,13 +249,19 @@ class Route:
         dot = fx * dx + fz * dz
         heading_error = math.atan2(cross, dot)
 
-        # Cross-track error reinforces the pure-pursuit heading error: both share
-        # the same sign for a given side of the path, so they add. Measured to the
-        # lane-offset line so it pulls us into our lane, not the centre.
+        # Cross-track error, measured to the lane-offset line so it pulls us
+        # into our lane, not the centre.
         cte = self.cross_track_error(idx, pos) - lane_offset_m
 
-        steer = heading_error * ANGLE_GAIN + cte * CTE_GAIN
+        # --- Stanley lateral-control law (Fáza 3a) -------------------------
+        #   δ = K_HEADING · heading_error + atan( K_CTE · cte / (K_SOFT + v) )
+        # The CTE term is a steering ANGLE (not a velocity), so it's damped at
+        # speed (K_SOFT + v in the denominator) and strong at crawl. Combined
+        # with the heading error it tracks the lane without the oscillation the
+        # old pure-gain sum produced in S-bends. The speed_gain schedule scales
+        # the whole command down with speed (gentle inputs at 90 km/h).
+        v = max(abs(speed_ms), 0.0)
+        cte_steer = math.atan((K_CTE * cte) / (K_SOFT + v))
+        steer = K_HEADING * heading_error + cte_steer
         steer *= speed_gain(speed_ms)
-        # No deadzone: always correct proportionally so the wheel tracks the
-        # road continuously (a deadzone made it sit straight, then jerk late).
         return _clamp(steer, -1.0, 1.0)

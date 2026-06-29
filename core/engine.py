@@ -92,10 +92,16 @@ class UltraPilotEngine:
         logging.info("ETS2-UltraPilot Engine stopped.")
 
     def _autostart_truck(self, truck):
-        """If the truck's engine has died while the autopilot is on, start it."""
+        """Start the engine the way the game expects: hold the ignition key.
+
+        In ETS2's realistic mode a tap turns on the electrics and HOLDING the
+        key cranks the starter until the engine catches. A single press() left
+        the engine dead, so the truck never moved. We hold 'e' for ~1.2 s."""
         if not self.shared_state.get("autopilot_active", False):
             return
         if truck.get("engineEnabled", True):
+            # Engine running — clear any held-key state.
+            self._cranking = False
             return
         now = time.time()
         if now - getattr(self, "_last_engine_start", 0) < 3.0:
@@ -103,9 +109,22 @@ class UltraPilotEngine:
         self._last_engine_start = now
         try:
             import pydirectinput
-            pydirectinput.press('e')   # ETS2 default "start engine"
-            logging.info("Truck engine off — auto-starting it.")
-            self.shared_state.set("tts_message", "Starting the engine.")
+            # Hold the key like a real driver would crank the ignition.
+            pydirectinput.keyDown('e')
+            self._cranking = True
+            # Schedule the release shortly after (separate timer so we don't
+            # block the engine loop while cranking).
+            import threading
+            def _release():
+                time.sleep(1.2)
+                try:
+                    pydirectinput.keyUp('e')
+                except Exception:
+                    pass
+                self._cranking = False
+            threading.Thread(target=_release, daemon=True).start()
+            logging.info("Truck engine off — cranking the starter (hold 'e').")
+            self.shared_state.set("tts_message", "Štartujem motor.")
         except Exception:
             pass
 
@@ -187,8 +206,29 @@ class UltraPilotEngine:
         my_speed = float(self.shared_state.get("truck_speed_ms", 0.0) or 0.0)
 
         if color == "red":
-            # Begin braking early; full hold once we're at the line.
-            if dist <= 6.0:
+            # STOP-HOLD: once we're basically stopped near the line, clamp to a
+            # full hold so the truck can't creep forward through the red (the
+            # proportional ramp alone fades as speed drops and the ACC throttle
+            # then nudges us into the junction).
+            #
+            # Stop-and-go exception (Fáza 3e): in a queue at a red light the car
+            # ahead often pulls forward a few metres as the queue shuffles. We
+            # must FOLLOW it (creep), not hold dead still — otherwise we leave a
+            # growing gap and the cars behind lay on the horn. So if a lead
+            # vehicle is detected ahead AND it has moved well clear of us, relax
+            # the hard hold to a softer brake that lets the truck crawl up to it.
+            lead_dist = None
+            try:
+                lead_dist = self.shared_state.get("lead_distance")
+                if lead_dist is not None:
+                    lead_dist = float(lead_dist)
+            except (TypeError, ValueError):
+                lead_dist = None
+            queue_creep = (lead_dist is not None and lead_dist > 8.0)
+            if my_speed < 0.5 and dist <= 12.0 and not queue_creep:
+                return 1.0
+            # Begin braking early; full as we reach the line.
+            if dist <= 6.0 and not queue_creep:
                 return 1.0
             if dist >= 70.0:
                 return 0.0
@@ -204,6 +244,22 @@ class UltraPilotEngine:
             return 0.0
 
         return 0.0          # green / off → keep going
+
+    # --- Articulated trailer -------------------------------------------------
+    def _articulation_angle(self, truck_heading: float, trailer_heading: float) -> float:
+        """Signed angle (radians) between the tractor and the semi-trailer.
+
+        Positive = the trailer's tail is swung to the LEFT of the tractor's
+        heading (a right-hand bend pushes it left and vice-versa as the combo
+        pivots about the fifth wheel). Wrapped to ``[-π, π]``. Used only for
+        the HUD drawing of the hinged trailer — it does NOT affect steering."""
+        import math
+        diff = float(truck_heading or 0.0) - float(trailer_heading or 0.0)
+        while diff > math.pi:
+            diff -= 2.0 * math.pi
+        while diff < -math.pi:
+            diff += 2.0 * math.pi
+        return diff
 
     # --- Hotkey ---------------------------------------------------------------
     def _check_hotkey(self):
@@ -254,6 +310,32 @@ class UltraPilotEngine:
         # may turn — this stops the truck from yanking into a barrier in curves.
         spd_kmh = abs(float(self.shared_state.get("truck_speed_ms", 0.0) or 0.0)) * 3.6
         max_steer = 1.0 if spd_kmh < 30 else max(0.25, 1.0 - (spd_kmh - 30) / 110.0)
+
+        # Jackknife / trailer-swing protection (Fáza 3d). When a semi-trailer is
+        # coupled and its articulation angle is already large, winding the wheel
+        # further into the SAME direction the trailer is swinging would fold the
+        # combo (jackknife at low speed, trailer-swing at speed). We clamp the
+        # steering away from the dangerous direction, scaled by how folded the
+        # combo already is — full clamp at 35° articulation. This is a safety
+        # limit only; it never increases the steering command.
+        if self.shared_state.get("trailer_attached", False):
+            import math as _m
+            try:
+                art = float(self.shared_state.get("trailer_articulation", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                art = 0.0
+            fold = abs(art) / _m.radians(35.0)         # 0..1+ at 35° articulation
+            if fold > 0.5:                             # only intervene past ~17°
+                # Limit how much MORE we can steer into the swing direction.
+                # art>0 → trailer tail left → swinging right → clamp +steering.
+                sign = 1.0 if art > 0 else -1.0
+                # Reserve shrinks from full toward ~0.3 as we approach a fold.
+                reserve = max(0.3, 1.0 - fold)
+                # Asymmetric cap: allow the safe direction fully, the dangerous
+                # one only up to (current steering scaled by reserve).
+                if (steering * sign) > 0:
+                    steering = sign * min(abs(steering),
+                                          max_steer * reserve, max_steer)
         steering = max(-max_steer, min(max_steer, steering))
 
         self.controller.set_steering(steering)
@@ -291,7 +373,35 @@ class UltraPilotEngine:
                     "truck_world_pos": (truck.get("x", 0.0), truck.get("z", 0.0)),
                     "truck_heading": truck.get("rotation", 0.0),
                     "truck_speed_ms": truck.get("speed", 0.0),
+                    # Destination city of the current job (for the gantry sign).
+                    "dest_city": self.telemetry.get("dest_city", "") or "",
                 })
+
+                # Trailer (articulated semi-trailer, Zone 14). We publish its
+                # world pose + the articulation angle (signed heading difference
+                # between tractor and trailer) so the HUD can draw the trailer
+                # hinged behind the cab. When no trailer is attached we publish
+                # empty values, which the HUD treats as "cab only".
+                trailer = self.telemetry.get("trailer", {}) or {}
+                if trailer.get("attached"):
+                    tr_pos = (trailer.get("x", 0.0), trailer.get("z", 0.0))
+                    articulation = self._articulation_angle(
+                        truck.get("rotation", 0.0), trailer.get("rotation", 0.0))
+                    self.shared_state.update_batch({
+                        "trailer_attached": True,
+                        "trailer_world_pos": tr_pos,
+                        "trailer_heading": trailer.get("rotation", 0.0),
+                        "trailer_articulation": articulation,
+                    })
+                else:
+                    # Clear stale trailer state when the trailer is uncoupled.
+                    if self.shared_state.get("trailer_attached", False):
+                        self.shared_state.update_batch({
+                            "trailer_attached": False,
+                            "trailer_world_pos": None,
+                            "trailer_heading": None,
+                            "trailer_articulation": 0.0,
+                        })
 
                 # Surrounding traffic + the traffic light controlling us (ETS2LA plugin).
                 try:

@@ -26,30 +26,46 @@ import sys
 import shutil
 import subprocess
 
-# Enable ANSI colours on Windows AND fix the cp1250 console crash: a bare
-# `print("\u2714 ...")` raised UnicodeEncodeError under Windows-1250 consoles,
-# which killed the whole build right at the final "done" line. Force UTF-8 on
-# stdout/stderr so all the tick / arrow glyphs print fine everywhere.
+# Force UTF-8 on stdout/stderr so tick / arrow glyphs print fine everywhere
+# (a bare print of \u2714 crashed the build under Windows-1250 consoles).
 try:
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
 except Exception:
     pass
 
+# Enable ANSI VT-100 colour codes on Windows consoles. The old ``os.system("")``
+# trick only worked on some terminals; calling SetConsoleMode with
+# ENABLE_VIRTUAL_TERMINAL_PROCESSING is the reliable way, so the green/red/cyan
+# build messages actually show up coloured everywhere.
+_ANSI_OK = False
 try:
-    os.system("")  # enable ANSI colours on Windows
+    import ctypes
+    k32 = ctypes.windll.kernel32
+    _h = k32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+    _mode = ctypes.c_uint32()
+    if k32.GetConsoleMode(_h, ctypes.byref(_mode)):
+        _ANSI_OK = bool(k32.SetConsoleMode(_h, _mode.value | 0x0004))
 except Exception:
-    pass
+    _ANSI_OK = False
 
 _C = {"g": "\033[92m", "y": "\033[93m", "r": "\033[91m", "c": "\033[96m",
       "b": "\033[1m", "x": "\033[0m"}
 
 
 def cprint(color, msg):
+    """Coloured print: green/yellow/red/cyan/bold. Falls back to plain text if
+    the console can't render ANSI colours."""
+    code = _C.get(color, "")
+    if code and _ANSI_OK:
+        try:
+            print(code + msg + _C["x"])
+            return
+        except UnicodeEncodeError:
+            pass
     try:
-        print(f"{_C.get(color, '')}{msg}{_C['x']}")
+        print(msg)
     except UnicodeEncodeError:
-        # Last-resort: strip anything the console can't render.
         print(msg.encode("ascii", "replace").decode("ascii"))
 
 

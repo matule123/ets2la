@@ -148,9 +148,19 @@ class Plugin(BasePlugin):
 
         ETS2 is right-hand traffic, so the autopilot must hold the right lane —
         driving the bare centreline put it in the oncoming lane („protismer").
-        Default ~2.7 m (half a lane); can be overridden from shared state or set
-        negative for left-hand-traffic maps (UK / ATS mirror).
-        """
+
+        The full lateral strategy — right-lane baseline, lane-change requests,
+        AND the adaptive trailer-aware swing-wide nudge — is owned by the
+        **drivepolicy** plugin, which publishes ``drive_lane_offset``. We prefer
+        that when present (it's the coherent combined plan). Fallbacks, in order:
+        a manual ``lane_offset_m`` override, then the 2.7 m right-lane default.
+        This keeps the map plugin a geometry follower, not a strategist."""
+        drv = self.sdk.get("drive_lane_offset", None)
+        if drv is not None:
+            try:
+                return float(drv)
+            except (TypeError, ValueError):
+                pass
         v = self.sdk.get("lane_offset_m", None)
         if v is not None:
             try:
@@ -158,6 +168,39 @@ class Plugin(BasePlugin):
             except (TypeError, ValueError):
                 pass
         return 2.7
+
+    def _publish_road_type(self, pos):
+        """Classify the road under the truck and publish a speed cap.
+
+        Slows the autopilot on narrow/local/dirt sectors (the „poľné / úzke
+        cesty" behaviour) while leaving motorways at full speed. ACC reads
+        ``road_speed_cap`` (km/h) and never exceeds it. Cheap no-op when the
+        road network isn't loaded yet."""
+        net = self.road_net
+        if net is None or not getattr(net, "loaded", False) or not pos:
+            return
+        rt = net.road_type_at(pos)
+        if not rt:
+            return
+        rtype = rt.get("type", "local")
+        lanes = rt.get("lanes", 1)
+        # Speed caps (km/h) per road class — tuned for a truck. Narrow/dirt
+        # sectors cap much lower than the posted limit would, because a truck
+        # physically can't take a single-lane dirt road at 90.
+        caps = {
+            "motorway": 90,
+            "expressway": 80,
+            "local": 60 if lanes >= 2 else 50,
+            "dirt": 35,
+        }
+        cap = caps.get(rtype, 70)
+        prev = self.sdk.get("road_speed_cap", None)
+        # Only publish when it changes, to avoid spamming shared state every tick.
+        if prev != cap:
+            self.sdk.set("road_speed_cap", cap)
+            self.sdk.set("road_type", rtype)
+            self.sdk.set("road_lanes", lanes)
+            logging.info("Road type: %s (%d lanes) -> speed cap %d km/h", rtype, lanes, cap)
 
     def _ensure_map_path(self, pos, heading):
         """Compute and publish the road-ahead polyline from the downloaded map.
@@ -197,6 +240,12 @@ class Plugin(BasePlugin):
         # time we have a position. Cheap no-op once attempted.
         self._load_road_net()
 
+        # Classify the road we're on + publish a speed cap so the autopilot
+        # slows down on narrow/local/dirt sectors and keeps full speed on
+        # motorways/expressways. Drives the "nech ide pomalšie na poľných /
+        # úzkych cestách" behaviour.
+        self._publish_road_type(pos)
+
         # Recording: drop a breadcrumb every ~10 m.
         if self.recording is not None:
             if self.recording.add_point(pos[0], pos[1]):
@@ -217,6 +266,11 @@ class Plugin(BasePlugin):
             self.sdk.set("nav_steering", float(steer))
             self.sdk.set("nav_active", True)
             self.sdk.set("distance_to_dest", self.active_route.distance_to_end(pos))
+            # Publish the upcoming path curvature so the autopilot can brake
+            # BEFORE a sharp bend (anticipatory) instead of reacting to its own
+            # steering mid-corner. Radius in metres; large = straight.
+            self.sdk.set("path_curvature_radius",
+                         self.active_route.curvature_ahead(pos, heading))
             self.tags.nav_steering = round(steer, 3)
 
             # Publish the upcoming path points so the HUD can draw "where to go".
@@ -233,6 +287,10 @@ class Plugin(BasePlugin):
                 self.sdk.set("nav_steering", float(steer))
                 self.sdk.set("nav_active", True)
                 self.sdk.set("nav_path", [list(p) for p in map_path[:25]])
+                # Curvature radius (m) of the road ahead — lets the autopilot
+                # anticipate bends (brake before, not during).
+                self.sdk.set("path_curvature_radius",
+                             route.curvature_ahead(pos, heading))
                 self.tags.nav_steering = round(steer, 3)
             else:
                 self.sdk.set("nav_active", False)

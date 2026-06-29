@@ -43,8 +43,18 @@ class Plugin(BasePlugin):
             return
 
         # Proportional braking as danger ramps up; 0 when the road is clear.
+        # Combine the vision danger with the real lead-vehicle distance from
+        # the ETS2LA traffic data — the vision signal alone often misses a car
+        # right in front, so the real gap backs it up.
+        vision_brake = 0.0
         if danger_level > 0.3:
-            brake = float(np.clip(0.3 + danger_level * 0.7, 0.0, 0.9))
+            vision_brake = float(np.clip(0.3 + danger_level * 0.7, 0.0, 0.9))
+        lead_dist = float(self.sdk.get("lead_distance", 0.0) or 0.0)
+        lead_brake = 0.0
+        if 0 < lead_dist < 15.0:
+            lead_brake = float(np.clip((15.0 - lead_dist) / 15.0, 0.0, 0.9))
+        brake = max(vision_brake, lead_brake)
+        if brake > 0.01:
             self.sdk.set("collision_brake_request", brake)
             self.tags.collision_status = f"BRAKING {brake:.2f}"
         else:

@@ -351,14 +351,25 @@ class VisualizationPage(QWidget):
         sub.setWordWrap(True)
         lay.addWidget(sub)
 
-        # Live preview of the left-side driving HUD.
-        self.hud_preview = _HUDPreview(state)
+        # Live preview of the left-side driving HUD. Prefer the real GPU 3D
+        # renderer; fall back to the 2D QPainter preview if OpenGL is missing.
+        try:
+            from ui.driving_scene import DrivingScene
+            self.scene = DrivingScene(state)
+            if getattr(self.scene, "has_gl", False):
+                self.hud_preview = self.scene
+            else:
+                self.hud_preview = _HUDPreview(state)
+        except Exception:
+            self.hud_preview = _HUDPreview(state)
         lay.addWidget(self.hud_preview, stretch=1)
 
         self.island = _GlassIsland(state)
         lay.addWidget(self.island)
         lay.addStretch()
         self.timer = QTimer()
-        self.timer.timeout.connect(self.hud_preview.update)
+        # OpenGL widget updates itself internally; the 2D fallback needs update().
+        if isinstance(self.hud_preview, _HUDPreview):
+            self.timer.timeout.connect(self.hud_preview.update)
         self.timer.timeout.connect(self.island.update)
         self.timer.start(120)

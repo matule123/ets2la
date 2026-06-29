@@ -80,6 +80,36 @@ class Plugin(BasePlugin):
         # Mirror for the HUD rear-cam (so it pops up on a real signal).
         self.sdk.set("active_blinker", target)
 
+        # --- Blind-spot check: is it safe to actually move into the signalled
+        # lane? When a signal is on we scan the adjacent lane beside+behind us;
+        # if a car is there the autopilot must NOT change lanes yet. Off = safe.
+        if target in ("left", "right"):
+            self.sdk.set("lane_change_safe",
+                         self._lane_change_safe(pos, heading, target))
+        else:
+            self.sdk.set("lane_change_safe", True)
+
+    def _lane_change_safe(self, pos, heading, side):
+        """True if no vehicle occupies the target lane in our blind spot.
+
+        Checks the lane we'd move into (~3.5 m to the signalled side) from a few
+        metres behind us to ~15 m ahead. Uses the real ETS2LA traffic list; if
+        empty, assume safe."""
+        traffic = self.sdk.shared_state.get("traffic", []) or []
+        if not traffic or not pos:
+            return True
+        px, pz = pos
+        sin_h, cos_h = math.sin(heading), math.cos(heading)
+        side_sign = 1.0 if side == "right" else -1.0
+        target_lat = side_sign * 3.5
+        for v in traffic:
+            dx, dz = v["x"] - px, v["z"] - pz
+            ahead = dx * (-sin_h) + dz * (-cos_h)
+            lat = dx * cos_h - dz * sin_h
+            if -5.0 < ahead < 15.0 and abs(lat - target_lat) < 2.2:
+                return False
+        return True
+
     # --- Geometry -------------------------------------------------------------
     def _signal_for_path(self, pos, heading, path):
         """Return 'left' / 'right' / 'off' based on the bend ahead.

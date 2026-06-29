@@ -245,11 +245,27 @@ class InstallWorker(QThread):
             self.log.emit("  problém s pip (" + str(e) + ") — nainštaluj manuálne.")
 
     def _make_shortcuts(self, exe_path, mode):
+        """Create a robust launcher (.bat) + Desktop/Start-menu shortcuts to it.
+
+        Directly targeting ``pythonw.exe "main.py"`` from a .lnk broke on many
+        machines (the Microsoft Store python stub refuses to spawn the app's
+        multiprocessing children, so the shortcut silently does nothing). A
+        small launcher .bat in the install folder runs ``py -3 main.py`` with
+        the correct working dir and keeps a window open on error — the shortcut
+        points at that, which always works."""
         icon = os.path.join(self.install_path, "assets", "favicon.ico")
-        pyw = (shutil.which("pythonw") or shutil.which("pythonw.exe")
-               or shutil.which("python") or "pythonw.exe")
-        target = exe_path if mode == "frozen" else pyw
-        args = "" if mode == "frozen" else '"' + exe_path + '"'
+        main_py = os.path.basename(exe_path)
+        bat_path = os.path.join(self.install_path, "UltraPilot.bat")
+        try:
+            with open(bat_path, "w", encoding="utf-8") as f:
+                f.write("@echo off\r\n")
+                f.write("cd /d \"" + self.install_path + "\"\r\n")
+                f.write("start \"\" /b py -3 " + main_py + "\r\n")
+                f.write("exit\r\n")
+        except Exception as e:
+            self.log.emit("  launcher: " + str(e))
+            bat_path = exe_path  # fall back to the script directly
+
         for folder in (os.path.join(os.environ.get("USERPROFILE", ""), "Desktop"),
                        os.path.join(os.environ.get("APPDATA", ""),
                                     "Microsoft\\Windows\\Start Menu\\Programs")):
@@ -260,9 +276,9 @@ class InstallWorker(QThread):
                 lnk = os.path.join(folder, APP_NAME + ".lnk")
                 ps = (
                     '$s=(New-Object -ComObject WScript.Shell).CreateShortcut("' + lnk + '");'
-                    '$s.TargetPath="' + target + '";'
-                    + ("$s.Arguments='" + args + "';" if args else "")
-                    + '$s.WorkingDirectory="' + self.install_path + '";'
+                    '$s.TargetPath="' + bat_path + '";'
+                    '$s.WorkingDirectory="' + self.install_path + '";'
+                    '$s.WindowStyle=7;'
                     + ('$s.IconLocation="' + icon + '";' if os.path.exists(icon) else "")
                     + '$s.Save()'
                 )
@@ -275,6 +291,31 @@ class InstallWorker(QThread):
         try:
             mode = "source"
             self.log.emit(self.t["s_prep"])
+            # --- Pre-flight: check every prerequisite BEFORE touching disk ---
+            missing = []
+            py = self._real_python()
+            if not py:
+                missing.append("Python 3 — stiahni z https://python.org "
+                               "(začiarkni „Add Python to PATH“)")
+            else:
+                # Verify pip works in that Python.
+                try:
+                    subprocess.run([*py, "-m", "pip", "--version"],
+                                   capture_output=True, timeout=30)
+                    self.log.emit("✓ Python: " + py[0])
+                except Exception:
+                    missing.append("pip pre Python — obyčajne sa inštaluje s Pythonom")
+            # git is optional (we fall back to a zip download), just warn.
+            if not (shutil.which("git")):
+                self.log.emit("  (git nie je nainštalovaný — použije sa zip stiahnutie)")
+            if missing:
+                self.log.emit("")
+                self.log.emit("✗ Chýbajú požiadavky:")
+                for m in missing:
+                    self.log.emit("   • " + m)
+                self.log.emit("Nainštaluj ich a spusti inštalátor znova.")
+                self.finished_ok.emit(False, "")
+                return
             os.makedirs(self.install_path, exist_ok=True)
             self.progress.emit(3)
             self.log.emit("Kopírujem súbory UltraPilot…")

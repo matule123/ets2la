@@ -62,6 +62,27 @@ class Plugin(BasePlugin):
             if speed_limit_kmh > 5:  # 0 means "unknown / no limit"
                 effective_target_speed = min(effective_target_speed, speed_limit_kmh)
 
+        # Road-class speed cap: slow down on narrow/local/dirt sectors. The map
+        # plugin classifies the road under us and publishes road_speed_cap (km/h);
+        # when present it overrides the user target (a truck can't do 90 on a
+        # single-lane dirt road, regardless of what the driver set).
+        road_cap = self.sdk.shared_state.get("road_speed_cap", None)
+        if road_cap is not None:
+            try:
+                effective_target_speed = min(effective_target_speed, float(road_cap))
+            except (TypeError, ValueError):
+                pass
+
+        # Coherent plan from the speed planner (m/s → km/h). When present this
+        # is the single combined "how fast is safe right now" value (curvature
+        # + lead + light + caps); we never exceed it.
+        plan_ms = self.sdk.shared_state.get("planned_speed_ms", None)
+        if plan_ms is not None:
+            try:
+                effective_target_speed = min(effective_target_speed, float(plan_ms) * 3.6)
+            except (TypeError, ValueError):
+                pass
+
         if danger_level > 0.05:
             # Non-linear reduction for smoother approach: speed drops faster as danger increases
             reduction_factor = max(0.3, 1.0 - (danger_level ** 1.5 * 3))
@@ -72,12 +93,16 @@ class Plugin(BasePlugin):
         throttle_output = self.speed_pid.update(speed_kmh, delta_time)
 
         # 4. Control Output Mapping
-        # Map PID output to throttle (0 to 1) and brake (0 to 1)
+        # Map PID output to throttle (0 to 1) and brake (0 to 1).
         throttle_val = np.clip(throttle_output, 0.0, 1.0)
 
         if speed_kmh > effective_target_speed + 2:
-            # Gradual braking based on overspeed
-            brake_power = np.clip((speed_kmh - effective_target_speed) / 15.0, 0.1, 0.6)
+            # Gentle deceleration: a soft proportional brake, never a hard step.
+            # The old (overspeed/15) clamped to 0.6 made the truck lurch from
+            # 80 to 50 — the brake ramp in the autopilot smooths it further, but
+            # we keep the requested value modest so it never slams.
+            over = speed_kmh - effective_target_speed
+            brake_power = np.clip(over / 40.0, 0.0, 0.35)
             self.sdk.shared_state.set("acc_throttle", 0.0)
             self.sdk.shared_state.set("acc_brake", brake_power)
         else:

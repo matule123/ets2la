@@ -87,6 +87,8 @@ class RoadNetwork:
         self._seg_uids = []      # [(start_uid, end_uid), ...]  parallel to segments
         self._grid = {}          # (cx,cz) -> [segment_index, ...]  (legacy, endpoint-based)
         self._seg_grid = {}      # (cx,cz) -> [segment_index, ...]  (both endpoints)
+        self.road_looks = {}     # token -> {"type": str, "lanes": int}  (road classification)
+        self._road_look_token = {}  # node_uid -> roadLookToken (nearest road's type)
         self.loaded = False
 
     # --- Loading --------------------------------------------------------------
@@ -143,6 +145,12 @@ class RoadNetwork:
                     self.segments.append((a, b))
                     self.adj.setdefault(su, []).append(eu)
                     self.adj.setdefault(eu, []).append(su)
+                    # Remember the road-look token on both endpoints so
+                    # road_type_at can classify the road we're driving on.
+                    tok = r.get("roadLookToken")
+                    if tok:
+                        self._road_look_token[su] = tok
+                        self._road_look_token[eu] = tok
         except Exception as e:
             logging.exception("road_network: failed to load roads: %s", e)
             return False
@@ -152,6 +160,10 @@ class RoadNetwork:
         # the same graph ETS2LA's Map plugin pathfinds on, so it's far more
         # complete than the roads-only adjacency. Falls back silently to `adj`.
         self._load_nav_graph(data_dir)
+        # Road-look table: classifies each road segment (motorway / expressway /
+        # local / dirt) + lane count, used by the autopilot to slow down on
+        # narrow/local roads and cap speed in city sectors.
+        self._load_road_looks(data_dir)
         logging.info("road_network: loaded %d nodes, %d segments, nav-graph nodes=%d",
                      len(self.nodes), len(self.segments),
                      len(self.fwd) if self.fwd else len(self.adj))
@@ -196,7 +208,8 @@ class RoadNetwork:
                 return False
             data = payload["data"]
             for k in ("nodes", "adj", "fwd", "bwd", "_ngrid", "segments",
-                      "_seg_uids", "_grid", "_seg_grid", "loaded"):
+                      "_seg_uids", "_grid", "_seg_grid", "_road_look_token",
+                      "road_looks", "loaded"):
                 setattr(self, k, data.get(k, getattr(self, k)))
             self.loaded = bool(data.get("loaded", True))
             logging.info("road_network: loaded from cache (%d nodes, %d fwd).",
@@ -215,7 +228,8 @@ class RoadNetwork:
                     "nodes": self.nodes, "adj": self.adj, "fwd": self.fwd,
                     "bwd": self.bwd, "_ngrid": self._ngrid, "segments": self.segments,
                     "_seg_uids": self._seg_uids, "_grid": self._grid,
-                    "_seg_grid": self._seg_grid, "loaded": self.loaded,
+                    "_seg_grid": self._seg_grid, "_road_look_token": self._road_look_token,
+                    "road_looks": self.road_looks, "loaded": self.loaded,
                 },
             }
             with open(self._cache_path(data_dir), "wb") as f:
@@ -251,6 +265,69 @@ class RoadNetwork:
             logging.info("road_network: nav-graph loaded (%d fwd / %d bwd nodes).", nf, nb)
         except Exception as e:
             logging.warning("road_network: nav-graph load failed (%s) — using roads.json graph.", e)
+
+    def _load_road_looks(self, data_dir: str):
+        """Load the road-look table (``roadLooks.json``).
+
+        Classifies each road-look token into a coarse type + lane count, used by
+        ``road_type_at`` so the autopilot can slow down on local/narrow roads and
+        keep full speed on motorways. Built from the ``name`` and the
+        ``lanesLeft/Right`` lists ETS2LA ships in the dataset."""
+        path = _find_json(data_dir, "roadLooks")
+        if not path:
+            return
+        try:
+            raw = _loadf(path)
+            for r in raw:
+                tok = r.get("token")
+                if not tok:
+                    continue
+                name = (r.get("name", "") or "").lower()
+                lanes_l = r.get("lanesLeft", []) or []
+                lanes_r = r.get("lanesRight", []) or []
+                lanes = len(lanes_l) + len(lanes_r)
+                lane_str = " ".join(lanes_l + lanes_r).lower()
+                if "motorway" in lane_str or "highway" in name:
+                    rtype = "motorway"
+                elif "expressway" in lane_str or "express" in name:
+                    rtype = "expressway"
+                elif "dirt" in name or "minim" in name or "ground" in name:
+                    rtype = "dirt"
+                elif "local" in lane_str or "old road" in name:
+                    rtype = "local"
+                else:
+                    rtype = "local" if lanes <= 2 else "expressway"
+                self.road_looks[tok] = {"type": rtype, "lanes": max(1, lanes)}
+            logging.info("road_network: %d road-looks classified.", len(self.road_looks))
+        except Exception as e:
+            logging.debug("road_network: road-looks load failed (%s).", e)
+
+    def road_type_at(self, pos):
+        """Return the road classification at ``pos``: a dict
+        ``{"type": "motorway"|"expressway"|"local"|"dirt", "lanes": int}``, or
+        ``None`` if no road is nearby / no look table loaded. The autopilot uses
+        this to cap speed on narrow/local sectors."""
+        if not self.road_looks or not self.loaded or not pos:
+            return None
+        # Find the nearest graph segment, then look up its roadLook token.
+        # We don't store tokens per segment (heavy), so match by reading the
+        # roads.json token for the segment's uid pair if available; fall back to
+        # a width-based guess from lane count = unknown.
+        seg_idx = self._nearest_segment_index(pos)
+        if seg_idx is None:
+            return None
+        su, eu = self._seg_uids[seg_idx] if seg_idx < len(self._seg_uids) else (None, None)
+        tok = self._road_look_token.get(su) or self._road_look_token.get(eu)
+        if tok and tok in self.road_looks:
+            return self.road_looks[tok]
+        # Fallback: guess from the segment length (short = city/local, long = highway).
+        (ax, az), (bx, bz) = self.segments[seg_idx]
+        seg_len = math.hypot(bx - ax, bz - az)
+        if seg_len > 60:
+            return {"type": "motorway", "lanes": 2}
+        if seg_len > 20:
+            return {"type": "expressway", "lanes": 2}
+        return {"type": "local", "lanes": 1}
 
     def _forward_neighbours(self, uid, going_forward):
         """Connected node uids in the travel direction.
@@ -449,23 +526,25 @@ class RoadNetwork:
             # neighbour is a candidate and the dot test does all the work.
             return self._forward_neighbours(uid, going_forward)
 
-        def best_travel_direction(seed_uid):
-            """Pick 'forward' vs 'backward' list by which best matches the truck
-            heading. ETS2 roads store an orientation that's unrelated to which
-            way we're driving, so we must choose the list that points where we're
-            actually going — otherwise the walk traces the road backwards."""
-            cx, cz = self.nodes[seed_uid]
-            f = b = -1.0
-            for nb in self._forward_neighbours(seed_uid, True):
+        def travel_direction_at(uid, tx, tz):
+            """At a given node, which nav-graph list (forward/backward) best
+            matches the current travel direction (tx,tz)? Road orientation in
+            the data is unrelated to our driving direction, so we must re-pick
+            the list at EVERY node — deciding it only once at the seed was the
+            reason the walk died on two-way roads (orientation flips between
+            segments)."""
+            cx, cz = self.nodes[uid]
+            f = b = -2.0
+            for nb in self._forward_neighbours(uid, True):
                 if nb in self.nodes:
                     nx, nz = self.nodes[nb]
                     L = math.hypot(nx - cx, nz - cz) or 1.0
-                    f = max(f, ((nx - cx) * fwdx + (nz - cz) * fwdz) / L)
-            for nb in self._forward_neighbours(seed_uid, False):
+                    f = max(f, ((nx - cx) * tx + (nz - cz) * tz) / L)
+            for nb in self._forward_neighbours(uid, False):
                 if nb in self.nodes:
                     nx, nz = self.nodes[nb]
                     L = math.hypot(nx - cx, nz - cz) or 1.0
-                    b = max(b, ((nx - cx) * fwdx + (nz - cz) * fwdz) / L)
+                    b = max(b, ((nx - cx) * tx + (nz - cz) * tz) / L)
             return f >= b
 
         def walk_from(seed_uid, start_pt):
@@ -473,15 +552,17 @@ class RoadNetwork:
             visited = {seed_uid}
             total = 0.0
             first = True
-            going_forward = best_travel_direction(seed_uid)
+            tx, tz = fwdx, fwdz
             c = seed_uid
             # Travel direction starts from the truck heading, then updates to
             # follow the last segment we drove along — so the path keeps tracing
             # a curving road instead of dying the moment it bends away from the
             # original heading.
-            tx, tz = fwdx, fwdz
             while total < length and len(path) < max_steps:
                 cx, cz = self.nodes[c]
+                # Re-decide forward vs backward at THIS node from the current
+                # travel direction (road orientation can flip between segments).
+                going_forward = travel_direction_at(c, tx, tz)
                 # First step lenient (a new road may leave the node at a wide
                 # angle relative to the heading); later steps want continuity.
                 best, best_dot = None, (-0.30 if first else 0.0)
