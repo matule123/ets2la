@@ -73,7 +73,37 @@ class Telemetry:
             "z": tp.get("coordinateZ", 0.0),
         }
         pos = (tp.get("coordinateX", 0.0), tp.get("coordinateZ", 0.0))
-        return {"raw": raw, "truck": truck, "position": pos, "heading": heading}
+
+        # --- Trailer placement (Zone 14). Only the first trailer is used —
+        # the ETS2 tractor+semi-trailer combo is articulated at a single hitch.
+        # If none is attached (or the SDK doesn't expose it) we publish an
+        # empty trailer dict so downstream code can detect "no trailer".
+        trailer = {}
+        try:
+            raw_tr = self.sdk_reader.read_trailer(0)
+            if raw_tr and raw_tr.get("attached"):
+                tr_heading = (raw_tr.get("rotationX", 0.0) or 0.0) * 2.0 * math.pi
+                trailer = {
+                    "attached": True,
+                    "speed": speed_ms,                 # approximated by the truck's
+                    "x": raw_tr.get("worldX", 0.0),
+                    "z": raw_tr.get("worldZ", 0.0),
+                    "rotation": tr_heading,            # radians (heading)
+                    "rotationX": raw_tr.get("rotationX", 0.0),
+                }
+        except Exception as e:
+            logging.debug(f"Trailer telemetry unavailable: {e}")
+
+        # --- Job destination city (Zone 9 string). Empty when no job active.
+        dest_city = ""
+        try:
+            dest_city = self.sdk_reader.read_job_destination()
+        except Exception as e:
+            logging.debug(f"Job destination unavailable: {e}")
+
+        return {"raw": raw, "truck": truck, "trailer": trailer,
+                "dest_city": dest_city,
+                "position": pos, "heading": heading}
 
     def _normalize_http(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         truck = payload.get("truck", payload) or {}
