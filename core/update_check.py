@@ -1,19 +1,33 @@
 """
-Startup update check: compares the local version against the latest GitHub
-release and, if a newer one exists and this is a git checkout, runs `git pull`.
+Update checking and applying for UltraPilot.
 
-Shows a small splash window with a status bar.  Never blocks startup on error —
-if GitHub is unreachable or anything fails, it just continues to the app.
+The old blocking splash window is gone — the UI now drives updates itself
+(``ui/update_widget.py`` shows a spinner + status bar inside the sidebar). This
+module is the pure logic layer the UI calls into:
+
+* ``VERSION``           — the current app version (kept in sync with installer).
+* ``current_version()`` — same, as a function.
+* ``latest_release()``  — the newest GitHub release tag, or None.
+* ``check_for_update()``— ``(available: bool, latest_tag: str)``.
+* ``perform_update(progress_cb)``— hybrid update: ``git pull`` if the install is a
+  git checkout, otherwise download the latest release zip and overwrite files
+  (settings.json / routes / map-cache are preserved).
+* ``git_commit()``      — short commit hash for the about/update UI.
+
+All network calls are bounded with timeouts and never raise — on failure they
+return a benign result (``False`` / ``""`` / ``None``) so the caller can show a
+clear status instead of crashing.
 """
 
+import logging
 import os
-import sys
 import subprocess
+import sys
 
-VERSION = "0.3.0"
-# Public GitHub repo to check (owner/name).
+VERSION = "0.4.0"
 REPO = "matule123/ets2la"
 API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
+ARCHIVE_URL = f"https://github.com/{REPO}/archive/refs/heads/main.zip"
 
 
 def _app_dir():
@@ -22,8 +36,25 @@ def _app_dir():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def _latest_tag():
-    """Return the latest release tag from GitHub, or None on any failure."""
+def current_version() -> str:
+    return VERSION
+
+
+def git_commit() -> str:
+    """Short HEAD commit hash, or '' if not a git checkout / git missing."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", _app_dir(), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=8)
+        if out.returncode == 0:
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def latest_release() -> str | None:
+    """Latest release tag (without leading v/V) from GitHub, or None."""
     try:
         import requests
         r = requests.get(API_URL, timeout=6)
@@ -34,7 +65,7 @@ def _latest_tag():
     return None
 
 
-def _is_newer(remote, local):
+def _is_newer(remote: str, local: str) -> bool:
     def parts(v):
         out = []
         for p in str(v).split("."):
@@ -43,75 +74,89 @@ def _is_newer(remote, local):
             except Exception:
                 out.append(0)
         return out
-    return parts(remote) > parts(local)
-
-
-def run_with_splash():
-    """Show a splash + status bar while checking/updating. Returns when done."""
     try:
-        from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QProgressBar
-        from PyQt6.QtGui import QPixmap, QIcon
-        from PyQt6.QtCore import Qt, QTimer
+        return parts(remote) > parts(local)
     except Exception:
-        return  # no Qt → skip silently
+        return False
 
-    app = QApplication.instance() or QApplication(sys.argv)
-    w = QWidget()
-    w.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
-    w.setFixedSize(420, 220)
-    w.setStyleSheet("background:#0E0F13; color:#E6E6E6; font-family:'Segoe UI';")
-    lay = QVBoxLayout(w); lay.setContentsMargins(30, 26, 30, 26); lay.setSpacing(12)
 
-    logo = QLabel(); logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    pm = QPixmap(os.path.join(_app_dir(), "assets", "favicon.ico"))   # icon, not wordmark
-    if pm.isNull():
-        pm = QPixmap(os.path.join(_app_dir(), "assets", "logo.png"))
-    if not pm.isNull():
-        logo.setPixmap(pm.scaledToWidth(96, Qt.TransformationMode.SmoothTransformation))
-    lay.addWidget(logo)
+def check_for_update() -> tuple:
+    """Return ``(available: bool, latest_tag: str|None)``."""
+    remote = latest_release()
+    if remote and _is_newer(remote, VERSION):
+        return True, remote
+    return False, remote
 
-    status = QLabel("Checking for updates…")
-    status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    status.setStyleSheet("color:#9AA0A6;")
-    lay.addWidget(status)
 
-    bar = QProgressBar(); bar.setRange(0, 0)  # indeterminate
-    bar.setStyleSheet("QProgressBar{background:#16181D;border:1px solid #2C2F36;"
-                      "border-radius:6px;height:16px;}"
-                      "QProgressBar::chunk{background:#10B981;border-radius:5px;}")
-    lay.addWidget(bar)
-    w.show()
-
-    def work():
-        try:
-            remote = _latest_tag()
-            if remote and _is_newer(remote, VERSION):
-                status.setText(f"New version {remote} found — updating…")
-                app.processEvents()
-                if os.path.isdir(os.path.join(_app_dir(), ".git")):
-                    try:
-                        subprocess.run(["git", "-C", _app_dir(), "pull", "--ff-only"],
-                                       capture_output=True, timeout=60)
-                        status.setText(f"Updated to {remote}. Starting…")
-                    except Exception:
-                        status.setText("Update failed — starting current version…")
-                else:
-                    status.setText(f"Update {remote} available (download manually). Starting…")
-            else:
-                status.setText("Up to date. Starting…")
-        except Exception:
-            status.setText("Starting…")
-        app.processEvents()
-        QTimer.singleShot(700, w.close)
-
-    QTimer.singleShot(150, work)
-    # Run the splash, but with a HARD time cap so it can NEVER block startup.
-    import time
-    t0 = time.time()
-    while w.isVisible() and (time.time() - t0) < 12.0:
-        app.processEvents()
-        time.sleep(0.02)
+def _git_pull(progress_cb=None) -> bool:
+    """Fast-forward pull when the install is a git checkout. Returns success."""
+    if not os.path.isdir(os.path.join(_app_dir(), ".git")):
+        return False
     try:
-        w.close()
-    except Exception:
-        pass
+        if progress_cb:
+            progress_cb(0.2, "git pull…")
+        r = subprocess.run(["git", "-C", _app_dir(), "pull", "--ff-only"],
+                           capture_output=True, text=True, timeout=120)
+        ok = r.returncode == 0
+        if progress_cb:
+            progress_cb(1.0, "git pull " + ("OK" if ok else "failed"))
+        return ok
+    except Exception as e:
+        logging.warning("update git pull failed: %s", e)
+        if progress_cb:
+            progress_cb(1.0, "git pull error")
+        return False
+
+
+# Files/folders that must never be overwritten by an update (user data + caches).
+_PROTECTED = {
+    "settings.json", "routes", "map-cache", "model-cache", "logs",
+    "UltraPilot_Installer.exe", "install.json",
+}
+
+
+def _zip_update(progress_cb=None) -> bool:
+    """Fallback: download the main-branch zip and overwrite non-protected files."""
+    try:
+        import requests, zipfile, io, shutil
+        if progress_cb:
+            progress_cb(0.1, "Sťahujem balík aktualizácie…")
+        r = requests.get(ARCHIVE_URL, timeout=180, stream=True)
+        if r.status_code != 200:
+            if progress_cb:
+                progress_cb(1.0, "download HTTP " + str(r.status_code))
+            return False
+        data = r.content
+        if progress_cb:
+            progress_cb(0.5, "Rozbaľujem…")
+        zf = zipfile.ZipFile(io.BytesIO(data))
+        names = zf.namelist()
+        # GitHub zips nest under "<repo>-main/".
+        prefix = names[0].split("/")[0] if names else ""
+        replaced = 0
+        for n in names:
+            if n.endswith("/"):
+                continue
+            rel = n[len(prefix) + 1:] if prefix and n.startswith(prefix + "/") else n
+            if not rel or rel in _PROTECTED or rel.split(os.sep)[0] in _PROTECTED:
+                continue
+            dest = os.path.join(_app_dir(), rel)
+            os.makedirs(os.path.dirname(dest) or _app_dir(), exist_ok=True)
+            with open(dest, "wb") as f:
+                f.write(zf.read(n))
+            replaced += 1
+        if progress_cb:
+            progress_cb(1.0, f"Aktualizované ({replaced} súborov)")
+        return True
+    except Exception as e:
+        logging.warning("update zip failed: %s", e)
+        if progress_cb:
+            progress_cb(1.0, "chyba: " + str(e))
+        return False
+
+
+def perform_update(progress_cb=None) -> bool:
+    """Apply the latest code: git pull first, zip fallback otherwise."""
+    if _git_pull(progress_cb):
+        return True
+    return _zip_update(progress_cb)

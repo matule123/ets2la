@@ -45,7 +45,7 @@ class AboutPage(Page):
         title.setStyleSheet("font-size: 24px; font-weight: bold; color: #065F46; margin-bottom: 20px;")
         self.layout.addWidget(title)
         text = QLabel(
-            "ETS2 UltraPilot Pro Edition\n\n"
+            "UltraPilot\n\n"
             "A professional-grade autopilot for Euro Truck Simulator 2.\n"
             "Lane Assist, Adaptive Cruise Control, Collision Avoidance, "
             "Navigation, HUD and Voice — each plugin isolated in its own process."
@@ -59,13 +59,23 @@ class AboutPage(Page):
 class PluginsPage(Page):
     def __init__(self, state):
         super().__init__(state)
-        title = QLabel("🧩 Plugin Management")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #065F46; margin-bottom: 20px;")
-        self.layout.addWidget(title)
+        from core.theme import palette
+        self._pal = palette(state.get("ui_theme", "light") or "light")
+        self._themed_rows = []
+        self.title = QLabel("🧩 Plugin Management")
+        self.title.setStyleSheet("font-size: 24px; font-weight: bold; color: " + self._pal['title'] + "; margin-bottom: 20px;")
+        self.layout.addWidget(self.title)
 
         self.plugin_list = QVBoxLayout()
         self.layout.addLayout(self.plugin_list)
         self.layout.addStretch()
+        self.refresh_plugins()
+
+    def restyle(self, theme):
+        from core.theme import palette
+        self._pal = palette(theme)
+        self.title.setStyleSheet("font-size: 24px; font-weight: bold; color: " + self._pal['title'] + "; margin-bottom: 20px;")
+        # Re-render rows so the new palette applies.
         self.refresh_plugins()
 
     def refresh_plugins(self):
@@ -96,7 +106,7 @@ class PluginsPage(Page):
 
     def _section(self, text):
         lbl = QLabel(text)
-        lbl.setStyleSheet("color:#6B7280; font-size:12px; font-weight:700; margin-top:8px;")
+        lbl.setStyleSheet("color:" + self._pal['muted'] + "; font-size:12px; font-weight:700; margin-top:8px;")
         self.plugin_list.addWidget(lbl)
 
     _DESC = {
@@ -112,15 +122,15 @@ class PluginsPage(Page):
 
     def add_plugin_row(self, name):
         row = QFrame()
-        row.setStyleSheet("background-color:#FFFFFF; border:1px solid #E5E7EB; border-radius:10px;")
+        row.setStyleSheet("background-color:" + self._pal['card'] + "; border:1px solid " + self._pal['border'] + "; border-radius:10px;")
         l = QHBoxLayout(row)
         l.setContentsMargins(14, 10, 14, 10)
 
         info = QVBoxLayout()
         lbl = QLabel(name.capitalize())
-        lbl.setStyleSheet("color:#111827; font-size:15px; font-weight:700; border:none;")
+        lbl.setStyleSheet("color:" + self._pal['text'] + "; font-size:15px; font-weight:700; border:none;")
         desc = QLabel(self._DESC.get(name, ""))
-        desc.setStyleSheet("color:#6B7280; font-size:12px; border:none;")
+        desc.setStyleSheet("color:" + self._pal['muted'] + "; font-size:12px; border:none;")
         info.addWidget(lbl); info.addWidget(desc)
         l.addLayout(info)
         l.addStretch()
@@ -288,7 +298,7 @@ class UltraPilotApp(QMainWindow):
     def __init__(self, state):
         super().__init__()
         self.state = state
-        self.setWindowTitle("ETS2 UltraPilot Pro Edition")
+        self.setWindowTitle("UltraPilot")
         self.resize(1000, 640)
         self.setMinimumSize(880, 560)
         from core.theme import stylesheet
@@ -343,9 +353,12 @@ class UltraPilotApp(QMainWindow):
         brand_txt.setSpacing(0)
         word = QLabel("UltraPilot")
         word.setStyleSheet("font-size: 18px; font-weight: 800; color: #065F46; border:none;")
-        ver = QLabel("Pro Edition")
-        ver.setStyleSheet("font-size: 10px; font-weight: 600; color: #9CA3AF; border:none;")
-        brand_txt.addWidget(word); brand_txt.addWidget(ver)
+        brand_txt.addWidget(word)
+        # The update checker widget lives where „Pro Edition“ used to — it shows
+        # the current version and an Update button when a newer release exists.
+        from ui.update_widget import UpdateCheckerWidget
+        self.update_checker = UpdateCheckerWidget(self.state)
+        brand_txt.addWidget(self.update_checker)
         brand_row.addLayout(brand_txt)
         brand_row.addStretch()
         brand_w = QWidget()
@@ -425,6 +438,14 @@ class UltraPilotApp(QMainWindow):
         for i, b in enumerate(getattr(self, "_nav_btns", [])):
             b.setChecked(i == index)
 
+    def showEvent(self, event):
+        """The main window is up — let the HUD process know it can appear now."""
+        try:
+            self.state.set("ui_ready", True)
+        except Exception:
+            pass
+        super().showEvent(event)
+
     def update_ui(self):
         # Live theme switching from the Settings page.
         new_theme = self.state.get("ui_theme", "light") or "light"
@@ -432,6 +453,15 @@ class UltraPilotApp(QMainWindow):
             self._theme = new_theme
             from core.theme import stylesheet
             self.setStyleSheet(stylesheet(new_theme))
+            # Re-style the pages that keep their own colour cache so dark/light
+            # actually applies to their cards and labels (not just the window).
+            for idx in (3, 4):  # PluginsPage, SettingsMenu
+                pg = self.pages.widget(idx)
+                if pg is not None and hasattr(pg, "restyle"):
+                    try:
+                        pg.restyle(new_theme)
+                    except Exception:
+                        pass
         dash = self.pages.widget(0)
         if isinstance(dash, DashboardPage):
             dash.refresh()

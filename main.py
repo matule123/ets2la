@@ -19,12 +19,8 @@ if __name__ == "__main__":
     if base not in sys.path:
         sys.path.insert(0, base)
 
-    # Check GitHub for a newer version (splash + status bar). Never blocks on error.
-    try:
-        from core.update_check import run_with_splash
-        run_with_splash()
-    except Exception:
-        pass
-
+    # NOTE: the old blocking update-splash window used to run here. Updates are
+    # now checked from inside the running app (sidebar update widget), so the
+    # app starts straight away without a pre-launch delay.
     import bootloader
     bootloader.main()

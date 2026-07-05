@@ -1,6 +1,21 @@
 import logging
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QCheckBox, QFrame
 from PyQt6.QtCore import Qt
+from core.theme import palette
+
+
+def _frame_qss(pal):
+    """Card frame style derived from the active palette (theme-aware)."""
+    return ("background-color: " + pal['card'] + "; border: 1px solid " + pal['border'] +
+            "; border-radius: 12px;")
+
+
+def _title_qss(pal):
+    return "font-size: 18px; font-weight: bold; color: " + pal['title'] + ";"
+
+
+def _caption_qss(pal):
+    return "color: " + pal['muted'] + ";"
 
 
 class SettingsMenu(QWidget):
@@ -17,26 +32,33 @@ class SettingsMenu(QWidget):
     def __init__(self, state):
         super().__init__()
         self.state = state
+        self._pal = palette(state.get("ui_theme", "light") or "light")
+        # Track widgets whose styles depend on the theme so we can recolour them
+        # when the user flips dark/light without rebuilding the page.
+        self._themed_frames = []
+        self._themed_titles = []
         self.init_ui()
 
     def init_ui(self):
-        self.setStyleSheet("background-color: #F4F6F8; color: #1A1D21; font-family: 'Segoe UI';")
+        self.setStyleSheet("background-color: " + self._pal['bg'] + "; color: " + self._pal['text'] + "; font-family: 'Segoe UI';")
 
         layout = QVBoxLayout()
         layout.setSpacing(20)
         layout.setContentsMargins(30, 30, 30, 30)
 
         title = QLabel("⚙️ Settings")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #065F46; margin-bottom: 10px;")
+        title.setStyleSheet("font-size: 24px; font-weight: bold; color: " + self._pal['title'] + "; margin-bottom: 10px;")
         layout.addWidget(title)
 
         # --- ACC Section ---
         acc_frame = QFrame()
-        acc_frame.setStyleSheet("background-color: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 12px; padding: 12px;")
+        acc_frame.setStyleSheet(_frame_qss(self._pal))
+        self._themed_frames.append(acc_frame)
         acc_layout = QVBoxLayout(acc_frame)
 
         acc_title = QLabel("Adaptive Cruise Control")
-        acc_title.setStyleSheet("font-size: 18px; font-weight: bold; color: #0F766E;")
+        acc_title.setStyleSheet(_title_qss(self._pal))
+        self._themed_titles.append(acc_title)
         acc_layout.addWidget(acc_title)
 
         # Target Speed Slider
@@ -73,10 +95,12 @@ class SettingsMenu(QWidget):
 
         # --- Steering Section ---
         steer_frame = QFrame()
-        steer_frame.setStyleSheet("background-color: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 12px; padding: 12px;")
+        steer_frame.setStyleSheet(_frame_qss(self._pal))
+        self._themed_frames.append(steer_frame)
         steer_layout = QVBoxLayout(steer_frame)
         steer_title = QLabel("Steering")
-        steer_title.setStyleSheet("font-size: 18px; font-weight: bold; color: #0F766E;")
+        steer_title.setStyleSheet(_title_qss(self._pal))
+        self._themed_titles.append(steer_title)
         steer_layout.addWidget(steer_title)
 
         self.invert_toggle = QCheckBox("Invert steering (flip if the truck turns the wrong way)")
@@ -101,14 +125,18 @@ class SettingsMenu(QWidget):
         from PyQt6.QtWidgets import QComboBox, QPushButton
         from core.i18n import LANGUAGES, coverage
         app_frame = QFrame()
-        app_frame.setStyleSheet("background-color: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 12px; padding: 12px;")
+        app_frame.setStyleSheet(_frame_qss(self._pal))
+        self._themed_frames.append(app_frame)
         app_layout = QVBoxLayout(app_frame)
         app_title = QLabel("Appearance")
-        app_title.setStyleSheet("font-size: 18px; font-weight: bold; color: #0F766E;")
+        app_title.setStyleSheet(_title_qss(self._pal))
+        self._themed_titles.append(app_title)
         app_layout.addWidget(app_title)
 
         theme_row = QHBoxLayout()
-        theme_row.addWidget(QLabel("Theme:"))
+        theme_lbl = QLabel("Theme:")
+        theme_lbl.setStyleSheet(_caption_qss(self._pal))
+        theme_row.addWidget(theme_lbl)
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(["Light", "Dark", "System"])
         cur = (self.state.get("ui_theme", "light") or "light").capitalize()
@@ -119,7 +147,9 @@ class SettingsMenu(QWidget):
         app_layout.addLayout(theme_row)
 
         lang_row = QHBoxLayout()
-        lang_row.addWidget(QLabel("Language:"))
+        lang_lbl = QLabel("Language:")
+        lang_lbl.setStyleSheet(_caption_qss(self._pal))
+        lang_row.addWidget(lang_lbl)
         self.lang_combo = QComboBox()
         from core import i18n
         # Show every available language (bundled + downloaded) with its coverage
@@ -141,27 +171,26 @@ class SettingsMenu(QWidget):
 
         self.dl_lang_btn = QPushButton("Stiahnuť jazyk")
         self.dl_lang_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.dl_lang_btn.setStyleSheet(
-            "QPushButton{background:#F3F4F6;color:#111827;border:1px solid #E5E7EB;"
-            "border-radius:8px;padding:6px 12px;font-size:12px;font-weight:600;}"
-            "QPushButton:hover{border-color:#10B981;color:#10B981;}")
+        self.dl_lang_btn.setStyleSheet(self._btn_qss())
         self.dl_lang_btn.clicked.connect(self.download_language)
         lang_row.addWidget(self.dl_lang_btn)
         lang_row.addStretch()
         app_layout.addLayout(lang_row)
 
         self.cov_label = QLabel("")
-        self.cov_label.setStyleSheet("color: #6B7280; font-size: 12px;")
+        self.cov_label.setStyleSheet("color: " + self._pal['muted'] + "; font-size: 12px;")
         app_layout.addWidget(self.cov_label)
 
         layout.addWidget(app_frame)
 
         # --- AR overlay (calibration) ---
         ar_frame = QFrame()
-        ar_frame.setStyleSheet("background-color: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 12px; padding: 12px;")
+        ar_frame.setStyleSheet(_frame_qss(self._pal))
+        self._themed_frames.append(ar_frame)
         ar_lay = QVBoxLayout(ar_frame)
         ar_title = QLabel("AR overlay (experimental)")
-        ar_title.setStyleSheet("font-size: 18px; font-weight: bold; color: #0F766E;")
+        ar_title.setStyleSheet(_title_qss(self._pal))
+        self._themed_titles.append(ar_title)
         ar_lay.addWidget(ar_title)
         self.ar_toggle = QCheckBox("Draw the route on the road over the game")
         self.ar_toggle.setChecked(bool(self.state.get("ar_enabled", True)))
@@ -171,6 +200,7 @@ class SettingsMenu(QWidget):
         def ar_slider(label, key, lo, hi, default, scale=1.0):
             row = QHBoxLayout()
             cap = QLabel(label)
+            cap.setStyleSheet(_caption_qss(self._pal))
             cur = self.state.get(key, default)
             cur = float(cur) if cur is not None else default
             sl = QSlider(Qt.Orientation.Horizontal)
@@ -184,16 +214,33 @@ class SettingsMenu(QWidget):
         ar_slider("Pitch", "ar_pitch", -20, 30, 8.0)
         layout.addWidget(ar_frame)
 
+        # --- Sound (startup chime) ---
+        sound_frame = QFrame()
+        sound_frame.setStyleSheet(_frame_qss(self._pal))
+        self._themed_frames.append(sound_frame)
+        snd_lay = QVBoxLayout(sound_frame)
+        snd_title = QLabel("Zvuk")
+        snd_title.setStyleSheet(_title_qss(self._pal))
+        self._themed_titles.append(snd_title)
+        snd_lay.addWidget(snd_title)
+        self.sound_toggle = QCheckBox("Prehrať zvuk pri štarte (ak existuje assets/sounds/boot.mp3)")
+        self.sound_toggle.setChecked(bool(self.state.get("startup_sound", True)))
+        self.sound_toggle.toggled.connect(lambda v: self.state.set("startup_sound", bool(v)))
+        snd_lay.addWidget(self.sound_toggle)
+        layout.addWidget(sound_frame)
+
         # --- Performance sub-card (plugin RAM usage) ---
         try:
             from ui.performance import PerformancePage
             perf_frame = QFrame()
-            perf_frame.setStyleSheet("background-color: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 12px; padding: 6px;")
+            perf_frame.setStyleSheet(_frame_qss(self._pal))
+            self._themed_frames.append(perf_frame)
             pf_lay = QVBoxLayout(perf_frame)
-            pf_lay.addWidget(PerformancePage(self.state))
+            self._perf_page = PerformancePage(self.state)
+            pf_lay.addWidget(self._perf_page)
             layout.addWidget(perf_frame)
         except Exception:
-            pass
+            self._perf_page = None
 
         layout.addStretch()
         self.setLayout(layout)
@@ -208,6 +255,29 @@ class SettingsMenu(QWidget):
 
     def update_theme(self, name):
         self.state.set("ui_theme", name.lower())
+
+    def _btn_qss(self):
+        p = self._pal
+        return ("QPushButton{background:" + p['card2'] + ";color:" + p['text'] +
+                ";border:1px solid " + p['border'] +
+                ";border-radius:8px;padding:6px 12px;font-size:12px;font-weight:600;}"
+                "QPushButton:hover{border-color:#10B981;color:#10B981;}")
+
+    def restyle(self, theme):
+        """Re-apply colours when the theme changes (called by UltraPilotApp)."""
+        self._pal = palette(theme)
+        p = self._pal
+        self.setStyleSheet("background-color: " + p['bg'] + "; color: " + p['text'] + "; font-family: 'Segoe UI';")
+        for fr in getattr(self, "_themed_frames", []):
+            fr.setStyleSheet(_frame_qss(p))
+        for ttl in getattr(self, "_themed_titles", []):
+            ttl.setStyleSheet(_title_qss(p))
+        if hasattr(self, "cov_label"):
+            self.cov_label.setStyleSheet("color: " + p['muted'] + "; font-size: 12px;")
+        if hasattr(self, "dl_lang_btn"):
+            self.dl_lang_btn.setStyleSheet(self._btn_qss())
+        if getattr(self, "_perf_page", None) is not None and hasattr(self._perf_page, "restyle"):
+            self._perf_page.restyle(theme)
 
     def update_language(self, idx):
         """Language combo changed — ``idx`` is the row; data holds the code."""

@@ -73,44 +73,83 @@ class DrivingScene(QOpenGLWidget):
         fmt = QSurfaceFormat()
         fmt.setDepthBufferSize(24)
         fmt.setSamples(4)   # 4x MSAA for smooth edges
+        # The scene uses the legacy fixed-function pipeline (glBegin/glEnd, fog,
+        # gluLookAt). On modern drivers a core-profile context removes those, so
+        # request compatibility explicitly — otherwise paintGL can crash.
+        try:
+            fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CompatibilityProfile)
+        except Exception:
+            pass
         QSurfaceFormat.setDefaultFormat(fmt)
         super().__init__(parent)
         self.state = state
         self.has_gl = True
+        self._gl_broken = False   # set if paintGL throws repeatedly
+        self._gl_errors = 0
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update)
         self.timer.start(80)
 
     def initializeGL(self):
-        glClearColor(0.04, 0.05, 0.07, 0.0)   # dark, transparent-clear
-        glEnable(GL_DEPTH_TEST)
-        glEnable(GL_MULTISAMPLE)
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        glShadeModel(GL_SMOOTH)
-        # Distance fog: distant geometry fades into the haze, giving real depth
-        # (a flat-clear horizon makes the road look like it's floating). Linear
-        # fog between 60 m and 320 m — close geometry stays crisp, the far road
-        # melts into the sky. Fog colour matches the sky gradient's horizon.
-        glEnable(GL_FOG)
-        glFogi(GL_FOG_MODE, GL_LINEAR)
-        glFogf(GL_FOG_START, 60.0)
-        glFogf(GL_FOG_END, 320.0)
-        glFogf(GL_FOG_DENSITY, 0.6)
-        fog_col = (0.42, 0.50, 0.58, 1.0)
-        glFogfv(GL_FOG_COLOR, (GLfloat * 4)(*fog_col))
-        glHint(GL_FOG_HINT, GL_DONTCARE)
+        # Wrap every GL call: fixed-function entry points can be missing on some
+        # drivers (Intel/AMD core-only). Failing soft is much better than the
+        # whole UI process crashing when the user opens the Visualization page.
+        try:
+            glClearColor(0.04, 0.05, 0.07, 0.0)   # dark, transparent-clear
+            glEnable(GL_DEPTH_TEST)
+            glEnable(GL_MULTISAMPLE)
+            glEnable(GL_BLEND)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+            try:
+                glShadeModel(GL_SMOOTH)
+            except Exception:
+                pass
+            # Distance fog: distant geometry fades into the haze, giving real depth
+            # (a flat-clear horizon makes the road look like it's floating). Linear
+            # fog between 60 m and 320 m — close geometry stays crisp, the far road
+            # melts into the sky. Fog colour matches the sky gradient's horizon.
+            glEnable(GL_FOG)
+            glFogi(GL_FOG_MODE, GL_LINEAR)
+            glFogf(GL_FOG_START, 60.0)
+            glFogf(GL_FOG_END, 320.0)
+            glFogf(GL_FOG_DENSITY, 0.6)
+            fog_col = (0.42, 0.50, 0.58, 1.0)
+            glFogfv(GL_FOG_COLOR, (GLfloat * 4)(*fog_col))
+            glHint(GL_FOG_HINT, GL_DONTCARE)
+        except Exception as e:
+            logging.warning("driving_scene initializeGL failed: %s", e)
+            self._gl_broken = True
 
     def resizeGL(self, w, h):
-        if h <= 0:
-            h = 1
-        glViewport(0, 0, w, h)
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        gluPerspective(60.0, w / h, 0.5, 500.0)
-        glMatrixMode(GL_MODELVIEW)
+        if self._gl_broken:
+            return
+        try:
+            if h <= 0:
+                h = 1
+            glViewport(0, 0, w, h)
+            glMatrixMode(GL_PROJECTION)
+            glLoadIdentity()
+            gluPerspective(60.0, w / h, 0.5, 500.0)
+            glMatrixMode(GL_MODELVIEW)
+        except Exception as e:
+            logging.warning("driving_scene resizeGL failed: %s", e)
+            self._gl_broken = True
 
     def paintGL(self):
+        # Give up after a few consecutive failures so a broken driver doesn't
+        # spam exceptions every frame and stall the UI.
+        if self._gl_broken:
+            return
+        try:
+            self._paint_inner()
+            self._gl_errors = 0
+        except Exception as e:
+            self._gl_errors += 1
+            logging.warning("driving_scene paintGL failed (%d): %s", self._gl_errors, e)
+            if self._gl_errors >= 3:
+                self._gl_broken = True
+
+    def _paint_inner(self):
         self._frame = getattr(self, "_frame", 0) + 1
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glLoadIdentity()

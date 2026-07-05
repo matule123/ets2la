@@ -9,14 +9,16 @@ Colours match the clean ETS2LA look (white or near-black surfaces, green accent)
 ACCENT = "#10B981"
 
 _LIGHT = {
-    "bg": "#F4F6F8", "surface": "#FFFFFF", "text": "#1A1D21", "muted": "#6B7280",
-    "border": "#E5E7EB", "sidebar": "#FFFFFF", "field": "#FFFFFF",
-    "title": "#065F46",
+    "bg": "#F4F6F8", "surface": "#FFFFFF", "card": "#FFFFFF", "card2": "#F7F9FB",
+    "text": "#1A1D21", "muted": "#6B7280", "border": "#E5E7EB",
+    "sidebar": "#FFFFFF", "field": "#FFFFFF", "title": "#065F46",
+    "accent2": "#34D399", "success": "#16A34A", "warn": "#D97706", "danger": "#DC2626",
 }
 _DARK = {
-    "bg": "#16181D", "surface": "#1E2228", "text": "#E6E8EB", "muted": "#9AA0A6",
-    "border": "#2C313A", "sidebar": "#1A1D22", "field": "#23272E",
-    "title": "#34D399",
+    "bg": "#1E232B", "surface": "#2A313B", "card": "#2C333D", "card2": "#353D48",
+    "text": "#E6E8EB", "muted": "#9AA4B2", "border": "#3D4654",
+    "sidebar": "#232932", "field": "#1A1F26", "title": "#34D399",
+    "accent2": "#34D399", "success": "#22C55E", "warn": "#F59E0B", "danger": "#EF4444",
 }
 
 

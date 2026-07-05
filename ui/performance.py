@@ -1,6 +1,7 @@
 import os
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QProgressBar
 from PyQt6.QtCore import QTimer
+from core.theme import palette
 
 try:
     import psutil
@@ -14,17 +15,19 @@ class PerformancePage(QWidget):
     def __init__(self, state):
         super().__init__()
         self.state = state
+        self._pal = palette(state.get("ui_theme", "light") or "light")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(30, 30, 30, 30)
         lay.setSpacing(12)
 
         title = QLabel("📊 Performance")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #065F46;")
+        title.setStyleSheet("font-size: 24px; font-weight: bold; color: " + self._pal['title'] + ";")
+        self._title = title
         lay.addWidget(title)
 
         # Total system RAM bar.
         self.total_lbl = QLabel("System RAM")
-        self.total_lbl.setStyleSheet("color:#6B7280; font-weight:bold;")
+        self.total_lbl.setStyleSheet("color:" + self._pal['muted'] + "; font-weight:bold;")
         lay.addWidget(self.total_lbl)
         self.total_bar = QProgressBar()
         lay.addWidget(self.total_bar)
@@ -35,7 +38,7 @@ class PerformancePage(QWidget):
 
         # Per-process rows container.
         self.rows_frame = QFrame()
-        self.rows_frame.setStyleSheet("background:#FFFFFF; border:1px solid #E5E7EB; border-radius:12px; padding:10px;")
+        self.rows_frame.setStyleSheet("background:" + self._pal['card'] + "; border:1px solid " + self._pal['border'] + "; border-radius:12px; padding:10px;")
         self.rows = QVBoxLayout(self.rows_frame)
         lay.addWidget(self.rows_frame)
         lay.addStretch()
@@ -46,6 +49,13 @@ class PerformancePage(QWidget):
         self.timer = QTimer()
         self.timer.timeout.connect(self.refresh)
         self.timer.start(1500)
+
+    def restyle(self, theme):
+        self._pal = palette(theme)
+        p = self._pal
+        self._title.setStyleSheet("font-size: 24px; font-weight: bold; color: " + p['title'] + ";")
+        self.total_lbl.setStyleSheet("color:" + p['muted'] + "; font-weight:bold;")
+        self.rows_frame.setStyleSheet("background:" + p['card'] + "; border:1px solid " + p['border'] + "; border-radius:12px; padding:10px;")
 
     def _clear_rows(self):
         while self.rows.count():
@@ -95,12 +105,13 @@ class PerformancePage(QWidget):
         self._clear_rows()
         if not plugins:
             lbl = QLabel("No plugin processes running yet (start the app with the game).")
-            lbl.setStyleSheet("color:#9CA3AF;")
+            lbl.setStyleSheet("color:" + self._pal['muted'] + ";")
             self.rows.addWidget(lbl)
         for label, rss in sorted(plugins, key=lambda r: -r[1]):
             pct = 100 * rss / plug_rss
             row = QHBoxLayout()
             n = QLabel(label); n.setFixedWidth(150)
+            n.setStyleSheet("color:" + self._pal['text'] + ";")
             bar = QProgressBar(); bar.setValue(int(pct))
             bar.setFormat(f"{rss/1e6:.0f} MB  ({pct:.0f}%)")
             row.addWidget(n); row.addWidget(bar)
