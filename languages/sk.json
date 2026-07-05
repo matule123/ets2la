@@ -52,6 +52,7 @@
     "inst_t": "Inštalujem UltraPilot",
     "inst_s": "Počkaj, kým sa súčasti nainštalujú.",
     "status_wait": "Pripravujem…",
+    "log_placeholder": "Inštalácia zatiaľ nezačala — klikni „Nainštalovať“.",
     "fin_t": "Inštalácia dokončená",
     "fin_s": "UltraPilot je pripravený na použitie.",
     "fin_summary": "Nainštalované do:  {path}",

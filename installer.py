@@ -20,20 +20,22 @@ download strategies (git clone / zip archive / raw file-by-file) will fail with
 import os
 import sys
 import json
+import math
 import shutil
 import logging
 import subprocess
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QPropertyAnimation, QEasingCurve, QByteArray, pyqtProperty
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QPropertyAnimation, QEasingCurve, QByteArray, pyqtProperty, QPointF
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QStackedWidget, QProgressBar, QTextEdit, QFileDialog, QComboBox, QCheckBox,
-    QLineEdit, QScrollArea, QFrame, QMessageBox,
+    QLineEdit, QScrollArea, QFrame, QMessageBox, QDialog, QGridLayout,
 )
 from PyQt6.QtGui import QPixmap, QIcon, QColor, QPainter, QFont, QPen
 from PyQt6.QtWidgets import QGraphicsOpacityEffect
 
 APP_NAME = "UltraPilot"
+APP_VERSION = "0.4.0"
 
 # GitHub source — files are ALWAYS fetched from here.
 REPO = "matule123/ets2la"
@@ -74,12 +76,13 @@ ACCENT = "#10B981"          # primary green
 ACCENT_HI = "#34D399"       # lighter green (gradients / hover)
 ACCENT_LO = "#059669"       # darker green (pressed / gradient end)
 SUCCESS = "#22C55E"
+SUCCESS_DARK = "#16A34A"    # darker green for done step badges (white text contrast)
 DANGER = "#EF4444"
 WARN = "#F59E0B"
 
-DARK = {"bg": "#0E1116", "bg2": "#151A21", "card": "#1A2029", "card2": "#222A35",
-        "text": "#E6E8EB", "muted": "#8A93A0", "border": "#272F3A",
-        "title": "#34D399", "field": "#11161D", "glow": "rgba(16,185,129,0.35)"}
+DARK = {"bg": "#1E232B", "bg2": "#252B34", "card": "#2C333D", "card2": "#353D48",
+        "text": "#E6E8EB", "muted": "#9AA4B2", "border": "#3D4654",
+        "title": "#34D399", "field": "#232932", "glow": "rgba(16,185,129,0.35)"}
 LIGHT = {"bg": "#F4F6F9", "bg2": "#FFFFFF", "card": "#FFFFFF", "card2": "#EEF2F6",
          "text": "#0F172A", "muted": "#64748B", "border": "#E2E8F0",
          "title": "#047857", "field": "#FFFFFF", "glow": "rgba(16,185,129,0.20)"}
@@ -314,6 +317,10 @@ class InstallWorker(QThread):
     def __init__(self, install_path, lang):
         super().__init__()
         self.install_path = install_path
+        # Tracked for the install record so the uninstaller knows what it can
+        # safely remove (Python auto-installed by us, SDK target game folders).
+        self.python_installed_by_installer = False
+        self.sdk_targets = []
         # ``lang`` may be a code (sk/en) or a legacy display name. Resolve to
         # a flat translation dict (common + installer namespaces merged).
         self.lang = lang
@@ -433,6 +440,7 @@ class InstallWorker(QThread):
             py = self._real_python()
             if py:
                 self.log.emit(self.t["py_found"].format(py=py[0]))
+                self.python_installed_by_installer = True
                 return True
         self.log.emit(self.t["py_manual"])
         return False
@@ -629,6 +637,12 @@ class InstallWorker(QThread):
                 if folders:
                     for fld in folders:
                         self.log.emit(self.t["s_dll_ok"].format("SCS pluginy", fld))
+                    # Remember the game roots so the uninstaller can offer to
+                    # remove the SDK DLLs later. folders are .../plugins dirs.
+                    for plugins_dir in folders:
+                        game_root = os.path.dirname(os.path.dirname(plugins_dir))
+                        if game_root and game_root not in self.sdk_targets:
+                            self.sdk_targets.append(game_root)
                 else:
                     self.log.emit(self.t["s_dll_none"])
             except Exception as e:
@@ -649,10 +663,17 @@ class InstallWorker(QThread):
             self.status.emit(self.t["s_short"])
             self._make_shortcuts(exe_path, mode)
             try:
-                rec = {"install_path": self.install_path, "exe_path": exe_path, "mode": mode}
+                rec = {
+                    "install_path": self.install_path,
+                    "exe_path": exe_path,
+                    "mode": mode,
+                    "version": APP_VERSION,
+                    "python_installed_by_installer": self.python_installed_by_installer,
+                    "sdk_targets": self.sdk_targets,
+                }
                 os.makedirs(os.path.dirname(RECORD_PATH), exist_ok=True)
                 with open(RECORD_PATH, "w", encoding="utf-8") as f:
-                    json.dump(rec, f)
+                    json.dump(rec, f, indent=2)
             except Exception:
                 pass
 
@@ -696,12 +717,17 @@ class ThemeToggle(QWidget):
 
     def set_dark(self, dark: bool, animate: bool = True):
         dark = bool(dark)
-        if dark == self._dark and self._anim is None:
+        # Guard against no-op toggles (covers both the idle and animating case).
+        if dark == self._dark:
             return
         self._dark = dark
         target = 1.0 if dark else 0.0
         if self._anim is not None:
-            self._anim.stop()
+            try:
+                self._anim.stop()
+            except Exception:
+                pass
+            self._anim = None
         if animate:
             self._anim = QPropertyAnimation(self, b"knob", self)
             self._anim.setDuration(220)
@@ -712,7 +738,13 @@ class ThemeToggle(QWidget):
         else:
             self._knob = target
             self.update()
-        self.toggled.emit(self._dark)
+        # Defer the signal to the next event-loop cycle. Emitting synchronously
+        # here would trigger setStyleSheet on the parent window from inside our
+        # own mouseReleaseEvent, which Qt can take badly (the toggle widget may
+        # be re-laid-out / reparented mid-event → crash). QTimer.singleShot(0)
+        # guarantees we return from this call before the theme switch runs.
+        dark_now = self._dark
+        QTimer.singleShot(0, lambda: self.toggled.emit(dark_now))
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
@@ -720,14 +752,26 @@ class ThemeToggle(QWidget):
         super().mouseReleaseEvent(e)
 
     def paintEvent(self, _e):
+        # Always pair QPainter creation with end() in a finally block — an open
+        # painter left behind by an exception in the middle of paint crashes the
+        # next repaint with „A paint device can only be painted by one painter“.
         p = QPainter(self)
+        try:
+            self._draw(p)
+        except Exception:
+            pass
+        finally:
+            p.end()
+
+    def _draw(self, p: QPainter):
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         w, h = self.width(), self.height()
-        # Track colours blend between sun (light theme) and moon (dark theme).
-        # k=0 → light theme, k=1 → dark theme.
+        # k = 0 → fully light (sun), k = 1 → fully dark (moon).
         k = self._knob
-        sun_bg = QColor("#FBBF24")     # warm amber track when light
-        moon_bg = QColor("#1F2937")    # deep slate track when dark
+
+        # --- Track (the pill background) ------------------------------------
+        sun_bg = QColor("#FBBF24")     # warm amber when light
+        moon_bg = QColor("#334155")    # slate when dark (matches the grey theme)
         bg = QColor(
             int(sun_bg.red()   + (moon_bg.red()   - sun_bg.red())   * k),
             int(sun_bg.green() + (moon_bg.green() - sun_bg.green()) * k),
@@ -737,42 +781,61 @@ class ThemeToggle(QWidget):
         p.setPen(QPen(QColor(255, 255, 255, 40), 1))
         p.drawRoundedRect(1, 1, w - 2, h - 2, h / 2 - 1, h / 2 - 1)
 
-        # Knob travels between the two ends with a little inset margin.
+        # --- Knob (the white circle that slides) ----------------------------
         margin = 4
-        knob_d = h - margin * 2
+        knob_d = max(8, h - margin * 2)
         x = margin + k * (w - margin * 2 - knob_d)
-        knob = QColor("#FFFFFF")
-        p.setBrush(knob)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.drawEllipse(int(x), margin, knob_d, knob_d)
-
-        # Icon inside the knob: a sun (rays) when light, a crescent moon when dark.
         cx = x + knob_d / 2
         cy = h / 2
-        p.setPen(QPen(QColor("#F59E0B").darker(120), 1))
-        # Sun rays (drawn faintly so they fade out as it gets dark).
-        ray_color = QColor("#F59E0B")
-        ray_color.setAlphaF(max(0.0, 1.0 - k))
-        p.setPen(QPen(ray_color, 1.4))
-        import math
-        for ang in range(0, 360, 45):
-            a = math.radians(ang)
+        # Subtle drop shadow under the knob for depth.
+        p.setBrush(QColor(0, 0, 0, 38))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(int(x + 1), int(margin + 1), knob_d, knob_d)
+        p.setBrush(QColor("#FFFFFF"))
+        p.drawEllipse(int(x), margin, knob_d, knob_d)
+
+        # --- Icons (cross-fade inside the knob) -----------------------------
+        # SUN (fades out as k → 1). A small yellow disc + 8 short rays.
+        sun_alpha = max(0.0, 1.0 - k)
+        if sun_alpha > 0.01:
+            yellow = QColor("#F59E0B")
+            yellow.setAlphaF(sun_alpha)
+            p.setBrush(yellow)
+            p.setPen(Qt.PenStyle.NoPen)
+            disc_r = knob_d * 0.22
+            p.drawEllipse(QPointF(cx, cy), disc_r, disc_r)
+            ray = QPen(yellow, max(1.0, knob_d * 0.06), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+            p.setPen(ray)
             r1 = knob_d * 0.30
             r2 = knob_d * 0.42
-            p.drawLine(
-                int(cx + math.cos(a) * r1), int(cy + math.sin(a) * r1),
-                int(cx + math.cos(a) * r2), int(cy + math.sin(a) * r2),
-            )
-        # Crescent moon (fades in as it gets dark).
-        moon_color = QColor("#FBBF24")
-        moon_color.setAlphaF(max(0.0, k))
-        p.setBrush(moon_color)
-        p.setPen(Qt.PenStyle.NoPen)
-        mr = knob_d * 0.34
-        p.drawEllipse(int(cx - mr * 0.15), int(cy), int(mr * 2), int(mr * 2))
-        # Bite a crescent out of the moon using the track colour.
-        p.setBrush(bg)
-        p.drawEllipse(int(cx + mr * 0.55), int(cy - mr * 0.25), int(mr * 1.8), int(mr * 1.8))
+            for ang in range(0, 360, 45):
+                a = math.radians(ang)
+                p.drawLine(
+                    QPointF(cx + math.cos(a) * r1, cy + math.sin(a) * r1),
+                    QPointF(cx + math.cos(a) * r2, cy + math.sin(a) * r2),
+                )
+
+        # MOON (fades in as k → 1). Drawn as a yellow disc, then a disc in the
+        # knob's white colour offset to one side bites out a crescent.
+        moon_alpha = max(0.0, k)
+        if moon_alpha > 0.01:
+            moon = QColor("#FBBF24")
+            moon.setAlphaF(moon_alpha)
+            p.setBrush(moon)
+            p.setPen(Qt.PenStyle.NoPen)
+            mr = knob_d * 0.30
+            p.drawEllipse(QPointF(cx - mr * 0.15, cy), mr, mr)
+            # The bite: same colour as the knob so the crescent reads cleanly.
+            p.setBrush(QColor("#FFFFFF"))
+            p.drawEllipse(QPointF(cx + mr * 0.55, cy - mr * 0.20), mr * 0.95, mr * 0.95)
+
+
+def _esc(text: str) -> str:
+    """HTML-escape a string so log output can't inject markup."""
+    return (str(text)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;"))
 
 
 def _primary_btn(text):
@@ -869,12 +932,15 @@ class InstallerWindow(QWidget):
         for i, name in enumerate(steps):
             badge = QLabel(str(i + 1))
             badge.setObjectName("StepBadge")
-            badge.setFixedSize(24, 24)
+            # Bigger badge (28×28) so single glyphs and digits never clip.
+            badge.setFixedSize(28, 28)
             badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            badge.setMargin(0)
+            badge.setContentsMargins(0, 0, 0, 0)
             lbl = QLabel(name)
             lbl.setObjectName("StepLabel")
             cell = QHBoxLayout()
-            cell.setSpacing(7)
+            cell.setSpacing(8)
             cell.addWidget(badge)
             cell.addWidget(lbl)
             wrap = QWidget()
@@ -1056,7 +1122,16 @@ class InstallerWindow(QWidget):
         lay.addWidget(self.progress)
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
-        lay.addWidget(self.log_view)
+        # Cap the buffer so a long install (lots of pip output) can't grow the
+        # document unbounded and lag the UI; older lines drop off the top.
+        try:
+            self.log_view.document().setMaximumBlockCount(2000)
+        except Exception:
+            pass
+        self.log_view.setPlaceholderText(TR[self.lang].get("log_placeholder",
+            "Inštalácia zatiaľ nezačala — klikni „Nainštalovať“."))
+        self.log_view.setMinimumHeight(180)
+        lay.addWidget(self.log_view, stretch=1)
         self.stack.addWidget(scroll)
 
     def _build_finish(self):
@@ -1138,21 +1213,24 @@ class InstallerWindow(QWidget):
             for i, (badge, lbl, wrap) in enumerate(self._step_labels):
                 active = (i == idx)
                 done = (i < idx)
+                # Always show the number — swapping to „✓“ changed the glyph
+                # metrics and made badges visually jump. Colour encodes state.
                 if active:
                     bg, fg, bd = ACCENT, "#FFFFFF", ACCENT
-                    txt = "✓" if done else str(i + 1)
                 elif done:
-                    bg, fg, bd = c['card2'], SUCCESS, SUCCESS
-                    txt = "✓"
+                    bg, fg, bd = SUCCESS_DARK, "#FFFFFF", SUCCESS_DARK
                 else:
                     bg, fg, bd = c['card2'], c['muted'], c['border']
-                    txt = str(i + 1)
-                badge.setText(txt)
+                badge.setText(str(i + 1))
+                # Explicit font-size + padding + margin + radius keep the glyph
+                # fully inside the 28×28 badge (it used to clip at 24×24).
                 badge.setStyleSheet(
                     "color:" + fg + "; background:" + bg + "; border:1px solid " + bd + ";"
-                    " border-radius:12px; font-weight:700;")
+                    " border-radius:14px; font-size:13px; font-weight:700;"
+                    " padding:0; margin:0;")
                 lbl.setStyleSheet("color:" + (c['title'] if active else c['muted']) +
-                                  "; font-size:13px; font-weight:" + ("700" if active else "600") + ";")
+                                  "; font-size:13px; font-weight:" + ("700" if active else "600") +
+                                  "; padding:0; margin:0;")
         # Path status colour (objectName drives QSS, but re-apply to be safe).
         if hasattr(self, "path_status"):
             ok = self.path_status.objectName() == "DiskOk"
@@ -1292,27 +1370,70 @@ class InstallerWindow(QWidget):
             self.path_edit.setText(d)
 
     def _append_log(self, line):
-        """Colorize log lines by their prefix marker."""
-        prefix, rest = "", line
-        if line.startswith("✓"):
-            prefix, rest = "✓", line[1:]
-            color = SUCCESS
-        elif line.startswith("✗"):
-            prefix, rest = "✗", line[1:]
-            color = DANGER
-        elif line.startswith("⚠"):
-            prefix, rest = "⚠", line[1:]
-            color = WARN
-        elif line.startswith("✔"):
-            prefix, rest = "✔", line[1:]
-            color = SUCCESS
-        else:
-            self.log_view.append(line)
+        """Append one line to the install log with a timestamp and colour coding.
+
+        Categories (by leading marker / shape):
+          ✓ ✔ → green (success)
+          ✗   → red   (error)
+          ⚠   → amber (warning)
+          ─── section ───  → muted, full-width divider
+          ' ' (leading space) → muted (subprocess / sub-output)
+          other → default text
+        Auto-scrolls to the bottom and caps the buffer so very long installs
+        can't slow the UI down."""
+        from datetime import datetime
+        ts = datetime.now().strftime("%H:%M:%S")
+        # Section dividers: lines wrapped in ── … ── render as a centred muted bar.
+        s = line.strip()
+        if s.startswith("──") and s.endswith("──") and len(s) > 6:
+            body = s.strip("─").strip()
+            html = ('<div style="color:{muted}; font-size:11px; font-weight:700;'
+                    ' letter-spacing:1px; text-transform:uppercase; margin:6px 0;'
+                    ' border-bottom:1px solid {border}; padding-bottom:3px;">'
+                    '{body}</div>').format(muted=self._log_muted(), border=self._log_border(), body=_esc(body))
+            self._append_html(html)
             return
-        if prefix:
-            html = ('<span style="color:{}; font-weight:700;">{}</span>'
-                    '<span style="color:inherit;">{}</span>').format(color, prefix, rest)
-            self.log_view.append(html)
+
+        if line.startswith("✓") or line.startswith("✔"):
+            color, sym, rest = SUCCESS, line[0], line[1:]
+        elif line.startswith("✗"):
+            color, sym, rest = DANGER, "✗", line[1:]
+        elif line.startswith("⚠"):
+            color, sym, rest = WARN, "⚠", line[1:]
+        elif line.startswith(" "):
+            # Indented sub-output (pip, git) — render dimmer.
+            color, sym, rest = self._log_muted(), "", line
+        else:
+            color, sym, rest = self._log_text(), "", line
+
+        ts_html = '<span style="color:{ts}; font-size:11px;">[{ts}]</span> '.format(
+            ts=self._log_dim())
+        if sym:
+            mark = '<span style="color:{c}; font-weight:700;">{s}</span>'.format(c=color, s=_esc(sym))
+            body = '<span style="color:{c};">{r}</span>'.format(c=self._log_text(), r=_esc(rest))
+        else:
+            mark = ""
+            body = '<span style="color:{c};">{r}</span>'.format(c=color, r=_esc(rest))
+        self._append_html(ts_html + mark + body)
+
+    def _append_html(self, html):
+        self.log_view.append(html)
+        try:
+            self.log_view.ensureCursorVisible()
+        except Exception:
+            pass
+
+    def _log_text(self):
+        return DARK["text"] if self.theme == "dark" else LIGHT["text"]
+
+    def _log_muted(self):
+        return DARK["muted"] if self.theme == "dark" else LIGHT["muted"]
+
+    def _log_dim(self):
+        return "#5B6573" if self.theme == "dark" else "#9AA4B2"
+
+    def _log_border(self):
+        return DARK["border"] if self.theme == "dark" else LIGHT["border"]
 
     def _start_install(self):
         if self._worker is not None and self._worker.isRunning():
@@ -1389,43 +1510,390 @@ def _read_record():
     return None
 
 
-def _uninstall(rec):
-    try:
-        shutil.rmtree(rec["install_path"], ignore_errors=True)
-    except Exception:
-        pass
+def _do_uninstall_app(rec, log=None):
+    """Remove the app folder, shortcuts and the install record."""
+    install_path = rec.get("install_path", "")
+    if install_path and os.path.isdir(install_path):
+        if log:
+            log("Odstraňujem priečinok " + install_path)
+        shutil.rmtree(install_path, ignore_errors=True)
     for folder in (os.path.join(os.environ.get("USERPROFILE", ""), "Desktop"),
                    os.path.join(os.environ.get("APPDATA", ""),
                                 "Microsoft\\Windows\\Start Menu\\Programs")):
         lnk = os.path.join(folder, "UltraPilot.lnk")
         try:
             if os.path.exists(lnk):
+                if log:
+                    log("Odstraňujem skratku " + lnk)
                 os.remove(lnk)
         except Exception:
             pass
     try:
-        os.remove(RECORD_PATH)
+        if os.path.exists(RECORD_PATH):
+            if log:
+                log("Odstraňujem záznam inštalácie")
+            os.remove(RECORD_PATH)
     except Exception:
         pass
 
 
+def _do_uninstall_sdk(rec, log=None):
+    """Remove the SDK DLLs from each recorded game's plugins folder."""
+    targets = rec.get("sdk_targets") or []
+    if not targets:
+        if log:
+            log("Žiadne cieľové hry v zázname — SDK nemožno nájsť.")
+        return
+    for game_root in targets:
+        plugins_dir = os.path.join(game_root, "bin", "win_x64", "plugins")
+        for name in ("scs-telemetry.dll", "scs_sdk_controller.dll", "ets2la_plugin.dll"):
+            p = os.path.join(plugins_dir, name)
+            try:
+                if os.path.exists(p):
+                    if log:
+                        log("Odstraňujem " + name + " z " + plugins_dir)
+                    os.remove(p)
+            except Exception as e:
+                if log:
+                    log("⚠ " + name + ": " + str(e))
+
+
+def _do_uninstall_python(rec, log=None):
+    """Silently uninstall the Python the installer downloaded, if any.
+
+    Only fires when ``python_installed_by_installer`` is true in the record — we
+    never touch a Python the user installed themselves."""
+    if not rec.get("python_installed_by_installer"):
+        if log:
+            log("Python nebol nainštalovaný inštalátorom — preskakujem.")
+        return
+    tmp = os.path.join(os.environ.get("TEMP", os.path.expanduser("~")),
+                       "UltraPilot_python_uninstaller.exe")
+    try:
+        import requests
+        if log:
+            log("Sťahujem odinštalátor Pythonu…")
+        r = requests.get(PY_INSTALLER_URL, timeout=120, stream=True)
+        if r.status_code != 200:
+            if log:
+                log("⚠ Nepodarilo sa stiahnuť odinštalátor (HTTP " + str(r.status_code) + ").")
+            return
+        with open(tmp, "wb") as f:
+            for chunk in r.iter_content(65536):
+                if chunk:
+                    f.write(chunk)
+        if log:
+            log("Odinštalovávam Python (ticho)…")
+        subprocess.run([tmp, "/uninstall", "/quiet"], timeout=600)
+    except Exception as e:
+        if log:
+            log("⚠ Odinštalovanie Pythonu zlyhalo: " + str(e))
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+
+
+class _MaintenanceDialog(QDialog):
+    """Custom repair / uninstall / cancel picker (replaces the old QMessageBox).
+
+    Drawn with the installer's own dark palette so the text is always legible —
+    the previous QMessageBox picked up light system colours and became invisible
+    against the dark QSS."""
+
+    def __init__(self, rec, parent=None):
+        super().__init__(parent)
+        self.rec = rec
+        self.action = "cancel"
+        self.setWindowTitle(APP_NAME)
+        self.setFixedSize(460, 280)
+        self.setStyleSheet(_qss("dark"))
+        if os.path.exists(ICON_PATH):
+            self.setWindowIcon(QIcon(ICON_PATH))
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(28, 24, 28, 20)
+        lay.setSpacing(10)
+        title = QLabel("UltraPilot — údržba")
+        title.setStyleSheet("font-size:22px; font-weight:800; color:#34D399;")
+        lay.addWidget(title)
+        sub = QLabel("UltraPilot je už nainštalovaný.\nČo chceš spraviť?")
+        sub.setStyleSheet("font-size:14px; color:#9AA4B2;")
+        sub.setWordWrap(True)
+        lay.addWidget(sub)
+        lay.addStretch()
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        for label, role, primary in (
+            ("Opraviť", "repair", True),
+            ("Odinštalovať", "uninstall", False),
+            ("Zrušiť", "cancel", False),
+        ):
+            btn = _primary_btn(label) if primary else _ghost_btn(label)
+            btn.clicked.connect(lambda _, r=role: self._choose(r))
+            row.addWidget(btn)
+        lay.addLayout(row)
+
+    def _choose(self, role):
+        self.action = role
+        self.accept()
+
+
+class _UninstallDialog(QDialog):
+    """Pick what to remove, then run the uninstall with a live log + progress."""
+
+    def __init__(self, rec, parent=None):
+        super().__init__(parent)
+        self.rec = rec
+        self.setWindowTitle(APP_NAME + " — Odinštalovanie")
+        self.setStyleSheet(_qss("dark"))
+        self.resize(560, 480)
+        if os.path.exists(ICON_PATH):
+            self.setWindowIcon(QIcon(ICON_PATH))
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 20, 24, 20)
+        lay.setSpacing(10)
+        title = QLabel("Odinštalovanie UltraPilot")
+        title.setStyleSheet("font-size:20px; font-weight:800; color:#34D399;")
+        lay.addWidget(title)
+        sub = QLabel("Vyber, čo chceš odinštalovať:")
+        sub.setStyleSheet("font-size:13px; color:#9AA4B2;")
+        lay.addWidget(sub)
+
+        self.chk_app = QCheckBox("Aplikácia UltraPilot (priečinok, skratky, záznam)")
+        self.chk_app.setChecked(True)
+        lay.addWidget(self.chk_app)
+
+        self.chk_sdk = QCheckBox("SDK pluginy (DLL z hry)")
+        self.chk_sdk.setChecked(bool(rec.get("sdk_targets")))
+        self.chk_sdk.setEnabled(bool(rec.get("sdk_targets")))
+        lay.addWidget(self.chk_sdk)
+
+        self.chk_python = QCheckBox("Python (nainštalovaný inštalátorom)")
+        self.chk_python.setChecked(bool(rec.get("python_installed_by_installer")))
+        self.chk_python.setEnabled(bool(rec.get("python_installed_by_installer")))
+        lay.addWidget(self.chk_python)
+
+        lay.addSpacing(6)
+        self.progress = QProgressBar()
+        self.progress.setValue(0)
+        lay.addWidget(self.progress)
+        self.log_view = QTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.document().setMaximumBlockCount(2000)
+        self.log_view.setMinimumHeight(140)
+        lay.addWidget(self.log_view, stretch=1)
+
+        row = QHBoxLayout()
+        row.addStretch()
+        self.run_btn = _primary_btn("Odinštalovať")
+        self.run_btn.clicked.connect(self._run)
+        self.close_btn = _ghost_btn("Zavrieť")
+        self.close_btn.clicked.connect(self.accept)
+        row.addWidget(self.run_btn)
+        row.addWidget(self.close_btn)
+        lay.addLayout(row)
+        self._worker = None
+
+    def _log(self, msg):
+        from datetime import datetime
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.log_view.append(
+            '<span style="color:#5B6573; font-size:11px;">[' + ts + ']</span> '
+            '<span style="color:#E6E8EB;">' + _esc(msg) + '</span>')
+        try:
+            self.log_view.ensureCursorVisible()
+        except Exception:
+            pass
+
+    def _run(self):
+        if self._worker is not None and self._worker.isRunning():
+            return
+        self.run_btn.setEnabled(False)
+        self.run_btn.setText("Odinštalujem…")
+        self._worker = _UninstallWorker(
+            self.rec,
+            remove_app=self.chk_app.isChecked(),
+            remove_sdk=self.chk_sdk.isChecked(),
+            remove_python=self.chk_python.isChecked(),
+        )
+        self._worker.log.connect(self._log)
+        self._worker.progress.connect(self.progress.setValue)
+        self._worker.done.connect(self._on_done)
+        self._worker.start()
+
+    def _on_done(self):
+        self.run_btn.setText("Hotovo")
+        self._log("✔ Odinštalovanie dokončené.")
+
+
+class _UninstallWorker(QThread):
+    log = pyqtSignal(str)
+    progress = pyqtSignal(int)
+    done = pyqtSignal()
+
+    def __init__(self, rec, remove_app, remove_sdk, remove_python):
+        super().__init__()
+        self.rec = rec
+        self.remove_app = remove_app
+        self.remove_sdk = remove_sdk
+        self.remove_python = remove_python
+
+    def run(self):
+        steps = sum([self.remove_app, self.remove_sdk, self.remove_python])
+        pct = 0
+        try:
+            if self.remove_app:
+                self.log.emit("─── Aplikácia ───")
+                _do_uninstall_app(self.rec, log=self.log.emit)
+                pct += int(100 / max(1, steps))
+                self.progress.emit(pct)
+            if self.remove_sdk:
+                self.log.emit("─── SDK pluginy ───")
+                _do_uninstall_sdk(self.rec, log=self.log.emit)
+                pct += int(100 / max(1, steps))
+                self.progress.emit(pct)
+            if self.remove_python:
+                self.log.emit("─── Python ───")
+                _do_uninstall_python(self.rec, log=self.log.emit)
+                pct += 100 - pct
+                self.progress.emit(pct)
+            self.progress.emit(100)
+        except Exception as e:
+            self.log.emit("✗ Chyba: " + str(e))
+        self.done.emit()
+
+
+class _RepairDialog(QDialog):
+    """Re-pull changed/missing files from GitHub, re-apply SDK + deps.
+
+    Compares the recorded install against the live repository: anything missing
+    or obviously stale is overwritten from the latest ``main`` branch, then the
+    SDK DLLs are re-copied into the game and pip dependencies reinstalled."""
+
+    def __init__(self, rec, parent=None):
+        super().__init__(parent)
+        self.rec = rec
+        self.setWindowTitle(APP_NAME + " — Oprava")
+        self.setStyleSheet(_qss("dark"))
+        self.resize(560, 480)
+        if os.path.exists(ICON_PATH):
+            self.setWindowIcon(QIcon(ICON_PATH))
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 20, 24, 20)
+        lay.setSpacing(10)
+        title = QLabel("Oprava UltraPilot")
+        title.setStyleSheet("font-size:20px; font-weight:800; color:#34D399;")
+        lay.addWidget(title)
+        sub = QLabel("Skontrolujem súbory oproti GitHubu, doplním chýbajúce\na znova nainštalujem SDK a Python knižnice.")
+        sub.setStyleSheet("font-size:13px; color:#9AA4B2;")
+        sub.setWordWrap(True)
+        lay.addWidget(sub)
+        lay.addSpacing(6)
+        self.progress = QProgressBar()
+        self.progress.setValue(0)
+        lay.addWidget(self.progress)
+        self.log_view = QTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.document().setMaximumBlockCount(2000)
+        self.log_view.setMinimumHeight(160)
+        lay.addWidget(self.log_view, stretch=1)
+        row = QHBoxLayout()
+        row.addStretch()
+        self.run_btn = _primary_btn("Spustiť opravu")
+        self.run_btn.clicked.connect(self._run)
+        self.close_btn = _ghost_btn("Zavrieť")
+        self.close_btn.clicked.connect(self.accept)
+        row.addWidget(self.run_btn)
+        row.addWidget(self.close_btn)
+        lay.addLayout(row)
+        self._worker = None
+
+    def _log(self, msg):
+        from datetime import datetime
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.log_view.append(
+            '<span style="color:#5B6573; font-size:11px;">[' + ts + ']</span> '
+            '<span style="color:#E6E8EB;">' + _esc(msg) + '</span>')
+        try:
+            self.log_view.ensureCursorVisible()
+        except Exception:
+            pass
+
+    def _run(self):
+        if self._worker is not None and self._worker.isRunning():
+            return
+        self.run_btn.setEnabled(False)
+        self.run_btn.setText("Opravujem…")
+        self._worker = _RepairWorker(self.rec)
+        self._worker.log.connect(self._log)
+        self._worker.progress.connect(self.progress.setValue)
+        self._worker.done.connect(lambda: self._on_done())
+        self._worker.start()
+
+    def _on_done(self):
+        self.run_btn.setText("Hotovo")
+        self._log("✔ Oprava dokončená.")
+
+
+class _RepairWorker(QThread):
+    log = pyqtSignal(str)
+    progress = pyqtSignal(int)
+    done = pyqtSignal()
+
+    def __init__(self, rec):
+        super().__init__()
+        self.rec = rec
+
+    def run(self):
+        install_path = self.rec.get("install_path", "")
+        try:
+            # 1) Re-fetch sources from GitHub into the install folder (overwrite).
+            self.log.emit("─── Kontrola súborov ───")
+            self.log.emit("Sťahujem aktuálne súbory z GitHubu…")
+            self.progress.emit(15)
+            worker = InstallWorker(install_path, "sk")
+            worker.log = self.log
+            worker.status = type("S", (), {"emit": staticmethod(lambda *a: None)})()
+            worker.progress = type("S", (), {"emit": staticmethod(lambda *a: None)})()
+            ok_repo = worker._fetch_repo()
+            if ok_repo:
+                self.log.emit("✓ Súbory synchronizované.")
+            else:
+                self.log.emit("⚠ Nepodarilo sa stiahnuť súbory — skontroluj pripojenie.")
+
+            # 2) Re-install Python deps.
+            self.progress.emit(45)
+            self.log.emit("─── Python knižnice ───")
+            worker._pip_install()
+            self.log.emit("✓ Knižnice nastavené.")
+
+            # 3) Re-apply SDK DLLs into the game.
+            self.progress.emit(75)
+            self.log.emit("─── SDK pluginy ───")
+            try:
+                from core.sdk.game_utils import install_game_dlls
+                folders = install_game_dlls(os.path.join(install_path, "assets"))
+                if folders:
+                    for fld in folders:
+                        self.log.emit("✓ SDK → " + fld)
+                else:
+                    self.log.emit("Hra zatiaľ nenájdená — DLL sa nainštalujú pri prvom spustení.")
+            except Exception as e:
+                self.log.emit("⚠ SDK: " + str(e))
+
+            self.progress.emit(100)
+        except Exception as e:
+            self.log.emit("✗ Chyba: " + str(e))
+        self.done.emit()
+
+
 def _maintenance_dialog(rec):
-    box = QMessageBox()
-    box.setWindowTitle("UltraPilot")
-    if os.path.exists(ICON_PATH):
-        box.setWindowIcon(QIcon(ICON_PATH))
-    box.setStyleSheet(_qss("dark"))
-    box.setText("UltraPilot je už nainštalovaný.\nČo chceš spraviť?")
-    box.addButton("Opraviť", QMessageBox.ButtonRole.AcceptRole)
-    uninstall = box.addButton("Odinštalovať", QMessageBox.ButtonRole.DestructiveRole)
-    box.addButton("Zrušiť", QMessageBox.ButtonRole.RejectRole)
-    box.exec()
-    clicked = box.clickedButton()
-    if clicked == uninstall:
-        return "uninstall"
-    if box.buttonRole(clicked) == QMessageBox.ButtonRole.AcceptRole:
-        return "repair"
-    return "cancel"
+    """Show the maintenance picker; returns one of 'repair', 'uninstall', 'cancel'."""
+    dlg = _MaintenanceDialog(rec)
+    dlg.exec()
+    return dlg.action
 
 
 def main():
@@ -1434,8 +1902,12 @@ def main():
     if rec is not None:
         action = _maintenance_dialog(rec)
         if action == "uninstall":
-            _uninstall(rec)
-            QMessageBox.information(None, APP_NAME, "UltraPilot bol odinštalovaný.")
+            ud = _UninstallDialog(rec)
+            ud.exec()
+            return
+        elif action == "repair":
+            rd = _RepairDialog(rec)
+            rd.exec()
             return
         elif action == "cancel":
             return

@@ -52,6 +52,7 @@
     "inst_t": "Installing UltraPilot",
     "inst_s": "Wait for the components to install.",
     "status_wait": "Preparing…",
+    "log_placeholder": "Installation hasn't started yet — click „Install“.",
     "fin_t": "Installation complete",
     "fin_s": "UltraPilot is ready to use.",
     "fin_summary": "Installed to:  {path}",
