@@ -31,7 +31,12 @@
       ["🎯", "Adaptive cruise", "Holds speed and brakes for slower traffic."],
       ["🚦", "Traffic & obstacles", "Reacts to stops and obstacles ahead."],
       ["🗺️", "Map navigation", "Drive the ETS2 world by coordinates."],
-      ["🖥️", "HUD & voice", "Transparent overlay and voice announcements."]
+      ["🛣️", "ProMods 2.82 map", "ProMods support for ETS2 1.59 (and more)."],
+      ["🔄", "Auto turn signals", "Turn signals and blind-spot checks."],
+      ["🖥️", "In-game HUD", "Transparent overlay with the route and key stats."],
+      ["🔊", "Voice announcements", "Spoken speed, fuel and event updates."],
+      ["🌱", "Eco driving", "Throttle smoothing for lower fuel use."],
+      ["⚡", "Auto updates", "New versions pulled straight from GitHub."]
     ],
     "req_t": "Requirements",
     "req_items": ["Windows 10/11", "Euro Truck Simulator 2 or ATS", "About 500 MB of free space", "Internet connection (download from GitHub)"],

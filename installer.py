@@ -21,15 +21,16 @@ import os
 import sys
 import json
 import shutil
+import logging
 import subprocess
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QPropertyAnimation, QEasingCurve, QByteArray
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QPropertyAnimation, QEasingCurve, QByteArray, pyqtProperty
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QStackedWidget, QProgressBar, QTextEdit, QFileDialog, QComboBox, QCheckBox,
     QLineEdit, QScrollArea, QFrame, QMessageBox,
 )
-from PyQt6.QtGui import QPixmap, QIcon, QColor
+from PyQt6.QtGui import QPixmap, QIcon, QColor, QPainter, QFont, QPen
 from PyQt6.QtWidgets import QGraphicsOpacityEffect
 
 APP_NAME = "UltraPilot"
@@ -156,87 +157,135 @@ def _qss(theme):
     )
 
 
-TR = {
-    "Slovensky": {
-        "win": "UltraPilot — Inštalácia",
-        "brand": "UltraPilot", "brand_sub": "Autopilot pre Euro Truck Simulator 2",
-        "welcome_t": "Vitaj v UltraPilot",
-        "welcome_d": "Pokročilý autopilot pre ETS2: udržiavanie pruhu, adaptívny tempomat, vyhýbanie sa prekážkam, navigácia podľa mapy, HUD a hlasové oznámenia. Sprievodca ťa prevedie inštaláciou krok za krokom.",
-        "lang": "Jazyk",
-        "feat_t": "Čo UltraPilot vie",
-        "feats": (
-            ("🛣️", "Udržiavanie pruhu", "Sleduje vozovku a drží kamión v pruhu."),
-            ("🎯", "Adaptívny tempomat", "Udržiava rýchlosť a brzdí pred pomalšími."),
-            ("🚦", "Semafor a prekážky", "Reaguje na zastavenia a prekážky v ceste."),
-            ("🗺️", "Navigácia podľa mapy", "Jazdi po svete ETS2 podľa súradníc."),
-            ("🖥️", "HUD a hlas", "Priehľadný prekryv a hlasové oznámenia."),
-        ),
-        "req_t": "Požiadavky",
-        "req_items": ("Windows 10/11", "Euro Truck Simulator 2 alebo ATS", "Asi 500 MB voľného miesta",
-                      "Internetové pripojenie (sťahovanie z GitHubu)"),
-        "lic_t": "Licenčné podmienky", "lic_s": "Odsúhlas podmienky pre pokračovanie.",
-        "lic_accept": "Čítal(a) som a súhlasím s podmienkami",
-        "path_t": "Cesta inštalácie", "path_s": "Vyber, kam sa má UltraPilot nainštalovať.",
-        "path_lbl": "Priečinok inštalácie:", "browse": "Prehľadávať…",
-        "disk_free": "{} voľných",
-        "disk_low": "Málo miesta ({} voľných) — odporúčame aspoň 500 MB",
-        "disk_warn": "⚠ Priečinok nie je prázdny — súbory sa prepíšu.",
-        "inst_t": "Inštalujem UltraPilot", "inst_s": "Počkaj, kým sa súčasti nainštalujú.",
-        "status_wait": "Pripravujem…",
-        "fin_t": "Inštalácia dokončená", "fin_s": "UltraPilot je pripravený na použitie.",
-        "fin_summary": "Nainštalované do:  {path}",
-        "fin_launch": "Spustiť UltraPilot teraz",
-        "install_btn": "Nainštalovať",
-        "steps": ("Úvod", "Licencia", "Cesta", "Inštalácia", "Dokončenie"),
-        "next": "Ďalej", "back": "Späť", "finish": "Dokončiť",
-        # Python
-        "py_check": "Hľadám Python…",
-        "py_found": "✓ Python nájdený: {py}",
-        "py_old": "✗ Python je príliš starý ({ver}) — potrebujem aspoň 3.10.",
-        "py_no_pip": "✗ Nájdený Python nemá pip — skúšam doinštalovať.",
-        "py_missing": "✗ Python sa nenašiel na PATH.",
-        "py_download": "⬇ Sťahujem Python {ver} z python.org…",
-        "py_install": "⚙ Inštalujem Python (môže trvať minútu)…",
-        "py_done": "✓ Python nainštalovaný.",
-        "py_fail": "✗ Inštalácia Pythonu zlyhala: {err}",
-        "py_manual": "✗ Nepodarilo sa získať Python — nainštaluj ho manuálne z https://python.org (začiarkni „Add Python to PATH“).",
-        # Sources
-        "src_try_git": "Sťahujem z GitHub (git clone)…",
-        "src_try_zip": "git nedostupný — sťahujem ako zip…",
-        "src_try_raw": "zip zlyhal — sťahujem súbor po súbore…",
-        "src_git_ok": "  ✓ Stiahnuté cez git.",
-        "src_zip_ok": "  ✓ Stiahnuté a rozbalené.",
-        "src_raw_ok": "  ✓ Stiahnutých {n} súborov.",
-        "src_fail": "✗ Nepodarilo sa získať súbory z GitHubu (repo je private? skús GITHUB_TOKEN).",
-        "src_err": "  chyba: {err}",
-        # Stages
-        "s_prep": "Pripravujem inštaláciu…",
-        "s_deps": "Inštalujem Python závislosti (môže trvať pár minút)…",
-        "s_dll": "Inštalujem SCS pluginy do hry…",
-        "s_dll_ok": "  ✓ {} → {}",
-        "s_dll_none": "Hra zatiaľ nenájdená — DLL sa nainštalujú pri prvom spustení.",
-        "s_vigem": "Nastavujem ViGEmBus ovládač…",
-        "s_short": "Vytváram skratky…",
-        "s_done": "Hotovo! UltraPilot je nainštalovaný.", "s_err": "Chyba: {}",
-        "lic_text": (
-            "ULTRAPILOT — LICENČNÉ PODMIENKY\n\n"
-            "1. ÚČEL. UltraPilot je nástroj asistencie vodiča určený výhradne na "
-            "vzdelávacie a zábavné účely v rámci videohry Euro Truck Simulator 2. "
-            "Nie je určený pre žiadne reálne vozidlá.\n\n"
-            "2. ZODPOVEDNÉ POUŽÍVANIE. Úplnú zodpovednosť za dohľad nad softvérom "
-            "nesieš ty. Softvér sa môže správať nepredvídateľne.\n\n"
-            "3. BEZ ZÁRUKY. Softvér je poskytovaný „taký aký je\", bez akejkoľvek záruky.\n\n"
-            "4. OBMEDZENIE ZODPOVEDNOSTI. Autori nenesú zodpovednosť za žiadne škody.\n\n"
-            "5. KOMPONENTY TRETÍCH STRÁN. Inštalátor môže nainštalovať ovládače "
-            "(ViGEmBus) a herné SDK pluginy podliehajúce ich vlastným licenciám.\n\n"
-            "Inštaláciou UltraPilotu vyjadruješ, že si si tieto podmienky prečítal a súhlasíš."
-        ),
-    },
+# ----------------------------------------------------------------- i18n (JSON)
+# Installer translation tables live as JSON files in ``languages/`` (shipped
+# inside the bundle via ``--add-data``).  We read them with ``_res`` so it works
+# under PyInstaller (_MEIPASS), next to the exe, and from source.  The installer
+# only ships ``sk`` and ``en`` — extra languages can be downloaded later from
+# the in-app onboarding.  Each JSON file has namespaces (``common``, ``installer``);
+# we flatten them into one dict so the existing ``self.t["key"]`` code keeps working.
+_LANG_CACHE = {}
+_FEATS_FALLBACK = {
+    "sk": (
+        ("🛣️", "Udržiavanie pruhu", "Sleduje vozovku a drží kamión v pruhu."),
+        ("🎯", "Adaptívny tempomat", "Udržiava rýchlosť a brzdí pred pomalšími."),
+        ("🚦", "Semafor a prekážky", "Reaguje na zastavenia a prekážky v ceste."),
+        ("🗺️", "Navigácia podľa mapy", "Jazdi po svete ETS2 podľa súradníc."),
+        ("🖥️", "HUD a hlas", "Priehľadný prekryv a hlasové oznámenia."),
+    ),
+    "en": (
+        ("🛣️", "Lane keeping", "Watches the road and keeps the truck in lane."),
+        ("🎯", "Adaptive cruise", "Holds speed and brakes for slower traffic."),
+        ("🚦", "Traffic & obstacles", "Reacts to stops and obstacles ahead."),
+        ("🗺️", "Map navigation", "Drive the ETS2 world by coordinates."),
+        ("🖥️", "HUD & voice", "Transparent overlay and voice announcements."),
+    ),
 }
 
 
+def _lang_dir():
+    """Where the bundled languages/ folder lives."""
+    for r in (_res("languages"), os.path.join(os.path.dirname(os.path.abspath(__file__)), "languages")):
+        if r and os.path.isdir(r):
+            return r
+    return _res("languages")
+
+
+def _available_langs():
+    """List of language codes available in the bundled languages/ folder."""
+    d = _lang_dir()
+    out = []
+    try:
+        for f in sorted(os.listdir(d)):
+            if f.endswith(".json") and f != "index.json":
+                out.append(f[:-5].lower())
+    except Exception:
+        pass
+    if "sk" not in out:
+        out.insert(0, "sk")
+    if "en" not in out:
+        out.append("en")
+    return out
+
+
+def _lang_name(code):
+    """Display name for a language code (from _meta.name, with fallbacks)."""
+    tbl = _load_lang(code)
+    meta = tbl.get("_meta") if isinstance(tbl, dict) else {}
+    if isinstance(meta, dict) and meta.get("name"):
+        return meta["name"]
+    return {"sk": "Slovenčina", "en": "English",
+            "cs": "Čeština", "de": "Deutsch", "pl": "Polski",
+            "fr": "Français", "es": "Español"}.get(code, code)
+
+
+def _load_lang(code):
+    """Load one language file, flattened (common + installer merged). Cached."""
+    code = (code or "sk").lower()
+    if code in _LANG_CACHE:
+        return _LANG_CACHE[code]
+    path = _res("languages", code + ".json")
+    if not os.path.exists(path):
+        # Fall back to Slovak, then English.
+        for c in ("sk", "en"):
+            p = _res("languages", c + ".json")
+            if os.path.exists(p):
+                path = p
+                code = c
+                break
+    try:
+        import json as _json
+        with open(path, encoding="utf-8") as f:
+            data = _json.load(f)
+        # Flatten: merge common.* + installer.* into one dict.
+        flat = {}
+        flat.update(data.get("common", {}))
+        flat.update(data.get("installer", {}))
+        flat["_meta"] = data.get("_meta", {})
+        _LANG_CACHE[code] = flat
+        return flat
+    except Exception:
+        return {}
+
+
+def _lang_coverage(code):
+    """Percent of English keys present in ``code`` (flattened view)."""
+    en = _load_lang("en")
+    if not en:
+        return 100
+    tbl = _load_lang(code)
+    ref = {k for k in en if not k.startswith("_") and not isinstance(en[k], (list, tuple))}
+    have = {k for k in ref if k in tbl}
+    return round(100 * len(have) / len(ref)) if ref else 100
+
+
+# Backward-compatible names used elsewhere in this file.
+# TR maps BOTH display names (legacy) and language codes to the flat dict.
+TR = {}
+TR["sk"] = TR["Slovenčina"] = _load_lang("sk")
+TR["en"] = TR["English"] = _load_lang("en")
+
+
+def _ensure_lang_loaded(code):
+    """Make sure ``code`` is loaded into TR under both its code and display name."""
+    code = (code or "").lower()
+    if code and code not in TR:
+        flat = _load_lang(code)
+        if flat:
+            TR[code] = flat
+            name = (flat.get("_meta") or {}).get("name")
+            if name:
+                TR[name] = flat
+    return TR.get(code)
+
+
 def tr_get(lang, key):
-    return TR.get(lang, {}).get(key, TR["Slovensky"].get(key, key))
+    """Translate ``key`` for ``lang`` (a display name OR a code)."""
+    if lang in TR:
+        return TR[lang].get(key, TR["Slovensky"].get(key, key))
+    # Treat as a code.
+    tbl = _load_lang(lang) or _load_lang("sk")
+    return tbl.get(key, _load_lang("sk").get(key, key))
 
 
 # Paths/entries that must never be copied from the GitHub tree.
@@ -265,8 +314,13 @@ class InstallWorker(QThread):
     def __init__(self, install_path, lang):
         super().__init__()
         self.install_path = install_path
+        # ``lang`` may be a code (sk/en) or a legacy display name. Resolve to
+        # a flat translation dict (common + installer namespaces merged).
         self.lang = lang
-        self.t = TR.get(lang, TR["Slovensky"])
+        if lang in TR:                  # legacy display name path
+            self.t = TR[lang]
+        else:
+            self.t = _load_lang(lang) or _load_lang("sk")
 
     # ---------------------------------------------------------------- Python
     def _real_python(self):
@@ -611,6 +665,116 @@ class InstallWorker(QThread):
             self.finished_ok.emit(False, "")
 
 
+class ThemeToggle(QWidget):
+    """Animated pill-shaped dark/light switch with a sun (light) / moon (dark).
+
+    Clicking it slides the knob from one side to the other with a 220 ms eased
+    animation and emits ``toggled(bool dark)``. Paint is fully custom so it
+    looks identical in every palette and stays legible in both themes."""
+
+    toggled = pyqtSignal(bool)
+
+    def __init__(self, dark: bool = False, parent=None):
+        super().__init__(parent)
+        self._dark = bool(dark)
+        self._knob = 1.0 if self._dark else 0.0   # 0 = sun (light), 1 = moon (dark)
+        self.setFixedSize(58, 30)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._anim = None
+
+    def is_dark(self) -> bool:
+        return self._dark
+
+    @pyqtProperty(float)
+    def knob(self) -> float:
+        return self._knob
+
+    @knob.setter
+    def knob(self, v: float):
+        self._knob = float(v)
+        self.update()
+
+    def set_dark(self, dark: bool, animate: bool = True):
+        dark = bool(dark)
+        if dark == self._dark and self._anim is None:
+            return
+        self._dark = dark
+        target = 1.0 if dark else 0.0
+        if self._anim is not None:
+            self._anim.stop()
+        if animate:
+            self._anim = QPropertyAnimation(self, b"knob", self)
+            self._anim.setDuration(220)
+            self._anim.setStartValue(self._knob)
+            self._anim.setEndValue(target)
+            self._anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+            self._anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+        else:
+            self._knob = target
+            self.update()
+        self.toggled.emit(self._dark)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.set_dark(not self._dark)
+        super().mouseReleaseEvent(e)
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        w, h = self.width(), self.height()
+        # Track colours blend between sun (light theme) and moon (dark theme).
+        # k=0 → light theme, k=1 → dark theme.
+        k = self._knob
+        sun_bg = QColor("#FBBF24")     # warm amber track when light
+        moon_bg = QColor("#1F2937")    # deep slate track when dark
+        bg = QColor(
+            int(sun_bg.red()   + (moon_bg.red()   - sun_bg.red())   * k),
+            int(sun_bg.green() + (moon_bg.green() - sun_bg.green()) * k),
+            int(sun_bg.blue()  + (moon_bg.blue()  - sun_bg.blue())  * k),
+        )
+        p.setBrush(bg)
+        p.setPen(QPen(QColor(255, 255, 255, 40), 1))
+        p.drawRoundedRect(1, 1, w - 2, h - 2, h / 2 - 1, h / 2 - 1)
+
+        # Knob travels between the two ends with a little inset margin.
+        margin = 4
+        knob_d = h - margin * 2
+        x = margin + k * (w - margin * 2 - knob_d)
+        knob = QColor("#FFFFFF")
+        p.setBrush(knob)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(int(x), margin, knob_d, knob_d)
+
+        # Icon inside the knob: a sun (rays) when light, a crescent moon when dark.
+        cx = x + knob_d / 2
+        cy = h / 2
+        p.setPen(QPen(QColor("#F59E0B").darker(120), 1))
+        # Sun rays (drawn faintly so they fade out as it gets dark).
+        ray_color = QColor("#F59E0B")
+        ray_color.setAlphaF(max(0.0, 1.0 - k))
+        p.setPen(QPen(ray_color, 1.4))
+        import math
+        for ang in range(0, 360, 45):
+            a = math.radians(ang)
+            r1 = knob_d * 0.30
+            r2 = knob_d * 0.42
+            p.drawLine(
+                int(cx + math.cos(a) * r1), int(cy + math.sin(a) * r1),
+                int(cx + math.cos(a) * r2), int(cy + math.sin(a) * r2),
+            )
+        # Crescent moon (fades in as it gets dark).
+        moon_color = QColor("#FBBF24")
+        moon_color.setAlphaF(max(0.0, k))
+        p.setBrush(moon_color)
+        p.setPen(Qt.PenStyle.NoPen)
+        mr = knob_d * 0.34
+        p.drawEllipse(int(cx - mr * 0.15), int(cy), int(mr * 2), int(mr * 2))
+        # Bite a crescent out of the moon using the track colour.
+        p.setBrush(bg)
+        p.drawEllipse(int(cx + mr * 0.55), int(cy - mr * 0.25), int(mr * 1.8), int(mr * 1.8))
+
+
 def _primary_btn(text):
     b = QPushButton(text)
     b.setObjectName("Primary")
@@ -634,7 +798,7 @@ class InstallerWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setObjectName("Window")
-        self.lang = "Slovensky"
+        self.lang = "sk"
         self.theme = "dark"
         self.exe_path = ""
         self._worker = None
@@ -689,11 +853,8 @@ class InstallerWindow(QWidget):
         brand_col.addWidget(sub)
         h.addLayout(brand_col)
         h.addStretch()
-        self.theme_btn = QPushButton("light")
-        self.theme_btn.setObjectName("Icon")
-        self.theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.theme_btn.setFixedWidth(74)
-        self.theme_btn.clicked.connect(self._toggle_theme)
+        self.theme_btn = ThemeToggle(dark=(self.theme == "dark"))
+        self.theme_btn.toggled.connect(self._on_theme_toggle)
         h.addWidget(self.theme_btn)
         return hero
 
@@ -802,15 +963,28 @@ class InstallerWindow(QWidget):
             rl.addWidget(lab)
         lay.addWidget(req_card)
 
-        # Language row.
+        # Language row. The installer ships only sk + en (others are downloadable
+        # from the in-app onboarding); each entry shows the display name and the
+        # translation coverage percentage.
         row = QHBoxLayout()
         row.setSpacing(10)
-        cap = QLabel(TR[self.lang]["lang"])
+        cap = QLabel(TR[self.lang].get("language", TR[self.lang].get("lang", "Language")))
         cap.setObjectName("Caption")
         self.lang_combo = QComboBox()
-        self.lang_combo.addItems(list(TR.keys()))
-        self.lang_combo.setCurrentText(self.lang)
-        self.lang_combo.currentTextChanged.connect(self._on_lang)
+        # The installer ships only Slovak + English (others are downloadable
+        # later from the in-app onboarding). Each entry shows the display name
+        # and the translation coverage percentage.
+        for code in ("sk", "en"):
+            _ensure_lang_loaded(code)
+            name = _lang_name(code)
+            cov = _lang_coverage(code)
+            self.lang_combo.addItem(f"{name}  ·  {cov}%", code)
+        # Select the current code by data.
+        for i in range(self.lang_combo.count()):
+            if self.lang_combo.itemData(i) == self.lang:
+                self.lang_combo.setCurrentIndex(i)
+                break
+        self.lang_combo.currentIndexChanged.connect(self._on_lang_idx)
         row.addWidget(cap)
         row.addWidget(self.lang_combo)
         row.addStretch()
@@ -936,14 +1110,61 @@ class InstallerWindow(QWidget):
     # ----------------------------------------------------------------- behavior
     def _apply_theme(self):
         self.setStyleSheet(_qss(self.theme))
-        self.theme_btn.setText("TMA" if self.theme == "dark" else "SVETLÁ")
+        self._sync_theme_widgets()
 
-    def _toggle_theme(self):
-        self.theme = "light" if self.theme == "dark" else "dark"
+    def _on_theme_toggle(self, dark):
+        """ThemeToggle flipped — ``dark`` is the new state."""
+        self.theme = "dark" if dark else "light"
         self._apply_theme()
 
-    def _on_lang(self, lang):
-        self.lang = lang
+    def _toggle_theme(self):
+        # Kept for completeness (e.g. keyboard shortcuts); the toggle widget is
+        # the primary UI now.
+        self.theme = "light" if self.theme == "dark" else "dark"
+        if hasattr(self, "theme_btn") and isinstance(self.theme_btn, ThemeToggle):
+            self.theme_btn.set_dark(self.theme == "dark", animate=True)
+        self._apply_theme()
+
+    def _sync_theme_widgets(self):
+        """Re-apply theme-dependent inline styles (step rail, path status).
+
+        These widgets use inline palettes derived from DARK/LIGHT so they must
+        be refreshed whenever the theme changes — otherwise stale colours leave
+        them invisible (the root cause of the dark-mode „nothing shows up“ bug)."""
+        # Step rail badges + labels.
+        c = DARK if self.theme == "dark" else LIGHT
+        if hasattr(self, "_step_labels"):
+            idx = getattr(self, "_cur", 0)
+            for i, (badge, lbl, wrap) in enumerate(self._step_labels):
+                active = (i == idx)
+                done = (i < idx)
+                if active:
+                    bg, fg, bd = ACCENT, "#FFFFFF", ACCENT
+                    txt = "✓" if done else str(i + 1)
+                elif done:
+                    bg, fg, bd = c['card2'], SUCCESS, SUCCESS
+                    txt = "✓"
+                else:
+                    bg, fg, bd = c['card2'], c['muted'], c['border']
+                    txt = str(i + 1)
+                badge.setText(txt)
+                badge.setStyleSheet(
+                    "color:" + fg + "; background:" + bg + "; border:1px solid " + bd + ";"
+                    " border-radius:12px; font-weight:700;")
+                lbl.setStyleSheet("color:" + (c['title'] if active else c['muted']) +
+                                  "; font-size:13px; font-weight:" + ("700" if active else "600") + ";")
+        # Path status colour (objectName drives QSS, but re-apply to be safe).
+        if hasattr(self, "path_status"):
+            ok = self.path_status.objectName() == "DiskOk"
+            col = SUCCESS if ok else WARN
+            self.path_status.setStyleSheet("color:" + col + "; font-size:12px; font-weight:600;")
+
+    def _on_lang_idx(self, idx):
+        """Language combo changed — ``idx`` is the row; data holds the code."""
+        code = self.lang_combo.itemData(idx) if idx >= 0 else "sk"
+        if code:
+            self.lang = code
+            _ensure_lang_loaded(code)
 
     def _update_path_status(self):
         if not hasattr(self, "path_status"):
@@ -990,40 +1211,44 @@ class InstallerWindow(QWidget):
 
     def _go_step(self, idx):
         idx = max(0, min(idx, self.stack.count() - 1))
+        # Tear down any opacity effect left on the page we're leaving — a
+        # lingering QGraphicsOpacityEffect on a QScrollArea is what made content
+        # from the previous step bleed through / overlap the new one.
+        prev = self.stack.currentWidget()
+        if prev is not None:
+            try:
+                prev.setGraphicsEffect(None)
+            except Exception:
+                pass
         self.stack.setCurrentIndex(idx)
         self._cur = idx
-        c = DARK if self.theme == "dark" else LIGHT
-        for i, (badge, lbl, wrap) in enumerate(self._step_labels):
-            active = (i == idx)
-            done = (i < idx)
-            if active:
-                bg, fg, bd = ACCENT, "#FFFFFF", ACCENT
-                txt = "✓" if done else str(i + 1)
-            elif done:
-                bg, fg, bd = c['card2'], SUCCESS, SUCCESS
-                txt = "✓"
-            else:
-                bg, fg, bd = c['card2'], c['muted'], c['border']
-                txt = str(i + 1)
-            badge.setText(txt)
-            badge.setStyleSheet(
-                "background:" + bg + "; color:" + fg + "; border:1px solid " + bd + ";"
-                " border-radius:12px; font-weight:700;")
-            lbl.setObjectName("StepLabelActive" if active else "StepLabel")
-            lbl.setStyleSheet("")  # let QSS take over
-        self.setStyleSheet(self.styleSheet())
+        self._sync_theme_widgets()
         self._fade_in(self.stack.currentWidget())
         self._update_nav()
 
     def _fade_in(self, widget):
+        # A short opacity fade makes the step transition feel smooth. We animate
+        # the inner content widget (not the QScrollArea itself — effects on
+        # scroll areas cause rendering glitches) and clear the effect when done
+        # so nothing leaks into later repaints.
+        if widget is None:
+            return
         try:
-            eff = QGraphicsOpacityEffect(widget)
-            widget.setGraphicsEffect(eff)
-            anim = QPropertyAnimation(eff, b"opacity", widget)
-            anim.setDuration(160)
+            target = widget.widget() if hasattr(widget, "widget") else widget
+            eff = QGraphicsOpacityEffect(target)
+            target.setGraphicsEffect(eff)
+            anim = QPropertyAnimation(eff, b"opacity", target)
+            anim.setDuration(150)
             anim.setStartValue(0.0)
             anim.setEndValue(1.0)
             anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+            def _cleanup(*_):
+                try:
+                    target.setGraphicsEffect(None)
+                except Exception:
+                    pass
+            anim.finished.connect(_cleanup)
             anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
         except Exception:
             pass
@@ -1121,14 +1346,35 @@ class InstallerWindow(QWidget):
 
     def closeEvent(self, event):
         if hasattr(self, "launch_chk") and self.launch_chk.isChecked() and self.exe_path:
-            try:
-                if sys.platform == "win32":
-                    os.startfile(self.exe_path)
-                else:
-                    subprocess.Popen([sys.executable, self.exe_path])
-            except Exception:
-                pass
+            self._launch_app()
         super().closeEvent(event)
+
+    def _launch_app(self):
+        """Launch the freshly installed UltraPilot.
+
+        We must NOT ``os.startfile(main.py)`` — that opens whatever is associated
+        with the ``.py`` extension (commonly VS Code). Instead run the launcher
+        ``UltraPilot.bat`` that ``_make_shortcuts`` wrote next to ``main.py``; it
+        invokes ``py -3 main.py`` from the install dir so the app actually starts.
+        Failing that, run ``py -3 main.py`` directly via subprocess."""
+        install_dir = os.path.dirname(self.exe_path) if self.exe_path else ""
+        if not install_dir or not os.path.isdir(install_dir):
+            return
+        bat = os.path.join(install_dir, "UltraPilot.bat")
+        try:
+            if sys.platform == "win32":
+                if os.path.exists(bat):
+                    # Use the launcher .bat — it sets cwd and runs py -3 main.py.
+                    os.startfile(bat)
+                else:
+                    # No launcher (shortcuts failed) — run py directly with cwd.
+                    subprocess.Popen(["py", "-3", "main.py"],
+                                     cwd=install_dir,
+                                     creationflags=subprocess.DETACHED_PROCESS)
+            else:
+                subprocess.Popen([sys.executable, "main.py"], cwd=install_dir)
+        except Exception as e:
+            logging.debug("launch failed: %s", e)
 
 
 def _read_record():

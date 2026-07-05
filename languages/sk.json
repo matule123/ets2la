@@ -31,7 +31,12 @@
       ["🎯", "Adaptívny tempomat", "Udržiava rýchlosť a brzdí pred pomalšími."],
       ["🚦", "Semafor a prekážky", "Reaguje na zastavenia a prekážky v ceste."],
       ["🗺️", "Navigácia podľa mapy", "Jazdi po svete ETS2 podľa súradníc."],
-      ["🖥️", "HUD a hlas", "Priehľadný prekryv a hlasové oznámenia."]
+      ["🛣️", "Mapa ProMods 2.82", "Podpora ProMods pre ETS2 1.59 (a ďalšie)."],
+      ["🔄", "Auto smerovky", "Smerovky a kontrola mŕtveho uhla."],
+      ["🖥️", "HUD cez hru", "Priehľadný prekryv s trasou a dôležitými údajmi."],
+      ["🔊", "Hlasové oznámenia", "Oznamy o rýchlosti, palive a udalostiach."],
+      ["🌱", "Eko riadenie", "Vyhladzovanie plynu pre nižšiu spotrebu."],
+      ["⚡", "Automatické aktualizácie", "Nové verze priamo z GitHubu."]
     ],
     "req_t": "Požiadavky",
     "req_items": ["Windows 10/11", "Euro Truck Simulator 2 alebo ATS", "Asi 500 MB voľného miesta", "Internetové pripojenie (sťahovanie z GitHubu)"],
