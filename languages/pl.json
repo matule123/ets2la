@@ -1,0 +1,28 @@
+{
+  "_meta": {"code": "pl", "name": "Polski", "english_name": "Polish"},
+  "common": {
+    "next": "Dalej", "back": "Wstecz", "finish": "Zakończ", "cancel": "Anuluj",
+    "ok": "OK", "install": "Instaluj", "browse": "Przeglądaj…",
+    "download": "Pobierz", "downloading": "Pobieranie…", "skip": "Pomiń",
+    "done": "Gotowe", "ready": "Gotowe", "loading": "Ładowanie…", "language": "Język"
+  },
+  "app": {
+    "dashboard": "Pulpit", "navigation": "Nawigacja", "plugins": "Wtyczki",
+    "settings": "Ustawienia", "about": "O programie",
+    "current_speed": "AKTUALNA PRĘDKOŚĆ", "system": "SYSTEM",
+    "enable_ap": "WŁĄCZ AUTOPILOTA", "disable_ap": "WYŁĄCZ AUTOPILOTA",
+    "telemetry_connected": "Telemetria połączona",
+    "waiting_telemetry": "Czekam na telemetrię z gry…",
+    "appearance": "Wygląd", "theme": "Motyw",
+    "theme_light": "Jasny", "theme_dark": "Ciemny", "theme_system": "Systemowy",
+    "steering": "Sterowanie", "sensitivity": "Czułość", "translated": "przetłumaczono"
+  },
+  "onboarding": {
+    "step_language": "Język", "step_sdk": "Gra i SDK", "step_map": "Pakiet mapy",
+    "welcome_t": "Witaj w UltraPilot", "start": "Rozpocznij",
+    "lang_t": "Wybierz swój język", "lang_download": "Pobierz", "lang_select": "Wybierz",
+    "sdk_t": "Gra i wtyczki SDK", "sdk_detecting": "Szukam gier…",
+    "sdk_install": "Zainstaluj SDK", "map_t": "Pakiet mapy",
+    "map_select": "Wybierz", "map_download": "Pobierz", "launch": "Uruchom UltraPilot"
+  }
+}

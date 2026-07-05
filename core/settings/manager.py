@@ -78,5 +78,12 @@ class SettingsManager:
                 "hud": False,
                 "ecodrive": False,
                 "discord": False
-            }
+            },
+            # Onboarding / first-run state. ``onboarded`` is false until the
+            # setup wizard finishes; ``ui_language_code`` is the ISO code of the
+            # selected UI language (sk, en, …); ``selected_map`` is the dataset
+            # key (e.g. "ets2-1.59") chosen in the wizard.
+            "onboarded": False,
+            "ui_language_code": "sk",
+            "selected_map": "",
         }

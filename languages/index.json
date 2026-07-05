@@ -1,0 +1,11 @@
+{
+  "languages": [
+    {"code": "sk", "name": "Slovenčina", "english_name": "Slovak", "bundled": true},
+    {"code": "en", "name": "English", "english_name": "English", "bundled": true},
+    {"code": "cs", "name": "Čeština", "english_name": "Czech", "bundled": false},
+    {"code": "de", "name": "Deutsch", "english_name": "German", "bundled": false},
+    {"code": "pl", "name": "Polski", "english_name": "Polish", "bundled": false},
+    {"code": "fr", "name": "Français", "english_name": "French", "bundled": false},
+    {"code": "es", "name": "Español", "english_name": "Spanish", "bundled": false}
+  ]
+}

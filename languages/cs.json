@@ -1,0 +1,28 @@
+{
+  "_meta": {"code": "cs", "name": "Čeština", "english_name": "Czech"},
+  "common": {
+    "next": "Další", "back": "Zpět", "finish": "Dokončit", "cancel": "Zrušit",
+    "ok": "OK", "install": "Instalovat", "browse": "Procházet…",
+    "download": "Stáhnout", "downloading": "Stahuji…", "skip": "Přeskočit",
+    "done": "Hotovo", "ready": "Připraveno", "loading": "Načítám…", "language": "Jazyk"
+  },
+  "app": {
+    "dashboard": "Přehled", "navigation": "Navigace", "plugins": "Pluginy",
+    "settings": "Nastavení", "about": "O aplikaci",
+    "current_speed": "AKTUÁLNÍ RYCHLOST", "system": "SYSTÉM",
+    "enable_ap": "ZAPNOUT AUTOPILOTA", "disable_ap": "VYPNOUT AUTOPILOTA",
+    "telemetry_connected": "Telemetrie připojena",
+    "waiting_telemetry": "Čekám na telemetrii ze hry…",
+    "appearance": "Vzhled", "theme": "Motiv",
+    "theme_light": "Světlý", "theme_dark": "Tmavý", "theme_system": "Systémový",
+    "steering": "Řízení", "sensitivity": "Citlivost", "translated": "přeloženo"
+  },
+  "onboarding": {
+    "step_language": "Jazyk", "step_sdk": "Hra & SDK", "step_map": "Mapový balíček",
+    "welcome_t": "Vítej v UltraPilot", "start": "Začít",
+    "lang_t": "Vyber si jazyk", "lang_download": "Stáhnout", "lang_select": "Vybrat",
+    "sdk_t": "Hra & SDK pluginy", "sdk_detecting": "Hledám hry…",
+    "sdk_install": "Nainstalovat SDK", "map_t": "Mapový balíček",
+    "map_select": "Vybrat", "map_download": "Stáhnout", "launch": "Spustit UltraPilot"
+  }
+}

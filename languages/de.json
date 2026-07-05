@@ -1,0 +1,28 @@
+{
+  "_meta": {"code": "de", "name": "Deutsch", "english_name": "German"},
+  "common": {
+    "next": "Weiter", "back": "Zurück", "finish": "Fertig", "cancel": "Abbrechen",
+    "ok": "OK", "install": "Installieren", "browse": "Durchsuchen…",
+    "download": "Herunterladen", "downloading": "Wird heruntergeladen…", "skip": "Überspringen",
+    "done": "Fertig", "ready": "Bereit", "loading": "Laden…", "language": "Sprache"
+  },
+  "app": {
+    "dashboard": "Übersicht", "navigation": "Navigation", "plugins": "Plugins",
+    "settings": "Einstellungen", "about": "Über",
+    "current_speed": "AKTUELLE GESCHWINDIGKEIT", "system": "SYSTEM",
+    "enable_ap": "AUTOPILOT EIN", "disable_ap": "AUTOPILOT AUS",
+    "telemetry_connected": "Telemetrie verbunden",
+    "waiting_telemetry": "Warte auf Spieltelemetrie…",
+    "appearance": "Darstellung", "theme": "Design",
+    "theme_light": "Hell", "theme_dark": "Dunkel", "theme_system": "System",
+    "steering": "Lenkung", "sensitivity": "Empfindlichkeit", "translated": "übersetzt"
+  },
+  "onboarding": {
+    "step_language": "Sprache", "step_sdk": "Spiel & SDK", "step_map": "Kartenpaket",
+    "welcome_t": "Willkommen bei UltraPilot", "start": "Loslegen",
+    "lang_t": "Wähle deine Sprache", "lang_download": "Herunterladen", "lang_select": "Auswählen",
+    "sdk_t": "Spiel & SDK Plugins", "sdk_detecting": "Spiele werden gesucht…",
+    "sdk_install": "SDK installieren", "map_t": "Kartenpaket",
+    "map_select": "Auswählen", "map_download": "Herunterladen", "launch": "UltraPilot starten"
+  }
+}

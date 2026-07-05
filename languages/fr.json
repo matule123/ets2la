@@ -1,0 +1,26 @@
+{
+  "_meta": {"code": "fr", "name": "Français", "english_name": "French"},
+  "common": {
+    "next": "Suivant", "back": "Retour", "finish": "Terminer", "cancel": "Annuler",
+    "ok": "OK", "install": "Installer", "browse": "Parcourir…",
+    "download": "Télécharger", "downloading": "Téléchargement…", "skip": "Passer",
+    "done": "Terminé", "ready": "Prêt", "loading": "Chargement…", "language": "Langue"
+  },
+  "app": {
+    "dashboard": "Tableau de bord", "navigation": "Navigation", "plugins": "Plugins",
+    "settings": "Paramètres", "about": "À propos",
+    "current_speed": "VITESSE ACTUELLE", "system": "SYSTÈME",
+    "enable_ap": "ACTIVER AUTOPILOTE", "disable_ap": "DÉSACTIVER AUTOPILOTE",
+    "appearance": "Apparence", "theme": "Thème",
+    "theme_light": "Clair", "theme_dark": "Sombre", "theme_system": "Système",
+    "steering": "Direction", "translated": "traduit"
+  },
+  "onboarding": {
+    "step_language": "Langue", "step_sdk": "Jeu et SDK", "step_map": "Pack de carte",
+    "welcome_t": "Bienvenue dans UltraPilot", "start": "Commencer",
+    "lang_t": "Choisissez votre langue", "lang_download": "Télécharger", "lang_select": "Choisir",
+    "sdk_t": "Jeu et plugins SDK", "sdk_detecting": "Détection des jeux…",
+    "sdk_install": "Installer le SDK", "map_t": "Pack de carte",
+    "map_select": "Choisir", "map_download": "Télécharger", "launch": "Lancer UltraPilot"
+  }
+}

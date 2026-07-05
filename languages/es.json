@@ -1,0 +1,26 @@
+{
+  "_meta": {"code": "es", "name": "Español", "english_name": "Spanish"},
+  "common": {
+    "next": "Siguiente", "back": "Atrás", "finish": "Finalizar", "cancel": "Cancelar",
+    "ok": "OK", "install": "Instalar", "browse": "Examinar…",
+    "download": "Descargar", "downloading": "Descargando…", "skip": "Omitir",
+    "done": "Listo", "ready": "Listo", "loading": "Cargando…", "language": "Idioma"
+  },
+  "app": {
+    "dashboard": "Panel", "navigation": "Navegación", "plugins": "Plugins",
+    "settings": "Ajustes", "about": "Acerca de",
+    "current_speed": "VELOCIDAD ACTUAL", "system": "SISTEMA",
+    "enable_ap": "ACTIVAR AUTOPILOTO", "disable_ap": "DESACTIVAR AUTOPILOTO",
+    "appearance": "Apariencia", "theme": "Tema",
+    "theme_light": "Claro", "theme_dark": "Oscuro", "theme_system": "Sistema",
+    "steering": "Dirección", "translated": "traducido"
+  },
+  "onboarding": {
+    "step_language": "Idioma", "step_sdk": "Juego y SDK", "step_map": "Paquete de mapa",
+    "welcome_t": "Bienvenido a UltraPilot", "start": "Empezar",
+    "lang_t": "Elige tu idioma", "lang_download": "Descargar", "lang_select": "Seleccionar",
+    "sdk_t": "Juego y plugins SDK", "sdk_detecting": "Buscando juegos…",
+    "sdk_install": "Instalar SDK", "map_t": "Paquete de mapa",
+    "map_select": "Seleccionar", "map_download": "Descargar", "launch": "Iniciar UltraPilot"
+  }
+}
