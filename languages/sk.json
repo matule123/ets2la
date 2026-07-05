@@ -26,6 +26,13 @@
     "welcome_t": "Vitaj v UltraPilot",
     "welcome_d": "Pokročilý autopilot pre ETS2: udržiavanie pruhu, adaptívny tempomat, vyhýbanie sa prekážkam, navigácia podľa mapy, HUD a hlasové oznámenia. Sprievodca ťa prevedie inštaláciou krok za krokom.",
     "feat_t": "Čo UltraPilot vie",
+    "feats": [
+      ["🛣️", "Udržiavanie pruhu", "Sleduje vozovku a drží kamión v pruhu."],
+      ["🎯", "Adaptívny tempomat", "Udržiava rýchlosť a brzdí pred pomalšími."],
+      ["🚦", "Semafor a prekážky", "Reaguje na zastavenia a prekážky v ceste."],
+      ["🗺️", "Navigácia podľa mapy", "Jazdi po svete ETS2 podľa súradníc."],
+      ["🖥️", "HUD a hlas", "Priehľadný prekryv a hlasové oznámenia."]
+    ],
     "req_t": "Požiadavky",
     "req_items": ["Windows 10/11", "Euro Truck Simulator 2 alebo ATS", "Asi 500 MB voľného miesta", "Internetové pripojenie (sťahovanie z GitHubu)"],
     "lic_t": "Licenčné podmienky",

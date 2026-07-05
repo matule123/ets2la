@@ -26,6 +26,13 @@
     "welcome_t": "Welcome to UltraPilot",
     "welcome_d": "An advanced autopilot for ETS2: lane keeping, adaptive cruise control, obstacle avoidance, map-based navigation, HUD and voice announcements. The wizard will guide you through installation step by step.",
     "feat_t": "What UltraPilot can do",
+    "feats": [
+      ["🛣️", "Lane keeping", "Watches the road and keeps the truck in lane."],
+      ["🎯", "Adaptive cruise", "Holds speed and brakes for slower traffic."],
+      ["🚦", "Traffic & obstacles", "Reacts to stops and obstacles ahead."],
+      ["🗺️", "Map navigation", "Drive the ETS2 world by coordinates."],
+      ["🖥️", "HUD & voice", "Transparent overlay and voice announcements."]
+    ],
     "req_t": "Requirements",
     "req_items": ["Windows 10/11", "Euro Truck Simulator 2 or ATS", "About 500 MB of free space", "Internet connection (download from GitHub)"],
     "lic_t": "License terms",

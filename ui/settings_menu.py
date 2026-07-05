@@ -121,10 +121,32 @@ class SettingsMenu(QWidget):
         lang_row = QHBoxLayout()
         lang_row.addWidget(QLabel("Language:"))
         self.lang_combo = QComboBox()
-        self.lang_combo.addItems(LANGUAGES.keys())
-        self.lang_combo.setCurrentText(self.state.get("ui_language", "Slovenčina") or "Slovenčina")
-        self.lang_combo.currentTextChanged.connect(self.update_language)
+        from core import i18n
+        # Show every available language (bundled + downloaded) with its coverage
+        # percentage. The combo stores the language code as item data. Languages
+        # that aren't downloaded yet are shown greyed — there's a separate
+        # „Download language“ button below to fetch them from GitHub.
+        self._lang_codes = []
+        for info in i18n.available():
+            self._lang_codes.append(info["code"])
+            label = f"{info['name']}  ·  {info['coverage']}%" if info["downloaded"] else f"{info['name']}  ·  (stiahnuteľné)"
+            self.lang_combo.addItem(label, info["code"])
+        cur_code = self.state.get("ui_language_code") or "sk"
+        for i in range(self.lang_combo.count()):
+            if self.lang_combo.itemData(i) == cur_code:
+                self.lang_combo.setCurrentIndex(i)
+                break
+        self.lang_combo.currentIndexChanged.connect(self.update_language)
         lang_row.addWidget(self.lang_combo)
+
+        self.dl_lang_btn = QPushButton("Stiahnuť jazyk")
+        self.dl_lang_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.dl_lang_btn.setStyleSheet(
+            "QPushButton{background:#F3F4F6;color:#111827;border:1px solid #E5E7EB;"
+            "border-radius:8px;padding:6px 12px;font-size:12px;font-weight:600;}"
+            "QPushButton:hover{border-color:#10B981;color:#10B981;}")
+        self.dl_lang_btn.clicked.connect(self.download_language)
+        lang_row.addWidget(self.dl_lang_btn)
         lang_row.addStretch()
         app_layout.addLayout(lang_row)
 
@@ -182,15 +204,87 @@ class SettingsMenu(QWidget):
         self.update_obey_limit(self.limit_toggle.isChecked())
         self.update_invert(self.invert_toggle.isChecked())
         self.update_sensitivity(init_sens)
-        self.update_language(self.lang_combo.currentText())
+        self.update_language(self.lang_combo.currentIndex())
 
     def update_theme(self, name):
         self.state.set("ui_theme", name.lower())
 
-    def update_language(self, lang):
-        from core.i18n import coverage
-        self.state.set("ui_language", lang)
-        self.cov_label.setText(f"{lang} — {coverage(lang)}% translated")
+    def update_language(self, idx):
+        """Language combo changed — ``idx`` is the row; data holds the code."""
+        from core import i18n
+        code = self.lang_combo.itemData(idx) if isinstance(idx, int) and idx >= 0 else "sk"
+        if not code:
+            return
+        self.state.set("ui_language_code", code)
+        cov = i18n.coverage(code)
+        name = next((i["name"] for i in i18n.available() if i["code"] == code), code)
+        self.cov_label.setText(f"{name} — {cov}% translated")
+
+    def download_language(self):
+        """Offer to download a language that isn't bundled/downloaded yet."""
+        from PyQt6.QtWidgets import QInputDialog
+        from core import i18n
+        # Build a list of languages that aren't downloaded yet.
+        choices = [i for i in i18n.available() if not i["downloaded"]]
+        # Also include anything declared in index.json even if available() hasn't
+        # surfaced it (defensive: usually they're already listed).
+        if not choices:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "UltraPilot",
+                "Všetky dostupné jazyky sú už stiahnuté.")
+            return
+        labels = [f"{c['name']} ({c['english_name']})" for c in choices]
+        choice, ok = QInputDialog.getItem(
+            self, "Stiahnuť jazyk", "Vyber jazyk na stiahnutie:", labels, 0, False)
+        if not ok or not choice:
+            return
+        info = choices[labels.index(choice)]
+        self.dl_lang_btn.setEnabled(False)
+        self.dl_lang_btn.setText("Sťahujem…")
+        # Run the download in a worker thread so the UI doesn't freeze.
+        from PyQt6.QtCore import QThread, pyqtSignal
+
+        class _DL(QThread):
+            done = pyqtSignal(bool, str)
+            def __init__(self, code):
+                super().__init__()
+                self.code = code
+            def run(self):
+                ok = i18n.install_from_github(self.code)
+                self.done.emit(bool(ok), self.code)
+
+        self._dl_worker = _DL(info["code"])
+        self._dl_worker.done.connect(self._on_lang_downloaded)
+        self._dl_worker.start()
+
+    def _on_lang_downloaded(self, ok, code):
+        from PyQt6.QtWidgets import QMessageBox
+        from core import i18n
+        self.dl_lang_btn.setEnabled(True)
+        self.dl_lang_btn.setText("Stiahnuť jazyk")
+        if ok:
+            i18n.reload()
+            QMessageBox.information(self, "UltraPilot",
+                f"Jazyk '{code}' bol stiahnutý.")
+            # Refresh the combo with the newly available language.
+            cur = self.lang_combo.currentData()
+            self.lang_combo.blockSignals(True)
+            self.lang_combo.clear()
+            self._lang_codes = []
+            for info in i18n.available():
+                self._lang_codes.append(info["code"])
+                label = f"{info['name']}  ·  {info['coverage']}%" if info["downloaded"] else f"{info['name']}  ·  (stiahnuteľné)"
+                self.lang_combo.addItem(label, info["code"])
+            for i in range(self.lang_combo.count()):
+                if self.lang_combo.itemData(i) == cur:
+                    self.lang_combo.setCurrentIndex(i)
+                    break
+            self.lang_combo.blockSignals(False)
+            self.update_language(self.lang_combo.currentIndex())
+        else:
+            QMessageBox.warning(self, "UltraPilot",
+                "Nepodarilo sa stiahnuť jazyk. Skontroluj internetové pripojenie "
+                "alebo nastav GITHUB_TOKEN (repozitár môže byť súkromný).")
 
     def update_acc_speed(self, val):
         self.speed_label.setText(f"Target Speed: {val} km/h")

@@ -108,7 +108,7 @@ def build_payload():
     def _ignore(_d, names):
         return [n for n in names if n in skip]
 
-    for item in ("core", "plugins", "sdk", "ui", "assets"):
+    for item in ("core", "plugins", "sdk", "ui", "assets", "languages"):
         src = os.path.abspath(item)
         if os.path.isdir(src):
             shutil.copytree(src, os.path.join(PAYLOAD_DIR, item),
@@ -130,7 +130,7 @@ def build_installer_exe():
         return None
     sep = ";" if os.name == "nt" else ":"
     data = [f"--add-data=assets{sep}assets"]
-    for item in ("core", "plugins", "sdk", "ui"):
+    for item in ("core", "plugins", "sdk", "ui", "languages"):
         data.append(f"--add-data={item}{sep}{item}")
     for f in ("main.py", "bootloader.py", "requirements.txt"):
         data.append(f"--add-data={f}{sep}.")
