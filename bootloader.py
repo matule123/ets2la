@@ -24,9 +24,33 @@ def run_ui(shared_dict):
     from PyQt6.QtWidgets import QApplication
     from ui.app import UltraPilotApp
     from core.ipc.shared_state import SharedState
+    from core.settings.manager import SettingsManager
 
     app = QApplication(sys.argv)
-    window = UltraPilotApp(SharedState(shared_dict))
+    state = SharedState(shared_dict)
+
+    # First-run onboarding: if the user hasn't completed setup yet, show the
+    # wizard before the main window. When the wizard finishes it writes
+    # ``onboarded = true`` to settings and we open the dashboard.
+    try:
+        sm = SettingsManager()
+        if not sm.get("onboarded", False):
+            from ui.onboarding import OnboardingWizard
+            wizard = OnboardingWizard(state)
+            wizard.show()
+            main_window = {"w": None}
+
+            def launch_main():
+                main_window["w"] = UltraPilotApp(state)
+                main_window["w"].show()
+
+            wizard.finished.connect(launch_main)
+            sys.exit(app.exec())
+            return
+    except Exception as e:
+        logging.warning("Onboarding skipped (%s) — opening main window.", e)
+
+    window = UltraPilotApp(state)
     window.show()
     sys.exit(app.exec())
 
