@@ -228,7 +228,25 @@ class Plugin(BasePlugin):
             target = float(np.clip(target, -1.0, 1.0))
             self._last_steering = self._ramp_steering(target, dt)
 
-        steering_val = self._last_steering
+        # Apply the soft-start engagement ramp so we never slam the wheel over
+        # the moment the autopilot is switched on.
+        steering_val = self._last_steering * self._engage_blend
+
+        # Diagnostic: log the lateral-control state once per second so we can see
+        # exactly why the truck turns the way it does (the sign of lane_offset /
+        # nav_steering vs the resulting steering_val is what tells us whether
+        # the convention is correct).
+        self._diag_t += dt
+        if self._diag_t >= 1.0:
+            self._diag_t = 0.0
+            logging.info(
+                "autopilot: active=%s nav=%s engage=%.2f lane_off=%.3f "
+                "nav_steer=%.3f target=%.3f steer_out=%.3f speed=%.0f",
+                active, nav_active, self._engage_blend,
+                float(lane_offset),
+                float(self.sdk.shared_state.get("nav_steering", 0.0) or 0.0),
+                float(self._last_steering), steering_val, speed_kmh)
+
         self.sdk.controller.set_steering(steering_val)
 
         # NOTE: turn signals are NOT driven from steering here anymore. Tying the

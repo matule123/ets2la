@@ -19,6 +19,24 @@ def plugin_worker(plugin_class: Type[BasePlugin], plugin_name: str,
     dict, so the plugin gets a fully wired SDK (telemetry / controller proxy /
     tags / settings) without anything unpicklable crossing the process boundary.
     """
+    # Each plugin process is a fresh Python interpreter, so it has NO logging
+    # setup inherited from the parent — without this, every ``logging.info`` call
+    # inside a plugin (e.g. the autopilot diagnostics) is silently dropped and
+    # never reaches ultrapilot.log. Configure a file handler that appends to the
+    # same log the engine uses, tagged with the plugin name.
+    try:
+        from core.paths import app_dir
+        log_path = os.path.join(app_dir(), "ultrapilot.log")
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s,%(msecs)03d %(levelname)-8s " + plugin_name + " %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+            filename=log_path,
+            filemode="a",
+        )
+    except Exception:
+        logging.basicConfig(level=logging.INFO)
+
     try:
         sdk = PluginSDK(shared_dict, plugin_name)
         plugin = plugin_class(sdk)
@@ -46,7 +64,8 @@ def plugin_worker(plugin_class: Type[BasePlugin], plugin_name: str,
 
         plugin.on_stop()
     except Exception as e:
-        logging.error(f"[plugin:{plugin_name}] process crashed: {e}")
+        import traceback
+        logging.error(f"[plugin:{plugin_name}] process crashed: {e}\n{traceback.format_exc()}")
 
 
 class PluginManager:

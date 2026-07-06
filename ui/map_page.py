@@ -226,11 +226,15 @@ class MapPage(QWidget):
         map_row = QHBoxLayout()
         self.map_combo = QComboBox()
         self.map_combo.setStyleSheet("background:#FFFFFF; border:1px solid #DfE3E8; border-radius:8px; padding:6px;")
+        self.map_combo.currentIndexChanged.connect(self._on_map_selected)
         self.btn_dl = QPushButton("⬇ Download map")
         self.btn_dl.clicked.connect(self.download_map)
         map_row.addWidget(self.map_combo)
         map_row.addWidget(self.btn_dl)
         layout.addLayout(map_row)
+        self.active_map_lbl = QLabel("Aktívna mapa: —")
+        self.active_map_lbl.setStyleSheet("color: #0F766E; font-size: 13px; font-weight: 700;")
+        layout.addWidget(self.active_map_lbl)
         self.dl_bar = QProgressBar()
         self.dl_bar.setVisible(False)
         layout.addWidget(self.dl_bar)
@@ -258,12 +262,50 @@ class MapPage(QWidget):
         except Exception as e:
             self.dl_status.setText(f"Could not reach map index: {e}")
             return
+        self.map_combo.blockSignals(True)
         self.map_combo.clear()
-        for d in datasets:
+        # Read the user's last selection so we pre-select it (saved map).
+        try:
+            from core.settings.manager import SettingsManager
+            wanted = (SettingsManager().get("selected_map") or "").strip()
+        except Exception:
+            wanted = ""
+        sel_idx = 0
+        for i, d in enumerate(datasets):
             mark = "✓ " if d["downloaded"] else ""
             self.map_combo.addItem(f"{mark}{d['key']}  ({d['game']} {d['version']})", d["key"])
+            if d["key"] == wanted:
+                sel_idx = i
         if datasets:
+            self.map_combo.setCurrentIndex(sel_idx)
             self.dl_status.setText("Pick your game version (or ProMods) and download once.")
+        self.map_combo.blockSignals(False)
+        self._update_active_map_label()
+
+    def _on_map_selected(self, _idx):
+        """User picked a dataset in the combo — remember it as the active map."""
+        key = self.map_combo.currentData()
+        if not key:
+            return
+        try:
+            from core.settings.manager import SettingsManager
+            SettingsManager().set("selected_map", key)
+        except Exception:
+            pass
+        # Mirror to shared state so the engine/map plugin can switch without restart.
+        self.state.set("selected_map", key)
+        self._update_active_map_label()
+
+    def _update_active_map_label(self):
+        """Show which map the autopilot is actually using."""
+        name = self.state.get("active_map_name") or self.state.get("active_map_key")
+        sel = self.state.get("selected_map")
+        if name:
+            self.active_map_lbl.setText(f"Aktívna mapa: {name}")
+        elif sel:
+            self.active_map_lbl.setText(f"Vybraná mapa: {sel}")
+        else:
+            self.active_map_lbl.setText("Aktívna mapa: —")
 
     def download_map(self):
         if self._dl_worker is not None:

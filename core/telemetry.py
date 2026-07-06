@@ -53,27 +53,19 @@ class Telemetry:
         tp = raw.get("truckPlacement", {}) or {}
         ti = raw.get("truckInt", {}) or {}
         speed_ms = tf.get("speed", 0.0) or 0.0
-        # heading from rotationX. The SCS SDK exposes rotationX in DIFFERENT units
-        # depending on the telemetry plugin build:
-        #   • some builds return a 0..1 fraction of a full turn  → multiply by 2π
-        #   • others return the heading directly in radians       → use as-is
-        # We auto-detect: anything outside [-1.5, 1.5] can only be radians
-        # (a 0..1 fraction can never exceed 1), so we skip the scaling there.
+        # rotationX from the SCS SDK is the truck's heading angle in RADIANS
+        # (confirmed against the ETS2LA reference, which reads it as a raw
+        # double and uses it directly — no 0..1 fraction, no scaling). The old
+        # code multiplied it by 2π, turning a real ~0.76 rad heading into ~4.8
+        # rad and making the Stanley controller command full-lock steering
+        # (nav_steering stuck at -1.0 → truck yanked hard left on autopilot).
+        # Use the value as-is, wrapped to [-π, π].
         rot_x = float(tp.get("rotationX", 0.0) or 0.0)
-        # Decide the convention once, then stick with it (a plugin build never
-        # flips between the two). A 0..1 fraction is always in [0, 1]; anything
-        # outside that — negative values, or magnitudes above 1 — must be radians.
-        if rot_x < -0.001 or rot_x > 1.5:
-            # Already radians (could be any real angle). Wrap into [-π, π].
-            heading = (rot_x + math.pi) % (2.0 * math.pi) - math.pi
-            self._rot_is_radians = True
-        else:
-            heading = rot_x * 2.0 * math.pi
-            self._rot_is_radians = False
-        # Log the detected convention once so it's easy to verify in ultrapilot.log.
+        heading = (rot_x + math.pi) % (2.0 * math.pi) - math.pi
         if not getattr(self, "_logged_rot_convention", False):
-            logging.info("telemetry: rotationX=%.4f → treated as %s",
-                         rot_x, "radians" if self._rot_is_radians else "0..1 fraction")
+            logging.info("telemetry: rotationX=%.4f rad → heading %.4f rad (%.1f°)",
+                         rot_x, heading, math.degrees(heading))
+            self._logged_rot_convention = True
             self._logged_rot_convention = True
         truck = {
             "speed": speed_ms,                       # m/s (plugins convert)
