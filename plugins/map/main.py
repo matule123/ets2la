@@ -1,5 +1,6 @@
 import logging
 import os
+import math
 from sdk.base_plugin import BasePlugin
 from core.navigation.route import Route
 from core.paths import app_dir
@@ -36,6 +37,7 @@ class Plugin(BasePlugin):
         self.road_net = None         # RoadNetwork loaded from a downloaded map
         self._net_attempted = False  # tried to load the road network this run?
         self._net_loading = False    # background load in progress (don't re-enter)
+        self._diag_t = 0.0           # throttle for localization diagnostics
         os.makedirs(ROUTES_DIR, exist_ok=True)
         self._publish_route_list()
 
@@ -113,20 +115,32 @@ class Plugin(BasePlugin):
                 try:
                     from core.navigation import map_data
                     from core.navigation.road_network import RoadNetwork
-                    downloaded = [d for d in map_data.list_datasets() if d["downloaded"]]
+                    from core.settings.manager import SettingsManager
+                    datasets = map_data.list_datasets()
+                    downloaded = [d for d in datasets if d["downloaded"]]
                     if not downloaded:
                         self.sdk.set("map_status", "No map downloaded yet.")
                         return
+                    # Choose the map: prefer the user's last selection (settings),
+                    # otherwise fall back to the first downloaded dataset.
+                    sm = SettingsManager()
+                    wanted = (sm.get("selected_map") or "").strip()
+                    chosen = next((d for d in downloaded if d["key"] == wanted), None)
+                    if chosen is None:
+                        chosen = downloaded[0]
+                    self.sdk.set("active_map_key", chosen["key"])
+                    self.sdk.set("active_map_name",
+                                 chosen.get("name") or chosen["key"])
                     self.sdk.set("map_status",
-                                 f"Loading road network ({downloaded[0]['key']})…")
+                                 f"Loading road network ({chosen['key']})…")
                     net = RoadNetwork()
-                    if net.load(map_data.dataset_dir(downloaded[0]["key"])):
+                    if net.load(map_data.dataset_dir(chosen["key"])):
                         self.road_net = net
                         self.sdk.set("map_status",
                                      f"Map ready ({len(net.segments)} segments). "
                                      "Map-based steering active.")
                         logging.info("Navigation: road network loaded engine-side "
-                                     "(%d segments).", len(net.segments))
+                                     "(%d segments, key=%s).", len(net.segments), chosen["key"])
                     else:
                         # Allow a retry on the next run, not this one.
                         self._net_attempted = False
@@ -239,6 +253,32 @@ class Plugin(BasePlugin):
         # Lazily load the downloaded road network (engine process) the first
         # time we have a position. Cheap no-op once attempted.
         self._load_road_net()
+
+        # Localization diagnostics: every ~2 s, log where the truck is and where
+        # the map thinks the nearest road is. If the distance is huge (hundreds
+        # of metres), the chosen map dataset doesn't match the game/mod and the
+        # autopilot will chase a road that's nowhere near us.
+        self._diag_t += delta_time
+        if self._diag_t >= 2.0 and self.road_net is not None and self.road_net.loaded:
+            self._diag_t = 0.0
+            try:
+                seg_idx = self.road_net._nearest_segment_index(pos)
+                if seg_idx is not None:
+                    (ax, az), (bx, bz) = self.road_net.segments[seg_idx]
+                    sdx, sdz = bx - ax, bz - az
+                    L2 = sdx * sdx + sdz * sdz
+                    if L2 > 1e-9:
+                        t = max(0.0, min(1.0, ((pos[0] - ax) * sdx + (pos[1] - az) * sdz) / L2))
+                        qx, qz = ax + t * sdx, az + t * sdz
+                    else:
+                        qx, qz = ax, az
+                    dist = math.hypot(pos[0] - qx, pos[1] - qz)
+                    logging.info(
+                        "map: truck=(%.0f, %.0f) nearest_seg=(%.0f, %.0f) dist=%.1fm "
+                        "heading=%.3f rad (%.0f°)",
+                        pos[0], pos[1], qx, qz, dist, heading, math.degrees(heading))
+            except Exception as e:
+                logging.debug("map diag error: %s", e)
 
         # Classify the road we're on + publish a speed cap so the autopilot
         # slows down on narrow/local/dirt sectors and keeps full speed on
