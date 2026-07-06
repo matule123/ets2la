@@ -53,8 +53,28 @@ class Telemetry:
         tp = raw.get("truckPlacement", {}) or {}
         ti = raw.get("truckInt", {}) or {}
         speed_ms = tf.get("speed", 0.0) or 0.0
-        # rotationX is a 0..1 fraction of a full turn → heading in radians.
-        heading = (tp.get("rotationX", 0.0) or 0.0) * 2.0 * math.pi
+        # heading from rotationX. The SCS SDK exposes rotationX in DIFFERENT units
+        # depending on the telemetry plugin build:
+        #   • some builds return a 0..1 fraction of a full turn  → multiply by 2π
+        #   • others return the heading directly in radians       → use as-is
+        # We auto-detect: anything outside [-1.5, 1.5] can only be radians
+        # (a 0..1 fraction can never exceed 1), so we skip the scaling there.
+        rot_x = float(tp.get("rotationX", 0.0) or 0.0)
+        # Decide the convention once, then stick with it (a plugin build never
+        # flips between the two). A 0..1 fraction is always in [0, 1]; anything
+        # outside that — negative values, or magnitudes above 1 — must be radians.
+        if rot_x < -0.001 or rot_x > 1.5:
+            # Already radians (could be any real angle). Wrap into [-π, π].
+            heading = (rot_x + math.pi) % (2.0 * math.pi) - math.pi
+            self._rot_is_radians = True
+        else:
+            heading = rot_x * 2.0 * math.pi
+            self._rot_is_radians = False
+        # Log the detected convention once so it's easy to verify in ultrapilot.log.
+        if not getattr(self, "_logged_rot_convention", False):
+            logging.info("telemetry: rotationX=%.4f → treated as %s",
+                         rot_x, "radians" if self._rot_is_radians else "0..1 fraction")
+            self._logged_rot_convention = True
         truck = {
             "speed": speed_ms,                       # m/s (plugins convert)
             "speed_kmh": abs(speed_ms) * 3.6,

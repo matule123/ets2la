@@ -54,6 +54,12 @@ class Plugin(BasePlugin):
         self._last_brake = 0.0          # smoothed brake command (the ramp)
         # Rolling speed estimate (for ramp scaling when telemetry lags).
         self._speed_kmh = 0.0
+        # Soft-start: when the autopilot is first engaged the steering ramps in
+        # from zero over ~1.2 s. Without this the first tick slams ~55% of the
+        # target steering, which is the visible „jerk to one side on enable“.
+        self._engage_blend = 0.0
+        self._was_active = False
+        self._diag_t = 0.0              # throttle for diagnostic logging
 
     def on_stop(self):
         logging.info("Autopilot Plugin stopped.")
@@ -186,6 +192,18 @@ class Plugin(BasePlugin):
 
         # 5. Lateral control.
         nav_active = bool(self.sdk.shared_state.get("nav_active", False))
+
+        # Soft-start: detect the rising edge of autopilot_active and fade the
+        # steering authority in from 0 → 1 over ~1.2 s. This kills the jerk that
+        # happens the instant the user toggles the autopilot on (the first tick
+        # would otherwise apply 55% of whatever target was computed).
+        active = bool(self.sdk.shared_state.get("autopilot_active", False))
+        if active and not self._was_active:
+            self._engage_blend = 0.0
+        self._was_active = active
+        engage = min(1.0, self._engage_blend + dt / 1.2)
+        self._engage_blend = engage if active else 0.0
+
         if nav_active:
             # nav_steering is already a finished pure-pursuit + CTE value from
             # the Route/map plugin. Apply a SHORT rate-limit only — the old
