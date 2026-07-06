@@ -17,6 +17,17 @@ def run_engine(shared_dict):
     engine.start()
 
 
+def _play_boot_sound(state):
+    """Play the startup chime if the user has it enabled and a file exists."""
+    try:
+        if not state.get("startup_sound", True):
+            return
+        from core import sound
+        sound.play("boot")
+    except Exception:
+        pass
+
+
 def run_ui(shared_dict):
     """Process for the Main Control Panel UI."""
     logging.basicConfig(level=logging.INFO)
@@ -43,6 +54,7 @@ def run_ui(shared_dict):
             def launch_main():
                 main_window["w"] = UltraPilotApp(state)
                 main_window["w"].show()
+                _play_boot_sound(state)
 
             wizard.finished.connect(launch_main)
             sys.exit(app.exec())
@@ -52,6 +64,7 @@ def run_ui(shared_dict):
 
     window = UltraPilotApp(state)
     window.show()
+    _play_boot_sound(state)
     sys.exit(app.exec())
 
 

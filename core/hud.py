@@ -61,6 +61,7 @@ class UltraPilotHUD(QWidget):
         self.shared_state = shared_state
         self._blink = True
         self._drag = None
+        self._shown = False   # becomes True once the UI process signals ready
         self.init_ui()
 
     def init_ui(self):
@@ -71,12 +72,23 @@ class UltraPilotHUD(QWidget):
         screen = QApplication.primaryScreen().geometry()
         # Bottom-left of the screen (the reference HUD is on the left side).
         self.move(24, screen.height() - self.H - 24)
+        # Start hidden: the HUD only appears once the main app window is up
+        # (``ui_ready`` flag in shared state). This avoids the HUD flashing on
+        # screen during the onboarding wizard / before the dashboard is visible.
+        self.hide()
         self.timer = QTimer()
         self.timer.timeout.connect(self._tick)
         self.timer.start(80)   # ~12 fps animation
 
     def _tick(self):
         self._blink = not self._blink
+        # Wait for the UI process to flag itself ready before we show the HUD.
+        try:
+            if not self._shown and self.shared_state.get("ui_ready", False):
+                self._shown = True
+                self.show()
+        except Exception:
+            pass
         self.update()
 
     # --- Data -----------------------------------------------------------------

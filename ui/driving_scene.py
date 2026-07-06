@@ -9,6 +9,7 @@ transparent HUD overlay and the Visualization page card.
 Falls back to nothing (no crash) if OpenGL isn't available.
 """
 
+import logging
 import math
 
 try:
@@ -115,7 +116,13 @@ class DrivingScene(QOpenGLWidget):
             glFogf(GL_FOG_DENSITY, 0.6)
             fog_col = (0.42, 0.50, 0.58, 1.0)
             glFogfv(GL_FOG_COLOR, (GLfloat * 4)(*fog_col))
-            glHint(GL_FOG_HINT, GL_DONTCARE)
+            try:
+                glHint(GL_FOG_HINT, GL_DONT_CARE)
+            except Exception:
+                try:
+                    glHint(GL_FOG_HINT, GL_DONTCARE)
+                except Exception:
+                    pass
         except Exception as e:
             logging.warning("driving_scene initializeGL failed: %s", e)
             self._gl_broken = True

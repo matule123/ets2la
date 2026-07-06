@@ -86,4 +86,6 @@ class SettingsManager:
             "onboarded": False,
             "ui_language_code": "sk",
             "selected_map": "",
+            # Startup chime (plays assets/sounds/boot.mp3 if present).
+            "startup_sound": True,
         }

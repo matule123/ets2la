@@ -386,6 +386,20 @@ class UltraPilotApp(QMainWindow):
             "color: #9CA3AF; font-size: 11px; font-weight: 600; border:none; "
             "padding: 10px 18px;")
         sb.addWidget(self.side_conn)
+
+        # Hamburger button: toggles the small floating performance overlay.
+        self.perf_overlay = None
+        self.perf_btn = QPushButton("≡")
+        self.perf_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.perf_btn.setFixedSize(34, 28)
+        self.perf_btn.setToolTip("Performance")
+        self.perf_btn.setStyleSheet(
+            "QPushButton{background:transparent;border:1px solid #3D4654;"
+            "border-radius:8px;color:#9CA3AF;font-size:16px;font-weight:700;}"
+            "QPushButton:hover{border-color:#10B981;color:#10B981;}")
+        # Black/white style toggle kept minimal — colour flips with state below.
+        self.perf_btn.clicked.connect(self.toggle_perf_overlay)
+        sb.addWidget(self.perf_btn)
         main_layout.addWidget(self.sidebar)
 
         self.pages = QStackedWidget()
@@ -432,6 +446,29 @@ class UltraPilotApp(QMainWindow):
         self.state.set("autopilot_active", not current)
         logging.info(f"Autopilot master switch -> {not current}")
         self._render_start_btn()
+
+    def toggle_perf_overlay(self):
+        """Show/hide the small floating performance panel."""
+        try:
+            if self.perf_overlay is None:
+                from ui.perf_overlay import PerfOverlay
+                self.perf_overlay = PerfOverlay(self.state)
+            if self.perf_overlay.isVisible():
+                self.perf_overlay.hide()
+                self.perf_btn.setStyleSheet(
+                    "QPushButton{background:transparent;border:1px solid #3D4654;"
+                    "border-radius:8px;color:#9CA3AF;font-size:16px;font-weight:700;}"
+                    "QPushButton:hover{border-color:#10B981;color:#10B981;}")
+            else:
+                self.perf_overlay.show()
+                self.perf_overlay.refresh()
+                # Active state: filled black/white-ish chip.
+                self.perf_btn.setStyleSheet(
+                    "QPushButton{background:#111827;color:#FFFFFF;"
+                    "border:1px solid #111827;border-radius:8px;font-size:16px;font-weight:700;}"
+                    "QPushButton:hover{border-color:#10B981;}")
+        except Exception as e:
+            logging.warning("perf overlay toggle failed: %s", e)
 
     def _goto(self, index):
         self.pages.setCurrentIndex(index)
