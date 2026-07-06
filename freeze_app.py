@@ -15,7 +15,7 @@ from cx_Freeze import setup, Executable
 # (numpy/cv2/PyQt6) — lift the limit so analysis doesn't hit RecursionError.
 sys.setrecursionlimit(10000)
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 build_exe_options = {
     "packages": [
