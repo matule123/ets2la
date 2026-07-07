@@ -324,9 +324,23 @@ class Plugin(BasePlugin):
                 route = Route([tuple(p) for p in map_path])
                 steer = route.steering(pos, heading, speed,
                                        lane_offset_m=self._lane_offset())
-                self.sdk.set("nav_steering", float(steer))
-                self.sdk.set("nav_active", True)
-                self.sdk.set("nav_path", [list(p) for p in map_path[:25]])
+                # Safety: if the truck is far from the snapped path (wrong map
+                # dataset, or we're off-road on a ferry / car park), the CTE is
+                # huge and Stanley saturates to full-lock. Detect that and
+                # disable nav steering instead of yanking the wheel — the
+                # autopilot then falls back to vision lane-keeping.
+                off_dist = math.hypot(pos[0] - map_path[0][0], pos[1] - map_path[0][1])
+                if off_dist > 50.0:
+                    self.sdk.set("nav_active", False)
+                    self.sdk.set("nav_steering", 0.0)
+                    self.sdk.set("map_status",
+                                 f"Truck is {off_dist:.0f}m from the nearest road — "
+                                 "map dataset may not match the game. Switch maps on the Map page.")
+                    self.tags.nav_steering = 0.0
+                else:
+                    self.sdk.set("nav_steering", float(steer))
+                    self.sdk.set("nav_active", True)
+                    self.sdk.set("nav_path", [list(p) for p in map_path[:25]])
                 # Curvature radius (m) of the road ahead — lets the autopilot
                 # anticipate bends (brake before, not during).
                 self.sdk.set("path_curvature_radius",

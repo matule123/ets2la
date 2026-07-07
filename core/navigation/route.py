@@ -250,8 +250,14 @@ class Route:
         heading_error = math.atan2(cross, dot)
 
         # Cross-track error, measured to the lane-offset line so it pulls us
-        # into our lane, not the centre.
+        # into our lane, not the centre. CLAMPED to ±5 m: when the truck is far
+        # from the road (e.g. a wrong map dataset is loaded, or we're on a ferry
+        # / car park) the raw CTE can be 30+ m, which saturates the Stanley law
+        # to full-lock — that's the „truck yanks hard left the moment autopilot
+        # engages" bug. Capping it keeps the steering reasonable while still
+        # pulling back toward the lane.
         cte = self.cross_track_error(idx, pos) - lane_offset_m
+        cte = max(-5.0, min(5.0, cte))
 
         # --- Stanley lateral-control law (Fáza 3a) -------------------------
         #   δ = K_HEADING · heading_error + atan( K_CTE · cte / (K_SOFT + v) )
@@ -263,5 +269,9 @@ class Route:
         v = max(abs(speed_ms), 0.0)
         cte_steer = math.atan((K_CTE * cte) / (K_SOFT + v))
         steer = K_HEADING * heading_error + cte_steer
+        # Clamp the *angle* before the speed gain — without this a 90° heading
+        # error + maxed CTE produced steer values > 2.0, which then became ±1.0
+        # after _clamp and looked like „always full lock one way".
+        steer = max(-0.7, min(0.7, steer))
         steer *= speed_gain(speed_ms)
         return _clamp(steer, -1.0, 1.0)
