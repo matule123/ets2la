@@ -9,6 +9,8 @@ from PyQt6.QtCore import QTimer, Qt
 
 from ui.settings_menu import SettingsMenu
 from ui.map_page import MapPage
+# LogPage is imported lazily inside _add() below to avoid a module-load
+# circular import (ui.log_panel imports Page from this module).
 
 # Clean light theme (ETS2LA-style: white surfaces, green accent).
 ACCENT = "#10B981"
@@ -160,15 +162,17 @@ class PluginsPage(Page):
 class DashboardPage(Page):
     def __init__(self, state):
         super().__init__(state)
+        from core.theme import palette
+        self._pal = palette(state.get("ui_theme", "light") or "light")
         title = QLabel("🚀 UltraPilot Telemetry")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #065F46; margin-bottom: 10px;")
+        title.setStyleSheet("font-size: 24px; font-weight: bold; color: " + self._pal['title'] + "; margin-bottom: 10px;")
         self.layout.addWidget(title)
 
         # --- Prominent autopilot status card (the eye-catcher of the page) ---
         self.ap_card = QFrame()
         self.ap_card.setObjectName("ApCard")
         self.ap_card.setStyleSheet(
-            "#ApCard { background-color: #FFFFFF; border: 1px solid #E5E7EB; "
+            "#ApCard { background-color: " + self._pal['card'] + "; border: 1px solid " + self._pal['border'] + "; "
             "border-radius: 16px; }")
         ap_l = QVBoxLayout(self.ap_card)
         ap_l.setContentsMargins(24, 20, 24, 20)
@@ -179,24 +183,24 @@ class DashboardPage(Page):
         self.ap_dot.setStyleSheet("font-size: 22px; color: #9CA3AF; border:none;")
         ap_head.addWidget(self.ap_dot)
         self.ap_title = QLabel("Autopilot vypnutý")
-        self.ap_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #111827; border:none;")
+        self.ap_title.setStyleSheet("font-size: 20px; font-weight: bold; color: " + self._pal['text'] + "; border:none;")
         ap_head.addWidget(self.ap_title)
         ap_head.addStretch()
         self.ap_state = QLabel("MANUÁL")
-        self.ap_state.setStyleSheet("color: #9CA3AF; font-size: 12px; font-weight: 700; border:none;")
+        self.ap_state.setStyleSheet("color: " + self._pal['muted'] + "; font-size: 12px; font-weight: 700; border:none;")
         ap_head.addWidget(self.ap_state)
         ap_l.addLayout(ap_head)
 
         # Big speed readout beside the system state.
         speed_row = QHBoxLayout()
         self.speed_val = QLabel("0")
-        self.speed_val.setStyleSheet("font-size: 56px; font-weight: bold; color: #065F46; border:none;")
+        self.speed_val.setStyleSheet("font-size: 56px; font-weight: bold; color: " + self._pal['title'] + "; border:none;")
         speed_row.addWidget(self.speed_val)
         sp_unit = QVBoxLayout()
         sp_lbl = QLabel("Aktuálna rýchlosť")
-        sp_lbl.setStyleSheet("color: #6B7280; font-size: 11px; font-weight: 600; border:none;")
+        sp_lbl.setStyleSheet("color: " + self._pal['muted'] + "; font-size: 11px; font-weight: 600; border:none;")
         self.speed_unit = QLabel("km/h")
-        self.speed_unit.setStyleSheet("color: #111827; font-size: 16px; font-weight: 700; border:none;")
+        self.speed_unit.setStyleSheet("color: " + self._pal['text'] + "; font-size: 16px; font-weight: 700; border:none;")
         sp_unit.addWidget(sp_lbl); sp_unit.addWidget(self.speed_unit)
         sp_unit.addStretch()
         speed_row.addLayout(sp_unit)
@@ -207,7 +211,7 @@ class DashboardPage(Page):
         # --- Live telemetry grid (gear / rpm / fuel / limit / nav) ---
         self.metrics = {}
         grid_frame = QFrame()
-        grid_frame.setStyleSheet("background-color: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 12px;")
+        grid_frame.setStyleSheet("background-color: " + self._pal['card'] + "; border: 1px solid " + self._pal['border'] + "; border-radius: 12px;")
         grid = QHBoxLayout(grid_frame)
         grid.setContentsMargins(8, 12, 8, 12)
         for key, icon, label in [("gear", "⚙️", "PREVOD"), ("rpm", "🔧", "OTÁČKY"),
@@ -231,6 +235,13 @@ class DashboardPage(Page):
 
         self.layout.addStretch()
 
+    def restyle(self, theme):
+        """Re-apply palette colours when the theme switches (dark ↔ light)."""
+        from core.theme import palette
+        self._pal = palette(theme)
+        # refresh() re-sets every card/label style from self._pal.
+        self.refresh()
+
     def refresh(self):
         speed = self.state.get("speed", 0) or 0
         try:
@@ -246,25 +257,25 @@ class DashboardPage(Page):
         # grey when manual. The system state (CRUISE / FOLLOW_LANE / …) is the
         # fine-grained sub-state shown as the chip.
         if active:
-            self.ap_dot.setStyleSheet("font-size: 22px; color: #10B981; border:none;")
+            self.ap_dot.setStyleSheet("font-size: 22px; color: " + self._pal['success'] + "; border:none;")
             self.ap_title.setText("Autopilot aktívny")
-            self.ap_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #065F46; border:none;")
+            self.ap_title.setStyleSheet("font-size: 20px; font-weight: bold; color: " + self._pal['title'] + "; border:none;")
             self.ap_state.setText(str(sysstate))
-            self.ap_state.setStyleSheet("color: #10B981; font-size: 12px; font-weight: 700; border:none;")
+            self.ap_state.setStyleSheet("color: " + self._pal['success'] + "; font-size: 12px; font-weight: 700; border:none;")
             self.ap_card.setStyleSheet(
-                "#ApCard { background-color: #ECFDF5; border: 1px solid #A7F3D0; "
+                "#ApCard { background-color: " + self._pal['card2'] + "; border: 1px solid " + self._pal['accent2'] + "; "
                 "border-radius: 16px; }")
-            self.speed_val.setStyleSheet("font-size: 56px; font-weight: bold; color: #065F46; border:none;")
+            self.speed_val.setStyleSheet("font-size: 56px; font-weight: bold; color: " + self._pal['title'] + "; border:none;")
         else:
             self.ap_dot.setStyleSheet("font-size: 22px; color: #9CA3AF; border:none;")
             self.ap_title.setText("Autopilot vypnutý")
-            self.ap_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #111827; border:none;")
+            self.ap_title.setStyleSheet("font-size: 20px; font-weight: bold; color: " + self._pal['text'] + "; border:none;")
             self.ap_state.setText("MANUÁL")
-            self.ap_state.setStyleSheet("color: #9CA3AF; font-size: 12px; font-weight: 700; border:none;")
+            self.ap_state.setStyleSheet("color: " + self._pal['muted'] + "; font-size: 12px; font-weight: 700; border:none;")
             self.ap_card.setStyleSheet(
-                "#ApCard { background-color: #FFFFFF; border: 1px solid #E5E7EB; "
+                "#ApCard { background-color: " + self._pal['card'] + "; border: 1px solid " + self._pal['border'] + "; "
                 "border-radius: 16px; }")
-            self.speed_val.setStyleSheet("font-size: 56px; font-weight: bold; color: #111827; border:none;")
+            self.speed_val.setStyleSheet("font-size: 56px; font-weight: bold; color: " + self._pal['text'] + "; border:none;")
 
         truck = (self.state.get("telemetry", {}) or {}).get("truck", {}) or {}
         gear = truck.get("gear", 0)
@@ -418,6 +429,7 @@ class UltraPilotApp(QMainWindow):
         _add(lambda: MapPage(state), "Navigation")
         _add(lambda: VisualizationPage(state), "Visualization")
         _add(lambda: PluginsPage(state), "Plugins")
+        _add(lambda: __import__("ui.log_panel", fromlist=["LogPage"]).LogPage(state), "Log")
         _add(lambda: SettingsMenu(state), "Settings")
         _add(lambda: AboutPage(state), "About")
         main_layout.addWidget(self.pages)
@@ -490,9 +502,10 @@ class UltraPilotApp(QMainWindow):
             self._theme = new_theme
             from core.theme import stylesheet
             self.setStyleSheet(stylesheet(new_theme))
-            # Re-style the pages that keep their own colour cache so dark/light
+            # Re-style every page that keeps its own colour cache so dark/light
             # actually applies to their cards and labels (not just the window).
-            for idx in (3, 4):  # PluginsPage, SettingsMenu
+            # Index-agnostic: any page exposing restyle(theme) gets refreshed.
+            for idx in range(self.pages.count()):
                 pg = self.pages.widget(idx)
                 if pg is not None and hasattr(pg, "restyle"):
                     try:

@@ -24,16 +24,16 @@ except Exception:
 
 
 def _collect():
-    """Return (app_rss_mb, [(plugin_name, rss_mb), ...]) for our process tree."""
+    """Return (app_rss_mb, app_cpu_pct, [(plugin_name, rss_mb, cpu_pct), ...])."""
     if psutil is None:
-        return 0.0, []
+        return 0.0, 0.0, []
     me = psutil.Process(os.getpid())
     try:
         root = me.parent() or me
     except Exception:
         root = me
     procs = [root] + root.children(recursive=True)
-    seen, app_rss, plugins = set(), 0, []
+    seen, app_rss, app_cpu, plugins = set(), 0, 0.0, []
     for p in procs:
         try:
             if p.pid in seen:
@@ -42,15 +42,29 @@ def _collect():
             rss = p.memory_info().rss
             app_rss += rss
             try:
+                cpu = p.cpu_percent(interval=None)
+            except Exception:
+                cpu = 0.0
+            app_cpu += cpu
+            try:
                 mp_name = next((a for a in p.cmdline() if a.startswith("Plugin-")), None)
             except Exception:
                 mp_name = None
             label = mp_name or p.name()
             if label.startswith("Plugin-"):
-                plugins.append((label.replace("Plugin-", "").capitalize(), rss))
+                plugins.append((label.replace("Plugin-", "").capitalize(), rss, cpu))
         except Exception:
             continue
-    return app_rss / 1e6, [(n, r / 1e6) for n, r in plugins]
+    return app_rss / 1e6, app_cpu, [(n, r / 1e6, c) for n, r, c in plugins]
+
+
+def _bar_color(frac, pal):
+    """Colour a plugin bar by its share: green (small) → amber → red (heavy)."""
+    if frac > 0.5:
+        return pal['danger']
+    if frac > 0.25:
+        return pal['warn']
+    return pal['success']
 
 
 class PerfOverlay(QWidget):
@@ -64,7 +78,7 @@ class PerfOverlay(QWidget):
             Qt.WindowType.WindowStaysOnTopHint |
             Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
-        self.setFixedSize(260, 230)
+        self.setFixedSize(280, 250)
         self._drag = None
         # Resolve the palette BEFORE _build() so the labels can read _pal.
         from core.theme import palette
@@ -110,6 +124,9 @@ class PerfOverlay(QWidget):
         self.total_lbl = QLabel("UltraPilot: — MB")
         self.total_lbl.setStyleSheet("font-size: 12px; font-weight: 700; color: " + self._pal['text'] + ";")
         root.addWidget(self.total_lbl)
+        self.cpu_lbl = QLabel("CPU: — %")
+        self.cpu_lbl.setStyleSheet("font-size: 11px; font-weight: 600; color: " + self._pal['muted'] + ";")
+        root.addWidget(self.cpu_lbl)
 
         bar_wrap = QFrame()
         bar_wrap.setStyleSheet("background: transparent; border: none;")
@@ -119,6 +136,7 @@ class PerfOverlay(QWidget):
         self.total_bar = QProgressBar()
         self.total_bar.setFixedHeight(8)
         self.total_bar.setRange(0, 100)
+        self.total_bar.setTextVisible(False)
         bw.addWidget(self.total_bar)
         root.addWidget(bar_wrap)
 
@@ -138,18 +156,20 @@ class PerfOverlay(QWidget):
                 w.deleteLater()
 
     def refresh(self):
-        app_mb, plugins = _collect()
+        app_mb, app_cpu, plugins = _collect()
         self.total_lbl.setText(f"UltraPilot: {app_mb:.0f} MB")
+        self.cpu_lbl.setText(f"CPU: {app_cpu:.0f} %")
         # The total bar is relative to a 1 GB soft cap for a quick visual feel.
         self.total_bar.setValue(min(100, int(app_mb / 1024 * 100)))
         self._clear_rows()
-        plug_total = sum(r for _, r in plugins) or 1.0
+        plug_total = sum(r for _, r, _ in plugins) or 1.0
         if not plugins:
             lbl = QLabel("žiadne pluginy")
             lbl.setStyleSheet("font-size: 11px; color: " + self._pal['muted'] + ";")
             self.rows_box.addWidget(lbl)
             return
-        for name, mb in sorted(plugins, key=lambda r: -r[1]):
+        for name, mb, cpu in sorted(plugins, key=lambda r: -r[1]):
+            frac = mb / plug_total
             row = QHBoxLayout()
             row.setSpacing(6)
             n = QLabel(name)
@@ -158,10 +178,15 @@ class PerfOverlay(QWidget):
             bar = QProgressBar()
             bar.setFixedHeight(7)
             bar.setRange(0, 100)
-            bar.setValue(int(100 * mb / plug_total))
+            bar.setValue(int(100 * frac))
             bar.setTextVisible(False)
-            val = QLabel(f"{mb:.0f} MB")
-            val.setFixedWidth(48)
+            # Colour the chunk by the plugin's memory share.
+            col = _bar_color(frac, self._pal)
+            bar.setStyleSheet(
+                "QProgressBar{background:" + self._pal['field'] + "; border:none; border-radius:3px;}"
+                "QProgressBar::chunk{background:" + col + "; border-radius:3px;}")
+            val = QLabel(f"{mb:.0f} MB · {cpu:.0f}%")
+            val.setFixedWidth(72)
             val.setStyleSheet("font-size: 11px; color: " + self._pal['muted'] + ";")
             row.addWidget(n)
             row.addWidget(bar, stretch=1)

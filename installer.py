@@ -96,6 +96,12 @@ def _qss(theme):
         " border-bottom: 1px solid " + c['border'] + "; }"
         " #StepBadge { background: " + c['card2'] + "; border: 1px solid " + c['border'] + ";"
         " border-radius: 11px; }"
+        # The page content + scroll viewport MUST have an explicit dark/light
+        # background — otherwise a bare QWidget paints the platform default
+        # (white on Windows) and you get „white parts“ in dark mode.
+        " QWidget#Page, QScrollArea#PageScroll, QScrollArea#PageScroll > QWidget > QWidget {"
+        " background: " + c['bg'] + "; }"
+        " QScrollArea#PageScroll { border: none; background: " + c['bg'] + "; }"
         " QLabel { color: " + c['text'] + "; }"
         " QLabel#Title { font-size: 32px; font-weight: 800; letter-spacing: -0.5px; }"
         " QLabel#Subtitle { font-size: 15px; color: " + c['muted'] + "; }"
@@ -115,9 +121,12 @@ def _qss(theme):
         " QLabel#FeatDesc { font-size: 12px; color: " + c['muted'] + "; }"
         " QLabel#DiskOk { font-size: 12px; color: " + SUCCESS + "; font-weight: 600; }"
         " QLabel#DiskWarn { font-size: 12px; color: " + WARN + "; font-weight: 600; }"
-        " #Card, #FeatCard { background: " + c['card'] + "; border: 1px solid " + c['border'] + ";"
-        " border-radius: 12px; }"
-        " #FeatCard:hover { border-color: " + ACCENT + "; }"
+        " #Card, #FeatCard { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+        " stop:0 " + c['card'] + ", stop:1 " + c['bg2'] + ");"
+        " border: 1px solid " + c['border'] + "; border-radius: 12px; }"
+        " #FeatCard:hover { border-color: " + ACCENT + ";"
+        " background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+        " stop:0 " + c['card2'] + ", stop:1 " + c['card'] + "); }"
         " QPushButton#Primary {"
         " background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 " + ACCENT_HI + ", stop:1 " + ACCENT_LO + ");"
         " color: #FFFFFF; border: none; border-radius: 10px; padding: 11px 24px;"
@@ -1109,11 +1118,18 @@ class InstallerWindow(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        # Give the page an objectName + autofill so it NEVER falls back to the
+        # platform's default WHITE window colour (the root cause of „white
+        # parts“ in dark mode — a bare QWidget in a scroll area ignores QSS bg).
+        scroll.setObjectName("PageScroll")
         inner = QWidget()
+        inner.setObjectName("Page")
+        inner.setAutoFillBackground(True)
         lay = QVBoxLayout(inner)
         lay.setContentsMargins(38, 24, 38, 24)
         lay.setSpacing(14)
         scroll.setWidget(inner)
+        scroll.viewport().setAutoFillBackground(True)
         return scroll, lay
 
     # ----------------------------------------------------------------- pages
