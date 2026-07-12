@@ -15,9 +15,14 @@ dist/
 
 # Runtime / generated data
 model-cache/
+map-cache/
 routes/
 settings.json
 *.log
+
+# Local-only / agent artifacts
+docs/
+.zcode/
 
 # OS / editor
 .DS_Store
