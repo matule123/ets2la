@@ -19,7 +19,7 @@ import sys
 from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
 from PyQt6.QtGui import QPainter, QPen, QColor
 from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel,
-                             QPushButton, QProgressBar, QMessageBox)
+                             QPushButton, QProgressBar, QDialog)
 from PyQt6.QtCore import QThread, pyqtSignal
 
 
@@ -93,6 +93,73 @@ class _UpdateWorker(QThread):
             logging.error("update failed: %s", e)
             self.progress.emit(1.0, "chyba: " + str(e))
             self.done.emit(False)
+
+
+class UpdateConfirmDialog(QDialog):
+    """A bespoke dark ETS2LA-style confirmation dialog (replaces the drab
+    native QMessageBox). Shows the new version, a short note that the app will
+    restart, and green/grey Yes–No buttons."""
+
+    def __init__(self, latest_tag, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Aktualizovať UltraPilot")
+        self.setModal(True)
+        self.setFixedSize(420, 230)
+        # GitHub-style dark card.
+        self.setStyleSheet(
+            "UpdateConfirmDialog { background: #0D1117; }"
+            "QLabel { color: #E6EDF3; background: transparent; }")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(28, 24, 28, 20)
+        lay.setSpacing(12)
+
+        head = QHBoxLayout()
+        head.setSpacing(14)
+        icon = QLabel("⬇")
+        icon.setStyleSheet("font-size: 34px; color: #2EA043; background: transparent;")
+        head.addWidget(icon)
+        col = QVBoxLayout()
+        col.setSpacing(2)
+        title = QLabel("Dostupná aktualizácia")
+        title.setStyleSheet("font-size: 18px; font-weight: 800; color: #2EA043; background: transparent;")
+        col.addWidget(title)
+        ver = QLabel("Nová verzia: " + str(latest_tag))
+        ver.setStyleSheet("font-size: 13px; color: #8B949E; background: transparent;")
+        col.addWidget(ver)
+        head.addLayout(col, stretch=1)
+        lay.addLayout(head)
+
+        note = QLabel("Aplikácia sa po dokončení reštartuje.\n"
+                      "Tvoje nastavenia, trasy a mapy zostanú zachované.")
+        note.setWordWrap(True)
+        note.setStyleSheet("font-size: 13px; color: #C9D1D9; background: transparent;")
+        lay.addWidget(note)
+        lay.addStretch()
+
+        row = QHBoxLayout()
+        row.addStretch()
+        no = QPushButton("Zrušiť")
+        no.setCursor(Qt.CursorShape.PointingHandCursor)
+        no.setFixedWidth(110)
+        no.setStyleSheet(
+            "QPushButton{background:transparent;color:#C9D1D9;border:1px solid #30363D;"
+            "border-radius:8px;padding:9px;font-weight:600;}"
+            "QPushButton:hover{border-color:#8B949E;color:#E6EDF3;}")
+        no.clicked.connect(self.reject)
+        row.addWidget(no)
+        yes = QPushButton("Aktualizovať")
+        yes.setCursor(Qt.CursorShape.PointingHandCursor)
+        yes.setFixedWidth(130)
+        yes.setStyleSheet(
+            "QPushButton{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "stop:0 #2EA043, stop:1 #238636);color:#FFFFFF;border:none;"
+            "border-radius:8px;padding:9px;font-weight:700;}"
+            "QPushButton:hover{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "stop:0 #34D058, stop:1 #2EA043);}")
+        yes.clicked.connect(self.accept)
+        yes.setDefault(True)
+        row.addWidget(yes)
+        lay.addLayout(row)
 
 
 class UpdateCheckerWidget(QWidget):
@@ -174,6 +241,8 @@ class UpdateCheckerWidget(QWidget):
         self.spinner.hide()
         self.btn.show()
         if available and latest:
+            # Remember the tag/SHA so the confirm dialog can show it.
+            self._latest_tag = str(latest)
             # Show the remote commit short SHA so the user knows what's coming.
             self.version_lbl.setText("Dostupná aktualizácia: " + str(latest))
             self.btn.setText("Aktualizovať")
@@ -194,11 +263,9 @@ class UpdateCheckerWidget(QWidget):
             self.btn.clicked.connect(self.check)
 
     def _confirm_update(self):
-        ret = QMessageBox.question(
-            self, "Aktualizovať UltraPilot",
-            "Naozaj aktualizovať? Aplikácia sa po dokončení reštartuje.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if ret != QMessageBox.StandardButton.Yes:
+        latest = getattr(self, "_latest_tag", None) or ""
+        dlg = UpdateConfirmDialog(latest, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         self._do_update()
 

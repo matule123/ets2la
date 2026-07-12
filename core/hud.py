@@ -299,7 +299,11 @@ class UltraPilotHUD(QWidget):
                        {"type": "truck", "width": 2.6, "length": 14.0, "yaw": d["heading"]})
 
     def _box3d(self, qp, n, fr, hw, lateral, z0, z1, view, faces):
-        """Draw one shaded cuboid between heights z0..z1. faces=(side,top) colors."""
+        """Draw one shaded cuboid between heights z0..z1. faces=(side,top) colors.
+
+        Stronger per-face shading than before (back/front much darker, top
+        lighter) so the volume reads as a solid 3D object instead of a flat /
+        "deravý" outline."""
         c = [self._project(n, lateral - hw, view, z0), self._project(n, lateral + hw, view, z0),
              self._project(fr, lateral - hw, view, z0), self._project(fr, lateral + hw, view, z0),
              self._project(n, lateral - hw, view, z1), self._project(n, lateral + hw, view, z1),
@@ -308,12 +312,14 @@ class UltraPilotHUD(QWidget):
             return False
         bl, br, fl, fr_, blt, brt, flt, frt = c
         side, top = faces
-        qp.setPen(QPen(QColor("#34393F"), 1))
-        qp.setBrush(QColor(side).darker(115)); qp.drawPolygon(QPolygonF([bl, br, brt, blt]))   # back
-        qp.setBrush(QColor(side)); qp.drawPolygon(QPolygonF([bl, fl, flt, blt]))               # left
+        # Thin dark seam between volumes — reads as a crisp edge, not a hole.
+        qp.setPen(QPen(QColor("#15181C"), 1))
+        # Faces ordered back→front with increasing brightness for depth.
+        qp.setBrush(QColor(side).darker(150)); qp.drawPolygon(QPolygonF([bl, br, brt, blt]))   # back (darkest)
+        qp.setBrush(QColor(side).darker(118)); qp.drawPolygon(QPolygonF([bl, fl, flt, blt]))   # left
         qp.drawPolygon(QPolygonF([br, fr_, frt, brt]))                                         # right
-        qp.setBrush(QColor(side).darker(108)); qp.drawPolygon(QPolygonF([fl, fr_, frt, flt]))  # front
-        qp.setBrush(QColor(top)); qp.drawPolygon(QPolygonF([blt, brt, frt, flt]))              # top
+        qp.setBrush(QColor(side).darker(132)); qp.drawPolygon(QPolygonF([fl, fr_, frt, flt]))  # front
+        qp.setBrush(QColor(top).lighter(112)); qp.drawPolygon(QPolygonF([blt, brt, frt, flt])) # top (lightest)
         return True
 
     def _draw_box(self, qp, view, ahead, lateral, v):
