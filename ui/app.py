@@ -3,32 +3,15 @@ import os
 import logging
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QWidget, QStackedWidget, QFrame,
+    QWidget, QStackedWidget, QFrame, QScrollArea,
 )
 from PyQt6.QtCore import QTimer, Qt
 
 from ui.settings_menu import SettingsMenu
 from ui.map_page import MapPage
-# LogPage is imported lazily inside _add() below to avoid a module-load
-# circular import (ui.log_panel imports Page from this module).
 
-# Clean light theme (ETS2LA-style: white surfaces, green accent).
-ACCENT = "#10B981"
-LIGHT_THEME = """
-QMainWindow { background-color: #F4F6F8; }
-QWidget { background-color: #F4F6F8; color: #1A1D21; font-family: 'Segoe UI', sans-serif; }
-QPushButton { background-color: #FFFFFF; border: 1px solid #DfE3E8; border-radius: 8px; padding: 10px; color: #374151; }
-QPushButton:hover { border-color: #10B981; color: #065F46; }
-QPushButton:pressed { background-color: #10B981; color: #FFFFFF; }
-QLabel { color: #1A1D21; }
-QFrame#Sidebar { background-color: #FFFFFF; border-right: 1px solid #E5E7EB; }
-QComboBox, QLineEdit { background-color: #FFFFFF; border: 1px solid #DfE3E8; border-radius: 8px; padding: 7px; }
-QCheckBox { spacing: 8px; }
-QSlider::groove:horizontal { height: 6px; background: #E5E7EB; border-radius: 3px; }
-QSlider::handle:horizontal { background: #10B981; width: 16px; margin: -6px 0; border-radius: 8px; }
-QStatusBar { background-color: #FFFFFF; border-top: 1px solid #E5E7EB; }
-"""
-DARK_THEME = LIGHT_THEME  # kept for backwards-compatible references
+# All theming comes from core.theme.stylesheet() applied in UltraPilotApp; the
+# old inline LIGHT_THEME/DARK_THEME strings here were dead code (never applied).
 
 
 class Page(QWidget):
@@ -43,19 +26,27 @@ class Page(QWidget):
 class AboutPage(Page):
     def __init__(self, state):
         super().__init__(state)
-        title = QLabel("ℹ️ About UltraPilot")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #065F46; margin-bottom: 20px;")
-        self.layout.addWidget(title)
-        text = QLabel(
+        from core.theme import palette
+        self._pal = palette(state.get("ui_theme", "light") or "light")
+        self.title = QLabel("ℹ️ About UltraPilot")
+        self.title.setStyleSheet("font-size: 24px; font-weight: bold; color: " + self._pal['title'] + "; margin-bottom: 20px;")
+        self.layout.addWidget(self.title)
+        self.text = QLabel(
             "UltraPilot\n\n"
             "A professional-grade autopilot for Euro Truck Simulator 2.\n"
             "Lane Assist, Adaptive Cruise Control, Collision Avoidance, "
             "Navigation, HUD and Voice — each plugin isolated in its own process."
         )
-        text.setWordWrap(True)
-        text.setStyleSheet("font-size: 16px;")
-        self.layout.addWidget(text)
+        self.text.setWordWrap(True)
+        self.text.setStyleSheet("font-size: 16px; color: " + self._pal['text'] + ";")
+        self.layout.addWidget(self.text)
         self.layout.addStretch()
+
+    def restyle(self, theme):
+        from core.theme import palette
+        self._pal = palette(theme)
+        self.title.setStyleSheet("font-size: 24px; font-weight: bold; color: " + self._pal['title'] + "; margin-bottom: 20px;")
+        self.text.setStyleSheet("font-size: 16px; color: " + self._pal['text'] + ";")
 
 
 class PluginsPage(Page):
@@ -143,8 +134,9 @@ class PluginsPage(Page):
         def render():
             enabled = self.state.get(f"plugin_enabled.{name}", True)
             btn.setText("● ENABLED" if enabled else "○ DISABLED")
+            bg = self._pal['success'] if enabled else self._pal['muted']
             btn.setStyleSheet(
-                f"background-color:{'#10B981' if enabled else '#9CA3AF'}; color:#FFFFFF;"
+                f"background-color:{bg}; color:#FFFFFF;"
                 "border:none; border-radius:8px; padding:8px; font-weight:700;")
 
         def toggle():
@@ -180,7 +172,7 @@ class DashboardPage(Page):
 
         ap_head = QHBoxLayout()
         self.ap_dot = QLabel("●")
-        self.ap_dot.setStyleSheet("font-size: 22px; color: #9CA3AF; border:none;")
+        self.ap_dot.setStyleSheet("font-size: 22px; color: " + self._pal['muted'] + "; border:none;")
         ap_head.addWidget(self.ap_dot)
         self.ap_title = QLabel("Autopilot vypnutý")
         self.ap_title.setStyleSheet("font-size: 20px; font-weight: bold; color: " + self._pal['text'] + "; border:none;")
@@ -211,7 +203,7 @@ class DashboardPage(Page):
         # --- Live telemetry grid (gear / rpm / fuel / limit / nav) ---
         self.metrics = {}
         grid_frame = QFrame()
-        grid_frame.setStyleSheet("background-color: " + self._pal['card'] + "; border: 1px solid " + self._pal['border'] + "; border-radius: 12px;")
+        grid_frame.setObjectName("Card")
         grid = QHBoxLayout(grid_frame)
         grid.setContentsMargins(8, 12, 8, 12)
         for key, icon, label in [("gear", "⚙️", "PREVOD"), ("rpm", "🔧", "OTÁČKY"),
@@ -220,9 +212,9 @@ class DashboardPage(Page):
             col = QVBoxLayout()
             col.setSpacing(2)
             cap = QLabel(f"{icon}  {label}")
-            cap.setStyleSheet("color: #6B7280; font-size: 11px; font-weight: bold; border:none;")
+            cap.setStyleSheet("color: " + self._pal['muted'] + "; font-size: 11px; font-weight: bold; border:none;")
             val = QLabel("—")
-            val.setStyleSheet("color: #111827; font-size: 22px; font-weight: bold; border:none;")
+            val.setStyleSheet("color: " + self._pal['text'] + "; font-size: 22px; font-weight: bold; border:none;")
             col.addWidget(cap)
             col.addWidget(val)
             grid.addLayout(col)
@@ -230,7 +222,7 @@ class DashboardPage(Page):
         self.layout.addWidget(grid_frame)
 
         self.conn_val = QLabel("● Čakám na telemetriu z hry…")
-        self.conn_val.setStyleSheet("color: #9CA3AF; font-size: 12px; margin-top: 6px;")
+        self.conn_val.setStyleSheet("color: " + self._pal['muted'] + "; font-size: 12px; margin-top: 6px;")
         self.layout.addWidget(self.conn_val)
 
         self.layout.addStretch()
@@ -262,16 +254,19 @@ class DashboardPage(Page):
             self.ap_title.setStyleSheet("font-size: 20px; font-weight: bold; color: " + self._pal['title'] + "; border:none;")
             self.ap_state.setText(str(sysstate))
             self.ap_state.setStyleSheet("color: " + self._pal['success'] + "; font-size: 12px; font-weight: 700; border:none;")
+            # Active = ETS2LA hero gradient (green-tinted) with an accent border.
             self.ap_card.setStyleSheet(
-                "#ApCard { background-color: " + self._pal['card2'] + "; border: 1px solid " + self._pal['accent2'] + "; "
-                "border-radius: 16px; }")
+                "#ApCard { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,"
+                " stop:0 " + self._pal['card2'] + ", stop:1 " + self._pal['hero_b'] + ");"
+                " border: 1px solid " + self._pal['accent2'] + "; border-radius: 16px; }")
             self.speed_val.setStyleSheet("font-size: 56px; font-weight: bold; color: " + self._pal['title'] + "; border:none;")
         else:
-            self.ap_dot.setStyleSheet("font-size: 22px; color: #9CA3AF; border:none;")
+            self.ap_dot.setStyleSheet("font-size: 22px; color: " + self._pal['muted'] + "; border:none;")
             self.ap_title.setText("Autopilot vypnutý")
             self.ap_title.setStyleSheet("font-size: 20px; font-weight: bold; color: " + self._pal['text'] + "; border:none;")
             self.ap_state.setText("MANUÁL")
             self.ap_state.setStyleSheet("color: " + self._pal['muted'] + "; font-size: 12px; font-weight: 700; border:none;")
+            # Inactive = calm flat card with a soft border.
             self.ap_card.setStyleSheet(
                 "#ApCard { background-color: " + self._pal['card'] + "; border: 1px solid " + self._pal['border'] + "; "
                 "border-radius: 16px; }")
@@ -295,10 +290,10 @@ class DashboardPage(Page):
         raw = (self.state.get("telemetry", {}) or {}).get("raw", {}) or {}
         if raw.get("sdkActive"):
             self.conn_val.setText("● Telemetria pripojená")
-            self.conn_val.setStyleSheet("color: #34C759; font-size: 12px; margin-top: 6px;")
+            self.conn_val.setStyleSheet("color: " + self._pal['success'] + "; font-size: 12px; margin-top: 6px;")
         else:
             self.conn_val.setText("● Čakám na telemetriu z hry…")
-            self.conn_val.setStyleSheet("color: #8E8E93; font-size: 12px; margin-top: 6px;")
+            self.conn_val.setStyleSheet("color: " + self._pal['muted'] + "; font-size: 12px; margin-top: 6px;")
 
 
 class UltraPilotApp(QMainWindow):
@@ -312,8 +307,9 @@ class UltraPilotApp(QMainWindow):
         self.setWindowTitle("UltraPilot")
         self.resize(1000, 640)
         self.setMinimumSize(880, 560)
-        from core.theme import stylesheet
+        from core.theme import stylesheet, palette
         self._theme = (state.get("ui_theme", "light") or "light")
+        self._pal = palette(self._theme)
         self.setStyleSheet(stylesheet(self._theme))
         # Window + taskbar icon. On Windows the taskbar icon only shows if we
         # set an explicit AppUserModelID before any window appears.
@@ -363,7 +359,7 @@ class UltraPilotApp(QMainWindow):
         brand_txt = QVBoxLayout()
         brand_txt.setSpacing(0)
         word = QLabel("UltraPilot")
-        word.setStyleSheet("font-size: 18px; font-weight: 800; color: #065F46; border:none;")
+        word.setStyleSheet("font-size: 18px; font-weight: 800; color: " + self._pal['title'] + "; border:none;")
         brand_txt.addWidget(word)
         # The update checker widget lives where „Pro Edition“ used to — it shows
         # the current version and an Update button when a newer release exists.
@@ -394,7 +390,7 @@ class UltraPilotApp(QMainWindow):
         # Sidebar footer: live connection + autopilot indicator.
         self.side_conn = QLabel("● Čakám na hru")
         self.side_conn.setStyleSheet(
-            "color: #9CA3AF; font-size: 11px; font-weight: 600; border:none; "
+            "color: " + self._pal['muted'] + "; font-size: 11px; font-weight: 600; border:none; "
             "padding: 10px 18px;")
         sb.addWidget(self.side_conn)
 
@@ -405,9 +401,9 @@ class UltraPilotApp(QMainWindow):
         self.perf_btn.setFixedSize(34, 28)
         self.perf_btn.setToolTip("Performance")
         self.perf_btn.setStyleSheet(
-            "QPushButton{background:transparent;border:1px solid #3D4654;"
-            "border-radius:8px;color:#9CA3AF;font-size:16px;font-weight:700;}"
-            "QPushButton:hover{border-color:#10B981;color:#10B981;}")
+            "QPushButton{background:transparent;border:1px solid " + self._pal['border'] + ";"
+            "border-radius:8px;color:" + self._pal['muted'] + ";font-size:16px;font-weight:700;}"
+            "QPushButton:hover{border-color:" + self._pal['title'] + ";color:" + self._pal['title'] + ";}")
         # Black/white style toggle kept minimal — colour flips with state below.
         self.perf_btn.clicked.connect(self.toggle_perf_overlay)
         sb.addWidget(self.perf_btn)
@@ -417,7 +413,15 @@ class UltraPilotApp(QMainWindow):
         # Build each page defensively so one broken page can't stop the app.
         def _add(factory, name):
             try:
-                self.pages.addWidget(factory())
+                page = factory()
+                # Wrap every page in a scroll area so tall content (Plugins,
+                # Settings) is reachable instead of clipped at the window edge.
+                scroll = QScrollArea()
+                scroll.setWidgetResizable(True)
+                scroll.setFrameShape(QFrame.Shape.NoFrame)
+                scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                scroll.setWidget(page)
+                self.pages.addWidget(scroll)
             except Exception as e:
                 logging.error("UI page '%s' failed: %s", name, e)
                 err = QLabel(f"{name} unavailable:\n{e}")
@@ -429,7 +433,6 @@ class UltraPilotApp(QMainWindow):
         _add(lambda: MapPage(state), "Navigation")
         _add(lambda: VisualizationPage(state), "Visualization")
         _add(lambda: PluginsPage(state), "Plugins")
-        _add(lambda: __import__("ui.log_panel", fromlist=["LogPage"]).LogPage(state), "Log")
         _add(lambda: SettingsMenu(state), "Settings")
         _add(lambda: AboutPage(state), "About")
         main_layout.addWidget(self.pages)
@@ -437,7 +440,6 @@ class UltraPilotApp(QMainWindow):
         self.start_btn = QPushButton("▶ ZAPNÚŤ AUTOPILOT")
         self.start_btn.clicked.connect(self.toggle_autopilot)
         self.statusBar().addWidget(self.start_btn)
-        self.statusBar().setStyleSheet("background-color: #FFFFFF; color: #6B7280;")
         self._render_start_btn()
 
         self.timer = QTimer()
@@ -448,10 +450,10 @@ class UltraPilotApp(QMainWindow):
         active = self.state.get("autopilot_active", False)
         if active:
             self.start_btn.setText("■ VYPNÚŤ AUTOPILOT")
-            self.start_btn.setStyleSheet("background-color: #EF4444; color: #FFFFFF; font-weight: bold; padding: 8px 18px; border-radius: 8px;")
+            self.start_btn.setStyleSheet("background-color: " + self._pal['danger'] + "; color: #FFFFFF; font-weight: bold; padding: 8px 18px; border-radius: 8px;")
         else:
             self.start_btn.setText("▶ ZAPNÚŤ AUTOPILOT")
-            self.start_btn.setStyleSheet("background-color: #10B981; color: #FFFFFF; font-weight: bold; padding: 8px 18px; border-radius: 8px;")
+            self.start_btn.setStyleSheet("background-color: " + self._pal['success'] + "; color: #FFFFFF; font-weight: bold; padding: 8px 18px; border-radius: 8px;")
 
     def toggle_autopilot(self):
         current = self.state.get("autopilot_active", False)
@@ -468,17 +470,17 @@ class UltraPilotApp(QMainWindow):
             if self.perf_overlay.isVisible():
                 self.perf_overlay.hide()
                 self.perf_btn.setStyleSheet(
-                    "QPushButton{background:transparent;border:1px solid #3D4654;"
-                    "border-radius:8px;color:#9CA3AF;font-size:16px;font-weight:700;}"
-                    "QPushButton:hover{border-color:#10B981;color:#10B981;}")
+                    "QPushButton{background:transparent;border:1px solid " + self._pal['border'] + ";"
+                    "border-radius:8px;color:" + self._pal['muted'] + ";font-size:16px;font-weight:700;}"
+                    "QPushButton:hover{border-color:" + self._pal['title'] + ";color:" + self._pal['title'] + ";}")
             else:
                 self.perf_overlay.show()
                 self.perf_overlay.refresh()
-                # Active state: filled black/white-ish chip.
+                # Active state: filled accent chip.
                 self.perf_btn.setStyleSheet(
-                    "QPushButton{background:#111827;color:#FFFFFF;"
-                    "border:1px solid #111827;border-radius:8px;font-size:16px;font-weight:700;}"
-                    "QPushButton:hover{border-color:#10B981;}")
+                    "QPushButton{background:" + self._pal['card2'] + ";color:#FFFFFF;"
+                    "border:1px solid " + self._pal['border'] + ";border-radius:8px;font-size:16px;font-weight:700;}"
+                    "QPushButton:hover{border-color:" + self._pal['title'] + ";}")
         except Exception as e:
             logging.warning("perf overlay toggle failed: %s", e)
 
@@ -500,19 +502,31 @@ class UltraPilotApp(QMainWindow):
         new_theme = self.state.get("ui_theme", "light") or "light"
         if new_theme != getattr(self, "_theme", None):
             self._theme = new_theme
-            from core.theme import stylesheet
+            from core.theme import stylesheet, palette
+            self._pal = palette(new_theme)
             self.setStyleSheet(stylesheet(new_theme))
+            # Re-render the chrome widgets that cache colours from the palette
+            # (brand wordmark, hamburger, sidebar footer, start button).
+            self._render_start_btn()
+            if hasattr(self, "side_conn"):
+                # refresh() will re-apply the right footer state colours.
+                pass
             # Re-style every page that keeps its own colour cache so dark/light
             # actually applies to their cards and labels (not just the window).
             # Index-agnostic: any page exposing restyle(theme) gets refreshed.
             for idx in range(self.pages.count()):
                 pg = self.pages.widget(idx)
+                # Pages are now wrapped in a QScrollArea; reach the inner widget.
+                if isinstance(pg, QScrollArea):
+                    pg = pg.widget()
                 if pg is not None and hasattr(pg, "restyle"):
                     try:
                         pg.restyle(new_theme)
                     except Exception:
                         pass
         dash = self.pages.widget(0)
+        if isinstance(dash, QScrollArea):
+            dash = dash.widget()
         if isinstance(dash, DashboardPage):
             dash.refresh()
         self._render_start_btn()
@@ -523,15 +537,15 @@ class UltraPilotApp(QMainWindow):
         if active:
             self.side_conn.setText("● Autopilot aktívny")
             self.side_conn.setStyleSheet(
-                "color: #10B981; font-size: 11px; font-weight: 700; border:none; padding: 10px 18px;")
+                "color: " + self._pal['title'] + "; font-size: 11px; font-weight: 700; border:none; padding: 10px 18px;")
         elif connected:
             self.side_conn.setText("● Hra pripojená")
             self.side_conn.setStyleSheet(
-                "color: #34C759; font-size: 11px; font-weight: 600; border:none; padding: 10px 18px;")
+                "color: " + self._pal['success'] + "; font-size: 11px; font-weight: 600; border:none; padding: 10px 18px;")
         else:
             self.side_conn.setText("● Čakám na hru")
             self.side_conn.setStyleSheet(
-                "color: #9CA3AF; font-size: 11px; font-weight: 600; border:none; padding: 10px 18px;")
+                "color: " + self._pal['muted'] + "; font-size: 11px; font-weight: 600; border:none; padding: 10px 18px;")
 
 
 if __name__ == "__main__":

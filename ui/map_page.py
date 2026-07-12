@@ -63,8 +63,18 @@ class MapView(QWidget):
         self.state = state
         self.route_points = []   # [(x, z), ...] drawn route (loaded for display)
         self.road_net = None     # RoadNetwork (when a map is downloaded + loaded)
+        self._pal = None         # set by the page (or a default below)
         self.setMinimumHeight(300)
-        self.setStyleSheet("background-color: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 10px;")
+        self.apply_theme()
+
+    def apply_theme(self):
+        """Apply the palette background/border. Called on init + theme switch."""
+        from core.theme import palette
+        if self._pal is None:
+            self._pal = palette(self.state.get("ui_theme", "light") or "light")
+        self.setStyleSheet(
+            "background-color: " + self._pal['card'] + ";"
+            " border: 1px solid " + self._pal['border'] + "; border-radius: 10px;")
 
     def set_route(self, points):
         self.route_points = points or []
@@ -91,7 +101,7 @@ class MapView(QWidget):
         pts = list(self.route_points)
         all_pts = pts + ([truck] if truck else [])
         if not all_pts:
-            qp.setPen(QColor("#9CA3AF"))
+            qp.setPen(QColor(self._pal['muted']))
             qp.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
                         "No route loaded.\nRecord or load a route below.")
             return
@@ -177,26 +187,29 @@ class MapPage(QWidget):
     def __init__(self, state):
         super().__init__()
         self.state = state
+        from core.theme import palette
+        self._pal = palette(state.get("ui_theme", "light") or "light")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(30, 30, 30, 30)
         layout.setSpacing(15)
 
-        title = QLabel("🗺️ Navigation")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #065F46;")
-        layout.addWidget(title)
+        self.title = QLabel("🗺️ Navigation")
+        self.title.setStyleSheet("font-size: 24px; font-weight: bold; color: " + self._pal['title'] + ";")
+        layout.addWidget(self.title)
 
         self.view = MapView(state)
+        self.view._pal = self._pal
+        self.view.apply_theme()
         layout.addWidget(self.view)
 
         self.status = QLabel("Idle.")
-        self.status.setStyleSheet("color: #6B7280;")
+        self.status.setStyleSheet("color: " + self._pal['muted'] + ";")
         layout.addWidget(self.status)
 
         # --- Record row ---
         rec_row = QHBoxLayout()
         self.name_edit = QLineEdit()
         self.name_edit.setPlaceholderText("route name")
-        self.name_edit.setStyleSheet("background:#FFFFFF; border:1px solid #DfE3E8; border-radius:8px; padding:6px;")
         btn_rec = QPushButton("● Record")
         btn_stop_rec = QPushButton("■ Stop & Save")
         btn_rec.clicked.connect(self.start_record)
@@ -209,7 +222,6 @@ class MapPage(QWidget):
         # --- Replay row ---
         play_row = QHBoxLayout()
         self.route_combo = QComboBox()
-        self.route_combo.setStyleSheet("background:#FFFFFF; border:1px solid #DfE3E8; border-radius:8px; padding:6px;")
         btn_load = QPushButton("▶ Load & Navigate")
         btn_clear = QPushButton("⏹ Stop Nav")
         btn_load.clicked.connect(self.load_route)
@@ -220,12 +232,11 @@ class MapPage(QWidget):
         layout.addLayout(play_row)
 
         # --- Map data (ETS2 / ProMods / versions) ---
-        map_title = QLabel("Map data")
-        map_title.setStyleSheet("font-size: 15px; font-weight: bold; color: #0F766E; margin-top: 8px;")
-        layout.addWidget(map_title)
+        self.map_title = QLabel("Map data")
+        self.map_title.setStyleSheet("font-size: 15px; font-weight: bold; color: " + self._pal['title'] + "; margin-top: 8px;")
+        layout.addWidget(self.map_title)
         map_row = QHBoxLayout()
         self.map_combo = QComboBox()
-        self.map_combo.setStyleSheet("background:#FFFFFF; border:1px solid #DfE3E8; border-radius:8px; padding:6px;")
         self.map_combo.currentIndexChanged.connect(self._on_map_selected)
         self.btn_dl = QPushButton("⬇ Download map")
         self.btn_dl.clicked.connect(self.download_map)
@@ -234,14 +245,14 @@ class MapPage(QWidget):
         layout.addLayout(map_row)
         self.active_map_lbl = QLabel("Aktívna mapa: —")
         self.active_map_lbl.setStyleSheet(
-            "color:#FFFFFF; background:#0F766E; font-size:14px; font-weight:700;"
+            "color:#FFFFFF; background:" + self._pal['title'] + "; font-size:14px; font-weight:700;"
             "border-radius:8px; padding:8px 12px;")
         layout.addWidget(self.active_map_lbl)
         self.dl_bar = QProgressBar()
         self.dl_bar.setVisible(False)
         layout.addWidget(self.dl_bar)
         self.dl_status = QLabel("")
-        self.dl_status.setStyleSheet("color: #6B7280; font-size: 12px;")
+        self.dl_status.setStyleSheet("color: " + self._pal['muted'] + "; font-size: 12px;")
         layout.addWidget(self.dl_status)
 
         layout.addStretch()
@@ -255,6 +266,20 @@ class MapPage(QWidget):
         self.timer.timeout.connect(self.refresh)
         self.timer.start(150)
         self._last_routes = None
+
+    def restyle(self, theme):
+        """Re-apply palette colours when the theme switches (dark ↔ light)."""
+        from core.theme import palette
+        self._pal = palette(theme)
+        self.title.setStyleSheet("font-size: 24px; font-weight: bold; color: " + self._pal['title'] + ";")
+        self.status.setStyleSheet("color: " + self._pal['muted'] + ";")
+        self.map_title.setStyleSheet("font-size: 15px; font-weight: bold; color: " + self._pal['title'] + "; margin-top: 8px;")
+        self.active_map_lbl.setStyleSheet(
+            "color:#FFFFFF; background:" + self._pal['title'] + "; font-size:14px; font-weight:700;"
+            "border-radius:8px; padding:8px 12px;")
+        self.dl_status.setStyleSheet("color: " + self._pal['muted'] + "; font-size: 12px;")
+        self.view._pal = self._pal
+        self.view.apply_theme()
 
     # --- Map data -------------------------------------------------------------
     def _populate_maps(self):

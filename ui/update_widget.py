@@ -111,8 +111,8 @@ class UpdateCheckerWidget(QWidget):
         QTimer.singleShot(2500, self.check)
 
     def _build(self):
-        # Vertical layout so the version line + button stack neatly under the
-        # wordmark and neither gets clipped by the 210px sidebar.
+        # Vertical layout so each element gets its own row and nothing is
+        # squeezed by the 210px sidebar (button full-width, progress below).
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 2, 0, 4)
         lay.setSpacing(4)
@@ -122,26 +122,24 @@ class UpdateCheckerWidget(QWidget):
         top.setSpacing(6)
         self.version_lbl = QLabel(self._version_text())
         self.version_lbl.setStyleSheet("font-size: 11px; font-weight: 600; color: #9CA3AF; border:none;")
+        self.version_lbl.setWordWrap(True)
         top.addWidget(self.version_lbl)
         top.addStretch()
         self.spinner = Spinner(size=14)
         self.spinner.hide()
         top.addWidget(self.spinner)
         lay.addLayout(top)
-        # Button row.
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(6)
-        self.btn = QPushButton("Skontrolovať aktualizáciu")
+        # Button (full width, short label so it fits the narrow sidebar).
+        self.btn = QPushButton("Aktualizácia")
         self.btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._apply_btn_style()
         self.btn.clicked.connect(self.check)
-        row.addWidget(self.btn)
+        lay.addWidget(self.btn)
+        # Progress bar on its own row below the button.
         self.progress = QProgressBar()
         self.progress.setFixedHeight(8)
         self.progress.setVisible(False)
-        row.addWidget(self.progress)
-        lay.addLayout(row)
+        lay.addWidget(self.progress)
 
     def _apply_btn_style(self, update_available=False):
         """Neutral 'check' look, or green 'update' look when one is available."""
@@ -187,7 +185,7 @@ class UpdateCheckerWidget(QWidget):
             self.btn.clicked.connect(self._confirm_update)
         else:
             self.version_lbl.setText(self._version_text() + "  ·  aktuálna")
-            self.btn.setText("Skontrolovať aktualizáciu")
+            self.btn.setText("Aktualizácia")
             self._apply_btn_style(update_available=False)
             try:
                 self.btn.clicked.disconnect()
@@ -230,7 +228,7 @@ class UpdateCheckerWidget(QWidget):
         else:
             self.version_lbl.setText("Aktualizácia zlyhala — skús znova.")
             self.btn.show()
-            self.btn.setText("Skontrolovať aktualizáciu")
+            self.btn.setText("Aktualizácia")
             try:
                 self.btn.clicked.disconnect()
             except Exception:

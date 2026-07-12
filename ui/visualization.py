@@ -71,30 +71,39 @@ class _GlassIsland(QWidget):
     def __init__(self, state):
         super().__init__()
         self.state = state
+        from core.theme import palette
+        self._pal = palette(state.get("ui_theme", "light") or "light")
         self.setMinimumHeight(170)
 
     def paintEvent(self, event):
         qp = QPainter(self)
         qp.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
+        pal = self._pal
 
         # Pull live data.
         dist_m = self.state.get("distance_to_dest")
         speed = self.state.get("truck_speed_ms", 0.0) or 0.0
         nav = bool(self.state.get("nav_active"))
 
-        # Layered translucent rounded rects = frosted-glass look.
+        # Layered translucent rounded rects = frosted-glass look. Use the
+        # palette's card colour as the base so the island matches the theme
+        # (was hardcoded white — wrong in dark mode).
         island = QRectF(w / 2 - 230, h / 2 - 70, 460, 140)
-        for i, a in enumerate((40, 70, 235)):
-            qp.setBrush(QColor(255, 255, 255, a))
-            qp.setPen(QPen(QColor(255, 255, 255, 90), 1))
+        base = QColor(pal['card'])
+        for i, a in enumerate((60, 110, 235)):
+            c = QColor(base.red(), base.green(), base.blue(), a)
+            qp.setBrush(c)
+            qp.setPen(QPen(QColor(base.red(), base.green(), base.blue(), 90), 1))
             qp.drawRoundedRect(island.adjusted(-i * 4, -i * 4, i * 4, i * 4), 34, 34)
-        qp.setPen(QPen(QColor(16, 185, 129, 120), 2))
+        accent = QColor(pal['title'])
+        accent.setAlpha(140)
+        qp.setPen(QPen(accent, 2))
         qp.setBrush(Qt.BrushStyle.NoBrush)
         qp.drawRoundedRect(island, 34, 34)
 
         if not nav or dist_m is None:
-            qp.setPen(QColor("#6B7280"))
+            qp.setPen(QColor(pal['muted']))
             qp.setFont(QFont("Segoe UI", 14))
             qp.drawText(island, Qt.AlignmentFlag.AlignCenter,
                         "No active navigation.\nLoad a route or a map.")
@@ -112,21 +121,21 @@ class _GlassIsland(QWidget):
             eta_txt, rem_txt = "—", "—"
 
         # ETA (big, left).
-        qp.setPen(QColor("#111827"))
+        qp.setPen(QColor(pal['text']))
         qp.setFont(QFont("Segoe UI", 34, QFont.Weight.Bold))
         qp.drawText(QRectF(island.left() + 30, island.top() + 26, 200, 50),
                     Qt.AlignmentFlag.AlignLeft, eta_txt)
-        qp.setPen(QColor("#6B7280"))
+        qp.setPen(QColor(pal['muted']))
         qp.setFont(QFont("Segoe UI", 11))
         qp.drawText(QRectF(island.left() + 32, island.top() + 78, 200, 20),
                     Qt.AlignmentFlag.AlignLeft, "predpokladaný príchod")
 
         # Distance + remaining time (right).
-        qp.setPen(QColor("#10B981"))
+        qp.setPen(QColor(pal['title']))
         qp.setFont(QFont("Segoe UI", 26, QFont.Weight.Bold))
         qp.drawText(QRectF(island.right() - 220, island.top() + 28, 190, 40),
                     Qt.AlignmentFlag.AlignRight, f"{dist_km:.1f} km")
-        qp.setPen(QColor("#374151"))
+        qp.setPen(QColor(pal['text']))
         qp.setFont(QFont("Segoe UI", 13))
         qp.drawText(QRectF(island.right() - 220, island.top() + 72, 190, 24),
                     Qt.AlignmentFlag.AlignRight, f"⏱ {rem_txt}")
@@ -346,18 +355,20 @@ class VisualizationPage(QWidget):
     def __init__(self, state):
         super().__init__()
         self.state = state
+        from core.theme import palette
+        self._pal = palette(state.get("ui_theme", "light") or "light")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(30, 30, 30, 30)
-        title = QLabel("🛰️ Visualization")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #065F46;")
-        lay.addWidget(title)
+        self.title = QLabel("🛰️ Visualization")
+        self.title.setStyleSheet("font-size: 24px; font-weight: bold; color: " + self._pal['title'] + ";")
+        lay.addWidget(self.title)
 
-        sub = QLabel("Ľavý HUD panel — rovnaká 3D scéna, ktorá sa vykresľuje cez hru. "
+        self.sub = QLabel("Ľavý HUD panel — rovnaká 3D scéna, ktorá sa vykresľuje cez hru. "
                      "Modrá čiara = plánovaná trasa, sivé modely = okolité vozidlá, "
                      "semafor s odpočtom.")
-        sub.setStyleSheet("color:#6B7280; font-size:13px;")
-        sub.setWordWrap(True)
-        lay.addWidget(sub)
+        self.sub.setStyleSheet("color: " + self._pal['muted'] + "; font-size:13px;")
+        self.sub.setWordWrap(True)
+        lay.addWidget(self.sub)
 
         # Live preview of the left-side driving HUD. Prefer the real GPU 3D
         # renderer; fall back to the 2D QPainter preview if OpenGL is missing.
@@ -373,6 +384,7 @@ class VisualizationPage(QWidget):
         lay.addWidget(self.hud_preview, stretch=1)
 
         self.island = _GlassIsland(state)
+        self.island._pal = self._pal
         lay.addWidget(self.island)
         lay.addStretch()
         self.timer = QTimer()
@@ -381,3 +393,11 @@ class VisualizationPage(QWidget):
             self.timer.timeout.connect(self.hud_preview.update)
         self.timer.timeout.connect(self.island.update)
         self.timer.start(120)
+
+    def restyle(self, theme):
+        """Re-apply palette colours when the theme switches (dark ↔ light)."""
+        from core.theme import palette
+        self._pal = palette(theme)
+        self.title.setStyleSheet("font-size: 24px; font-weight: bold; color: " + self._pal['title'] + ";")
+        self.sub.setStyleSheet("color: " + self._pal['muted'] + "; font-size:13px;")
+        self.island._pal = self._pal

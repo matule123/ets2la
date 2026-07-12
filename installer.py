@@ -80,12 +80,13 @@ SUCCESS_DARK = "#16A34A"    # darker green for done step badges (white text cont
 DANGER = "#EF4444"
 WARN = "#F59E0B"
 
-DARK = {"bg": "#1E232B", "bg2": "#252B34", "card": "#2C333D", "card2": "#353D48",
-        "text": "#E6E8EB", "muted": "#9AA4B2", "border": "#3D4654",
-        "title": "#34D399", "field": "#232932", "glow": "rgba(16,185,129,0.35)"}
+# GitHub-style black + neutral grey dark palette (no blue tint).
+DARK = {"bg": "#0D1117", "bg2": "#161B22", "card": "#161B22", "card2": "#21262D",
+        "text": "#E6EDF3", "muted": "#8B949E", "border": "#30363D",
+        "title": "#2EA043", "field": "#0D1117", "glow": "rgba(46,160,67,0.35)"}
 LIGHT = {"bg": "#F4F6F9", "bg2": "#FFFFFF", "card": "#FFFFFF", "card2": "#EEF2F6",
          "text": "#0F172A", "muted": "#64748B", "border": "#E2E8F0",
-         "title": "#047857", "field": "#FFFFFF", "glow": "rgba(16,185,129,0.20)"}
+         "title": "#047857", "field": "#FFFFFF", "glow": "rgba(46,160,67,0.20)"}
 
 
 def _qss(theme):
@@ -121,6 +122,9 @@ def _qss(theme):
         " QLabel#FeatDesc { font-size: 12px; color: " + c['muted'] + "; }"
         " QLabel#DiskOk { font-size: 12px; color: " + SUCCESS + "; font-weight: 600; }"
         " QLabel#DiskWarn { font-size: 12px; color: " + WARN + "; font-weight: 600; }"
+        " QLabel#VerBadge { font-size: 12px; font-weight: 700; color: " + c['title'] + ";"
+        " background: " + c['card2'] + "; border: 1px solid " + c['border'] + ";"
+        " border-radius: 10px; padding: 6px 14px; max-width: 380px; }"
         " #Card, #FeatCard { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
         " stop:0 " + c['card'] + ", stop:1 " + c['bg2'] + ");"
         " border: 1px solid " + c['border'] + "; border-radius: 12px; }"
@@ -1082,17 +1086,19 @@ class InstallerWindow(QWidget):
 
     def _build_step_rail_widget(self, parent_layout):
         rail = QWidget()
-        rail.setFixedHeight(50)
+        rail.setFixedHeight(64)
         h = QHBoxLayout(rail)
-        h.setContentsMargins(30, 10, 30, 10)
-        h.setSpacing(8)
+        h.setContentsMargins(30, 14, 30, 14)
+        h.setSpacing(10)
         self._step_labels = []
         steps = TR[self.lang]["steps"]
         for i, name in enumerate(steps):
             badge = QLabel(str(i + 1))
             badge.setObjectName("StepBadge")
-            # Bigger badge (28×28) so single glyphs and digits never clip.
-            badge.setFixedSize(28, 28)
+            # 34×34 badge with ample rail room (64px rail, 14+14 margins) so the
+            # circle never clips vertically — the old 28px badge in a 50px rail
+            # with 10+10 margins left only ~1px of breathing room.
+            badge.setFixedSize(34, 34)
             badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
             badge.setMargin(0)
             badge.setContentsMargins(0, 0, 0, 0)
@@ -1135,32 +1141,36 @@ class InstallerWindow(QWidget):
     # ----------------------------------------------------------------- pages
     def _build_welcome(self):
         scroll, lay = self._page_frame()
+        # Hero card: logo + title + description, framed for a strong first
+        # impression (instead of bare text at the top of the page).
+        hero = QFrame()
+        hero.setObjectName("Card")
+        hl = QHBoxLayout(hero)
+        hl.setContentsMargins(24, 20, 24, 20)
+        hl.setSpacing(18)
+        # Logo on the left.
+        logo_lbl = QLabel()
+        pm = QIcon(ICON_PATH).pixmap(64, 64)
+        if pm.isNull():
+            pm = QPixmap(LOGO_PATH).scaledToWidth(64, Qt.TransformationMode.SmoothTransformation)
+        logo_lbl.setPixmap(pm)
+        logo_lbl.setStyleSheet("border:none;")
+        hl.addWidget(logo_lbl)
+        # Title + description on the right.
+        hcol = QVBoxLayout()
+        hcol.setSpacing(4)
         title = QLabel(TR[self.lang]["welcome_t"])
         title.setObjectName("Title")
-        lay.addWidget(title)
-        # Version + commit badge under the title so the user always knows which
-        # build of the installer they're running (e.g. „Verzia 0.4.0 · a1b2c3d“).
-        commit = _installer_commit()
-        if commit:
-            ver_text = TR[self.lang].get(
-                "welcome_version", "Verzia {ver} · commit {commit}").format(
-                ver=APP_VERSION, commit=commit)
-        else:
-            ver_text = TR[self.lang].get(
-                "welcome_version_no_commit", "Verzia {ver}").format(ver=APP_VERSION)
-        ver_lbl = QLabel(ver_text)
-        ver_lbl.setStyleSheet(
-            "color:#34D399; font-size:12px; font-weight:700;"
-            " background:#252B34; border:1px solid #3D4654; border-radius:10px;"
-            " padding:4px 10px; margin-bottom:2px;")
-        ver_lbl.setMaximumWidth(360)
-        lay.addWidget(ver_lbl)
-        lay.addSpacing(4)
+        title.setStyleSheet("font-size:28px; font-weight:800; color:#2EA043; border:none;")
+        hcol.addWidget(title)
         desc = QLabel(TR[self.lang]["welcome_d"])
         desc.setObjectName("Desc")
         desc.setWordWrap(True)
-        lay.addWidget(desc)
-        lay.addSpacing(6)
+        desc.setStyleSheet("font-size:13px; color:#8B949E; border:none;")
+        hcol.addWidget(desc)
+        hl.addLayout(hcol, stretch=1)
+        lay.addWidget(hero)
+        lay.addSpacing(10)
 
         # Feature grid (2 columns).
         feat_title = QLabel(TR[self.lang]["feat_t"])
@@ -1240,6 +1250,21 @@ class InstallerWindow(QWidget):
         row.addStretch()
         lay.addLayout(row)
         lay.addStretch()
+        # Version + commit badge pinned to the bottom of the welcome page.
+        # Styled from the active palette so it adapts to dark/light (the old
+        # hardcoded dark style read as a black box in light mode).
+        commit = _installer_commit()
+        if commit:
+            ver_text = TR[self.lang].get(
+                "welcome_version", "Verzia {ver} · commit {commit}").format(
+                ver=APP_VERSION, commit=commit)
+        else:
+            ver_text = TR[self.lang].get(
+                "welcome_version_no_commit", "Verzia {ver}").format(ver=APP_VERSION)
+        self.ver_lbl = QLabel(ver_text)
+        self.ver_lbl.setObjectName("VerBadge")
+        self.ver_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self.ver_lbl)
         self.stack.addWidget(scroll)
 
     def _build_license(self):
@@ -1407,10 +1432,10 @@ class InstallerWindow(QWidget):
                     bg, fg, bd = c['card2'], c['muted'], c['border']
                 badge.setText(str(i + 1))
                 # Explicit font-size + padding + margin + radius keep the glyph
-                # fully inside the 28×28 badge (it used to clip at 24×24).
+                # fully inside the 34×34 badge (radius = half width = round).
                 badge.setStyleSheet(
                     "color:" + fg + "; background:" + bg + "; border:1px solid " + bd + ";"
-                    " border-radius:14px; font-size:13px; font-weight:700;"
+                    " border-radius:17px; font-size:15px; font-weight:700;"
                     " padding:0; margin:0;")
                 lbl.setStyleSheet("color:" + (c['title'] if active else c['muted']) +
                                   "; font-size:13px; font-weight:" + ("700" if active else "600") +

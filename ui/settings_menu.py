@@ -261,7 +261,7 @@ class SettingsMenu(QWidget):
         return ("QPushButton{background:" + p['card2'] + ";color:" + p['text'] +
                 ";border:1px solid " + p['border'] +
                 ";border-radius:8px;padding:6px 12px;font-size:12px;font-weight:600;}"
-                "QPushButton:hover{border-color:#10B981;color:#10B981;}")
+                "QPushButton:hover{border-color:" + p['title'] + ";color:" + p['title'] + ";}")
 
     def restyle(self, theme):
         """Re-apply colours when the theme changes (called by UltraPilotApp)."""
