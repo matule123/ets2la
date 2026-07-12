@@ -625,5 +625,8 @@ class UltraPilotHUD(QWidget):
 def run_hud(shared_state):
     app = QApplication(sys.argv)
     hud = UltraPilotHUD(shared_state)
-    hud.show()
+    # NOTE: do NOT call hud.show() here. The HUD starts hidden and the _tick()
+    # poll waits for the ``ui_ready`` shared-state flag (set by the main UI's
+    # showEvent) before showing itself. This guarantees the order
+    # splash → main app → HUD instead of the HUD flashing on first.
     sys.exit(app.exec())

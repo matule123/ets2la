@@ -18,7 +18,8 @@ import sys
 
 from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
 from PyQt6.QtGui import QPainter, QPen, QColor
-from PyQt6.QtWidgets import QWidget, QHBoxLayout, QLabel, QPushButton, QProgressBar, QMessageBox
+from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel,
+                             QPushButton, QProgressBar, QMessageBox)
 from PyQt6.QtCore import QThread, pyqtSignal
 
 
@@ -110,28 +111,50 @@ class UpdateCheckerWidget(QWidget):
         QTimer.singleShot(2500, self.check)
 
     def _build(self):
-        lay = QHBoxLayout(self)
+        # Vertical layout so the version line + button stack neatly under the
+        # wordmark and neither gets clipped by the 210px sidebar.
+        lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 2, 0, 4)
-        lay.setSpacing(6)
+        lay.setSpacing(4)
+        # Version + spinner row.
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(6)
         self.version_lbl = QLabel(self._version_text())
-        self.version_lbl.setStyleSheet("font-size: 10px; font-weight: 600; color: #9CA3AF; border:none;")
-        lay.addWidget(self.version_lbl)
-        lay.addStretch()
+        self.version_lbl.setStyleSheet("font-size: 11px; font-weight: 600; color: #9CA3AF; border:none;")
+        top.addWidget(self.version_lbl)
+        top.addStretch()
         self.spinner = Spinner(size=14)
         self.spinner.hide()
-        lay.addWidget(self.spinner)
-        self.btn = QPushButton("Skontrolovať")
+        top.addWidget(self.spinner)
+        lay.addLayout(top)
+        # Button row.
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        self.btn = QPushButton("Skontrolovať aktualizáciu")
         self.btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn.setStyleSheet(
-            "QPushButton{background:transparent;color:#9CA3AF;border:1px solid #3D4654;"
-            "border-radius:6px;padding:2px 8px;font-size:10px;font-weight:600;border:none;}"
-            "QPushButton:hover{color:" + ACCENT + ";}")
+        self._apply_btn_style()
         self.btn.clicked.connect(self.check)
-        lay.addWidget(self.btn)
+        row.addWidget(self.btn)
         self.progress = QProgressBar()
         self.progress.setFixedHeight(8)
         self.progress.setVisible(False)
-        lay.addWidget(self.progress)
+        row.addWidget(self.progress)
+        lay.addLayout(row)
+
+    def _apply_btn_style(self, update_available=False):
+        """Neutral 'check' look, or green 'update' look when one is available."""
+        if update_available:
+            self.btn.setStyleSheet(
+                "QPushButton{background:" + ACCENT + ";color:#FFFFFF;border:none;"
+                "border-radius:6px;padding:4px 10px;font-size:11px;font-weight:700;}"
+                "QPushButton:hover{background:#059669;}")
+        else:
+            self.btn.setStyleSheet(
+                "QPushButton{background:transparent;color:#9CA3AF;border:1px solid #3D4654;"
+                "border-radius:6px;padding:4px 10px;font-size:11px;font-weight:600;}"
+                "QPushButton:hover{color:" + ACCENT + ";border-color:" + ACCENT + ";}")
 
     def _version_text(self):
         t = "v" + self._version
@@ -153,8 +176,10 @@ class UpdateCheckerWidget(QWidget):
         self.spinner.hide()
         self.btn.show()
         if available and latest:
-            self.version_lbl.setText("Dostupná v" + str(latest))
+            # Show the remote commit short SHA so the user knows what's coming.
+            self.version_lbl.setText("Dostupná aktualizácia: " + str(latest))
             self.btn.setText("Aktualizovať")
+            self._apply_btn_style(update_available=True)
             try:
                 self.btn.clicked.disconnect()
             except Exception:
@@ -162,7 +187,8 @@ class UpdateCheckerWidget(QWidget):
             self.btn.clicked.connect(self._confirm_update)
         else:
             self.version_lbl.setText(self._version_text() + "  ·  aktuálna")
-            self.btn.setText("Skontrolovať")
+            self.btn.setText("Skontrolovať aktualizáciu")
+            self._apply_btn_style(update_available=False)
             try:
                 self.btn.clicked.disconnect()
             except Exception:
@@ -204,7 +230,7 @@ class UpdateCheckerWidget(QWidget):
         else:
             self.version_lbl.setText("Aktualizácia zlyhala — skús znova.")
             self.btn.show()
-            self.btn.setText("Skontrolovať")
+            self.btn.setText("Skontrolovať aktualizáciu")
             try:
                 self.btn.clicked.disconnect()
             except Exception:
@@ -212,10 +238,21 @@ class UpdateCheckerWidget(QWidget):
             self.btn.clicked.connect(self.check)
 
     def _restart(self):
-        """Re-launch the app (bootloader / main.py) and exit this process."""
+        """Re-launch the app (bootloader / main.py) and exit this process.
+
+        In a frozen (PyInstaller) build ``sys.executable`` IS the app exe and
+        must be launched without a script argument — the bootloader ignores
+        extra args and would just re-run the old bundled code. From source we
+        launch ``python main.py``."""
         try:
             from PyQt6.QtCore import QProcess
-            QProcess.startDetached(sys.executable, [os.path.join(_app_base(), "main.py")])
+            if getattr(sys, "frozen", False):
+                # Frozen: re-launch the exe itself (updated files are on disk).
+                QProcess.startDetached(sys.executable, [])
+            else:
+                # Source: run python with main.py from the project base.
+                main_py = os.path.join(_app_base(), "main.py")
+                QProcess.startDetached(sys.executable, [main_py])
         except Exception as e:
             logging.error("restart failed: %s", e)
         QApplication_exit()

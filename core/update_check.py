@@ -54,18 +54,62 @@ def git_commit() -> str:
 
 
 def latest_release() -> str | None:
-    """Latest release tag (without leading v/V) from GitHub, or None."""
+    """Latest release tag (without leading v/V) from GitHub, or None.
+
+    Falls back to the latest commit SHA on ``main`` when the repo has no
+    published releases (which is the common case during active development).
+
+    Never raises — on failure logs the reason and returns None so the caller
+    can show a clear status instead of silently reporting „up to date“."""
+    import requests
+    headers = {"Accept": "application/vnd.github+json"}
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     try:
-        import requests
-        r = requests.get(API_URL, timeout=6)
+        # 1) Try a published release first (works once you create one).
+        r = requests.get(API_URL, headers=headers, timeout=8)
         if r.status_code == 200:
-            return (r.json().get("tag_name") or "").lstrip("vV") or None
-    except Exception:
-        pass
+            tag = (r.json().get("tag_name") or "").lstrip("vV")
+            if tag:
+                return tag
+        elif r.status_code in (403, 429):
+            logging.warning("update check: GitHub API rate-limited (HTTP %s).",
+                            r.status_code)
+        # 404 here is expected (no releases yet) — not worth a warning.
+        # 2) No releases — use the latest commit SHA on main as the "version".
+        rc = requests.get(f"https://api.github.com/repos/{REPO}/commits/main",
+                          headers=headers, timeout=8)
+        if rc.status_code == 200:
+            return (rc.json().get("sha", "") or "")[:7] or None
+        elif rc.status_code in (403, 429):
+            logging.warning("update check: GitHub commits API rate-limited (HTTP %s).",
+                            rc.status_code)
+        else:
+            logging.warning("update check: commits API returned HTTP %s.",
+                            rc.status_code)
+    except Exception as e:
+        logging.warning("update check: network error — %s", e)
     return None
 
 
+def _looks_like_sha(s: str) -> bool:
+    """True if ``s`` looks like a git short SHA (7+ hex chars, not a version).
+
+    A version like ``0.4.0`` starts with a digit and contains dots, so it never
+    matches. A short SHA like ``a1b2c3d`` is all hex and has no dots."""
+    s = (s or "").strip()
+    if len(s) < 7:
+        return False
+    return all(c in "0123456789abcdefABCDEF" for c in s)
+
+
 def _is_newer(remote: str, local: str) -> bool:
+    # If remote is a commit SHA (no published releases), "newer" simply means
+    # "different from the local ref" — any divergence implies there's something
+    # new on main to pull. Compare case-insensitively (git SHAs are lowercase).
+    if _looks_like_sha(remote):
+        return (remote or "").lower() != (local or "").lower()
     def parts(v):
         out = []
         for p in str(v).split("."):
@@ -81,9 +125,14 @@ def _is_newer(remote: str, local: str) -> bool:
 
 
 def check_for_update() -> tuple:
-    """Return ``(available: bool, latest_tag: str|None)``."""
+    """Return ``(available: bool, latest_tag: str|None)``.
+
+    Compares the local commit (or version) against the remote. When the repo
+    has no releases, ``latest_tag`` is the short remote commit SHA and an
+    update is available whenever it differs from the local one."""
     remote = latest_release()
-    if remote and _is_newer(remote, VERSION):
+    local_ref = git_commit() or VERSION
+    if remote and _is_newer(remote, local_ref):
         return True, remote
     return False, remote
 

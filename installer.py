@@ -70,7 +70,7 @@ def _res(*parts):
 ICON_PATH = _res("assets", "favicon.ico")
 LOGO_PATH = _res("assets", "logo.png")
 RECORD_PATH = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
-                           "UltraPilot", "install.json")
+                           "Programs", "UltraPilot", "install.json")
 
 ACCENT = "#10B981"          # primary green
 ACCENT_HI = "#34D399"       # lighter green (gradients / hover)
@@ -299,6 +299,52 @@ _FETCH_BLACKLIST_SUFFIX = (".pyc", ".pyo", ".log", ".msi", ".exe", ".spec", ".eg
 _FETCH_BLACKLIST_FILES = {"settings.json", ".gitignore", ".ds_store", "thumbs.db"}
 
 
+def _long_path(path):
+    """Add the ``\\\\?\\`` prefix on Windows so paths over MAX_PATH (260) work.
+
+    Without it deeply nested files from the GitHub zip fail to write with a
+    cryptic „cannot unpack file“ / WinError 3,206. No-op on non-Windows."""
+    if sys.platform == "win32":
+        p = os.path.abspath(path)
+        if not p.startswith("\\\\?\\") and (len(p) >= 260 or " " in p):
+            return "\\\\?\\" + p
+    return path
+
+
+def _dir_size_mb(path):
+    """Total size in MB of every file under ``path`` (for install log stats)."""
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total / (1024 * 1024)
+
+
+def _count_files(path):
+    """Number of files under ``path`` (for install log stats)."""
+    n = 0
+    for _root, _dirs, files in os.walk(path):
+        n += len(files)
+    return n
+
+
+def _installer_commit():
+    """Short git commit SHA of the installer's own folder, or '' if not a git
+    checkout (e.g. a built exe). Used for the version badge on the welcome page."""
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        out = subprocess.run(["git", "-C", here, "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, timeout=6)
+        if out.returncode == 0:
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
 def _github_headers():
     """Auth headers for GitHub requests (token optional, enables private repos)."""
     h = {"Accept": "application/vnd.github+json"}
@@ -447,50 +493,135 @@ class InstallWorker(QThread):
 
     # ---------------------------------------------------------------- Sources
     def _try_git_clone(self):
+        import time
         try:
             tmp = self.install_path + "_clone"
             if os.path.isdir(tmp):
                 shutil.rmtree(tmp, ignore_errors=True)
-            r = subprocess.run(["git", "clone", "--depth", "1", REPO_URL, tmp],
+            self.log.emit("  ▸ git clone --depth 1 " + REPO_URL)
+            t0 = time.time()
+            r = subprocess.run(["git", "clone", "--depth", "1", "--progress",
+                                REPO_URL, tmp],
                                capture_output=True, text=True, timeout=600)
-            if r.returncode == 0 and os.path.exists(os.path.join(tmp, "main.py")):
-                for item in os.listdir(tmp):
-                    s = os.path.join(tmp, item)
-                    d = os.path.join(self.install_path, item)
-                    if os.path.isdir(s):
-                        shutil.copytree(s, d, dirs_exist_ok=True)
-                    else:
-                        shutil.copy2(s, d)
-                shutil.rmtree(tmp, ignore_errors=True)
-                self.log.emit(self.t["src_git_ok"])
-                return True
+            dt = time.time() - t0
+            if r.returncode != 0:
+                # Surface git's own error text (auth, network, repo not found).
+                err = (r.stderr or "").strip().splitlines()
+                msg = err[-1] if err else "git returncode " + str(r.returncode)
+                self.log.emit(self.t["src_err"].format(err=msg))
+                return False
+            if not os.path.exists(os.path.join(tmp, "main.py")):
+                self.log.emit(self.t["src_err"].format(err="clone succeeded but main.py missing"))
+                return False
+            nfiles = 0
+            for item in os.listdir(tmp):
+                s = os.path.join(tmp, item)
+                d = os.path.join(self.install_path, item)
+                if os.path.isdir(s):
+                    shutil.copytree(s, d, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(s, d)
+                nfiles += 1
+            shutil.rmtree(tmp, ignore_errors=True)
+            mb = _dir_size_mb(self.install_path)
+            speed = (mb / dt) if dt > 0 else 0.0
+            self.log.emit("  ✓ git clone — {} súborov, {:.1f} MB ({:.1f} MB/s, {:.0f}s)".format(
+                _count_files(self.install_path), mb, speed, dt))
+            self.log.emit(self.t["src_git_ok"])
+            return True
         except Exception as e:
             self.log.emit(self.t["src_err"].format(err=str(e)))
         return False
 
     def _try_zip_archive(self):
+        import requests, zipfile, io, time, traceback
         try:
-            import requests, zipfile, io
-            resp = requests.get(ARCHIVE_URL, headers=_github_headers(), timeout=120)
-            if resp.status_code == 200:
-                zf = zipfile.ZipFile(io.BytesIO(resp.content))
-                zf.extractall(self.install_path)
-                root = os.path.join(self.install_path, "ets2la-main")
-                if os.path.isdir(root):
-                    for item in os.listdir(root):
-                        shutil.move(os.path.join(root, item),
-                                    os.path.join(self.install_path, item))
-                    shutil.rmtree(root, ignore_errors=True)
-                self.log.emit(self.t["src_zip_ok"])
-                return True
+            t0 = time.time()
+            self.log.emit("  ▸ Stahujem zip archív z GitHubu…")
+            # stream=True so we can show progress instead of a frozen window.
+            resp = requests.get(ARCHIVE_URL, headers=_github_headers(),
+                                timeout=180, stream=True)
+            if resp.status_code != 200:
+                self.log.emit(self.t["src_err"].format(err="HTTP " + str(resp.status_code)))
+                return False
+            total = int(resp.headers.get("Content-Length") or 0)
+            downloaded = 0
+            chunks = bytearray()
+            for chunk in resp.iter_content(chunk_size=65536):
+                if chunk:
+                    chunks.extend(chunk)
+                    downloaded += len(chunk)
+                    if total > 0:
+                        pct = downloaded * 100 // total
+                        self.status.emit("Sťahujem zip… {} % ({:.1f} MB)".format(
+                            pct, downloaded / (1024 * 1024)))
+            data = bytes(chunks)
+            dt = time.time() - t0
+            mb = len(data) / (1024 * 1024)
+            speed = (mb / dt) if dt > 0 else 0.0
+            self.log.emit("  ✓ Stiahnuté: {:.1f} MB ({:.1f} MB/s, {:.0f}s)".format(
+                mb, speed, dt))
+            # Validate the zip is intact before extracting (catches truncated
+            # downloads that would raise „cannot unpack file“ mid-extract).
+            zf = zipfile.ZipFile(io.BytesIO(data))
+            bad = zf.testzip()
+            if bad is not None:
+                self.log.emit(self.t["src_err"].format(
+                    err="poškodený zip pri " + str(bad)))
+                return False
+            # Extract file-by-file with a long-path prefix and per-file error
+            # isolation: one locked/colliding file must not abort the whole
+            # install. Track failures and report them at the end.
+            prefix = ""
+            names = [n for n in zf.namelist() if not n.endswith("/")]
+            if names:
+                prefix = names[0].split("/")[0] if "/" in names[0] else ""
+            failed = []
+            extracted = 0
+            for n in names:
+                rel = n[len(prefix) + 1:] if prefix and n.startswith(prefix + "/") else n
+                if not rel:
+                    continue
+                dest = os.path.join(self.install_path, rel)
+                # \\?\ opts out of the 260-char MAX_PATH limit on Windows so
+                # deeply nested files don't fail with „cannot unpack file“.
+                dest_long = _long_path(dest)
+                try:
+                    os.makedirs(os.path.dirname(dest_long) or _long_path(self.install_path),
+                                exist_ok=True)
+                    with zf.open(n) as src, open(dest_long, "wb") as out:
+                        out.write(src.read())
+                    extracted += 1
+                except Exception as fe:
+                    failed.append(rel + " (" + str(fe) + ")")
+            # Flatten the "<repo>-main/" wrapper if the zip was nested.
+            root = os.path.join(self.install_path, "ets2la-main")
+            if os.path.isdir(root):
+                for item in os.listdir(root):
+                    shutil.move(os.path.join(root, item),
+                                os.path.join(self.install_path, item))
+                shutil.rmtree(root, ignore_errors=True)
+            if failed:
+                self.log.emit("  ⚠ {} súborov sa nepodarilo rozbaliť:".format(len(failed)))
+                for f in failed[:10]:
+                    self.log.emit("     – " + f)
+                if len(failed) > 10:
+                    self.log.emit("     … a ďalších {}".format(len(failed) - 10))
+            self.log.emit("  ✓ Rozbalených {} súborov.".format(extracted))
+            self.log.emit(self.t["src_zip_ok"])
+            return os.path.exists(os.path.join(self.install_path, "main.py"))
         except Exception as e:
+            # Full traceback in debug so „cannot unpack file“/WinError has a
+            # clear root cause in the log instead of a bare message.
+            logging.debug("zip install failed:\n%s", traceback.format_exc())
             self.log.emit(self.t["src_err"].format(err=str(e)))
         return False
 
     def _try_raw_file_by_file(self):
         """Last-resort: list the tree via Contents API and fetch each blob raw."""
+        import requests, time
         try:
-            import requests
+            self.log.emit("  ▸ Získavam zoznam súborov z GitHub API…")
             r = requests.get(CONTENTS_API, headers=_github_headers(), timeout=30)
             if r.status_code != 200:
                 self.log.emit(self.t["src_err"].format(err="API HTTP " + str(r.status_code)))
@@ -509,18 +640,31 @@ class InstallWorker(QThread):
                     return False
                 return True
 
+            todo = [e for e in blobs if allowed(e["path"])]
+            total = len(todo)
+            self.log.emit("  ▸ Stahujem {} súborov jeden po druhom…".format(total))
             count = 0
-            for entry in blobs:
+            total_bytes = 0
+            t0 = time.time()
+            for i, entry in enumerate(todo, 1):
                 path = entry["path"]
-                if not allowed(path):
-                    continue
                 dest = os.path.join(self.install_path, path)
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                os.makedirs(os.path.dirname(_long_path(dest)) or _long_path(self.install_path),
+                            exist_ok=True)
                 rr = requests.get(RAW_BASE + path, headers=_github_headers(), timeout=60)
                 if rr.status_code == 200:
-                    with open(dest, "wb") as f:
+                    with open(_long_path(dest), "wb") as f:
                         f.write(rr.content)
+                    total_bytes += len(rr.content)
                     count += 1
+                if i % 25 == 0 or i == total:
+                    self.status.emit("Sťahujem súbory… {}/{} ({:.1f} MB)".format(
+                        i, total, total_bytes / (1024 * 1024)))
+            dt = time.time() - t0
+            mb = total_bytes / (1024 * 1024)
+            speed = (mb / dt) if dt > 0 else 0.0
+            self.log.emit("  ✓ Stiahnutých {} súborov, {:.1f} MB ({:.1f} MB/s)".format(
+                count, mb, speed))
             if count > 0:
                 self.log.emit(self.t["src_raw_ok"].format(n=count))
                 return os.path.exists(os.path.join(self.install_path, "main.py"))
@@ -532,12 +676,18 @@ class InstallWorker(QThread):
         """Always fetch the latest sources from GitHub. Three fallback strategies."""
         self.status.emit(self.t["src_try_git"])
         if self._try_git_clone():
+            self.log.emit("  ✓ Zdrojové súbory pripravené ({:.1f} MB).".format(
+                _dir_size_mb(self.install_path)))
             return True
         self.status.emit(self.t["src_try_zip"])
         if self._try_zip_archive():
+            self.log.emit("  ✓ Zdrojové súbory pripravené ({:.1f} MB).".format(
+                _dir_size_mb(self.install_path)))
             return True
         self.status.emit(self.t["src_try_raw"])
         if self._try_raw_file_by_file():
+            self.log.emit("  ✓ Zdrojové súbory pripravené ({:.1f} MB).".format(
+                _dir_size_mb(self.install_path)))
             return True
         self.log.emit(self.t["src_fail"])
         return False
@@ -972,6 +1122,24 @@ class InstallerWindow(QWidget):
         title = QLabel(TR[self.lang]["welcome_t"])
         title.setObjectName("Title")
         lay.addWidget(title)
+        # Version + commit badge under the title so the user always knows which
+        # build of the installer they're running (e.g. „Verzia 0.4.0 · a1b2c3d“).
+        commit = _installer_commit()
+        if commit:
+            ver_text = TR[self.lang].get(
+                "welcome_version", "Verzia {ver} · commit {commit}").format(
+                ver=APP_VERSION, commit=commit)
+        else:
+            ver_text = TR[self.lang].get(
+                "welcome_version_no_commit", "Verzia {ver}").format(ver=APP_VERSION)
+        ver_lbl = QLabel(ver_text)
+        ver_lbl.setStyleSheet(
+            "color:#34D399; font-size:12px; font-weight:700;"
+            " background:#252B34; border:1px solid #3D4654; border-radius:10px;"
+            " padding:4px 10px; margin-bottom:2px;")
+        ver_lbl.setMaximumWidth(360)
+        lay.addWidget(ver_lbl)
+        lay.addSpacing(4)
         desc = QLabel(TR[self.lang]["welcome_d"])
         desc.setObjectName("Desc")
         desc.setWordWrap(True)
@@ -1088,7 +1256,7 @@ class InstallerWindow(QWidget):
         lbl.setObjectName("Caption")
         row = QHBoxLayout()
         row.setSpacing(8)
-        default = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "UltraPilot")
+        default = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Programs", "UltraPilot")
         self.path_edit = QLineEdit(default)
         self.path_edit.textChanged.connect(self._update_path_status)
         browse = _ghost_btn(TR[self.lang]["browse"])
@@ -1357,6 +1525,14 @@ class InstallerWindow(QWidget):
         if i < 4:
             self._go_step(i + 1)
         else:
+            # Finish clicked — launch the app (if requested) BEFORE closing so
+            # a startfile/DETACHED_PROCESS hiccup can't take the installer down
+            # with it. closeEvent no longer launches anything.
+            if hasattr(self, "launch_chk") and self.launch_chk.isChecked() and self.exe_path:
+                try:
+                    self._launch_app()
+                except Exception as e:
+                    logging.debug("launch on finish failed: %s", e)
             self.close()
 
     def _back(self):
@@ -1439,7 +1615,7 @@ class InstallerWindow(QWidget):
         if self._worker is not None and self._worker.isRunning():
             return
         path = self.path_edit.text().strip() or os.path.join(
-            os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "UltraPilot")
+            os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Programs", "UltraPilot")
         self.progress.setValue(0)
         self.log_view.clear()
         self._worker = InstallWorker(path, self.lang)
@@ -1466,8 +1642,9 @@ class InstallerWindow(QWidget):
             self._update_nav()
 
     def closeEvent(self, event):
-        if hasattr(self, "launch_chk") and self.launch_chk.isChecked() and self.exe_path:
-            self._launch_app()
+        # Launch-on-finish now happens in _next() (the „Dokončiť“ click) so the
+        # X button / Alt+F4 no longer silently spawns the app and a launch
+        # failure can't crash the installer here.
         super().closeEvent(event)
 
     def _launch_app(self):
@@ -1661,18 +1838,40 @@ class _UninstallDialog(QDialog):
         sub.setStyleSheet("font-size:13px; color:#9AA4B2;")
         lay.addWidget(sub)
 
+        # Shared checkbox style: bright text + a visible check indicator on the
+        # dark palette (the default QCheckBox colours were nearly invisible).
+        _chk_qss = ("QCheckBox{color:#E6E8EB; font-size:14px; spacing:10px;"
+                    " padding:4px 0;} QCheckBox::indicator{width:18px; height:18px;"
+                    " border:2px solid #3D4654; border-radius:4px; background:#232932;}"
+                    "QCheckBox::indicator:checked{background:#10B981; border-color:#10B981;}"
+                    "QCheckBox::indicator:hover{border-color:#34D399;}")
+
         self.chk_app = QCheckBox("Aplikácia UltraPilot (priečinok, skratky, záznam)")
         self.chk_app.setChecked(True)
+        self.chk_app.setStyleSheet(_chk_qss)
         lay.addWidget(self.chk_app)
 
         self.chk_sdk = QCheckBox("SDK pluginy (DLL z hry)")
-        self.chk_sdk.setChecked(bool(rec.get("sdk_targets")))
-        self.chk_sdk.setEnabled(bool(rec.get("sdk_targets")))
+        has_sdk = bool(rec.get("sdk_targets"))
+        self.chk_sdk.setChecked(has_sdk)
+        self.chk_sdk.setEnabled(has_sdk)
+        self.chk_sdk.setStyleSheet(_chk_qss)
         lay.addWidget(self.chk_sdk)
 
-        self.chk_python = QCheckBox("Python (nainštalovaný inštalátorom)")
-        self.chk_python.setChecked(bool(rec.get("python_installed_by_installer")))
-        self.chk_python.setEnabled(bool(rec.get("python_installed_by_installer")))
+        # Python: always selectable. If the installer didn't install it we warn
+        # in the label that it's the user's own Python — but we let them opt in
+        # (the installer just won't run the silent uninstaller in that case,
+        # see _do_uninstall_python).
+        py_by_installer = bool(rec.get("python_installed_by_installer"))
+        if py_by_installer:
+            py_text = "Python (nainštalovaný inštalátorom)"
+        else:
+            py_text = ("Python  ·  pozor: inštalátor ho nenainštaloval "
+                       "(pravdepodobne tvoj vlastný) — odinštaluje sa ticho len ak ho poznáme")
+        self.chk_python = QCheckBox(py_text)
+        self.chk_python.setChecked(py_by_installer)
+        self.chk_python.setEnabled(True)
+        self.chk_python.setStyleSheet(_chk_qss)
         lay.addWidget(self.chk_python)
 
         lay.addSpacing(6)

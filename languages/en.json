@@ -25,6 +25,8 @@
     "brand_sub": "Autopilot for Euro Truck Simulator 2",
     "welcome_t": "Welcome to UltraPilot",
     "welcome_d": "An advanced autopilot for ETS2: lane keeping, adaptive cruise control, obstacle avoidance, map-based navigation, HUD and voice announcements. The wizard will guide you through installation step by step.",
+    "welcome_version": "Version {ver} · commit {commit}",
+    "welcome_version_no_commit": "Version {ver}",
     "feat_t": "What UltraPilot can do",
     "feats": [
       ["🛣️", "Lane keeping", "Watches the road and keeps the truck in lane."],

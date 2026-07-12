@@ -233,7 +233,9 @@ class MapPage(QWidget):
         map_row.addWidget(self.btn_dl)
         layout.addLayout(map_row)
         self.active_map_lbl = QLabel("Aktívna mapa: —")
-        self.active_map_lbl.setStyleSheet("color: #0F766E; font-size: 13px; font-weight: 700;")
+        self.active_map_lbl.setStyleSheet(
+            "color:#FFFFFF; background:#0F766E; font-size:14px; font-weight:700;"
+            "border-radius:8px; padding:8px 12px;")
         layout.addWidget(self.active_map_lbl)
         self.dl_bar = QProgressBar()
         self.dl_bar.setVisible(False)
@@ -435,4 +437,8 @@ class MapPage(QWidget):
             ms = self.state.get("map_status")
             if ms:
                 self.status.setText(str(ms))
+        # Keep the active-map badge in sync with whatever the map plugin
+        # published (so the user sees the real running map, not just the
+        # last selection from the combo).
+        self._update_active_map_label()
         self.view.update()

@@ -25,6 +25,8 @@
     "brand_sub": "Autopilot pre Euro Truck Simulator 2",
     "welcome_t": "Vitaj v UltraPilot",
     "welcome_d": "Pokročilý autopilot pre ETS2: udržiavanie pruhu, adaptívny tempomat, vyhýbanie sa prekážkam, navigácia podľa mapy, HUD a hlasové oznámenia. Sprievodca ťa prevedie inštaláciou krok za krokom.",
+    "welcome_version": "Verzia {ver} · commit {commit}",
+    "welcome_version_no_commit": "Verzia {ver}",
     "feat_t": "Čo UltraPilot vie",
     "feats": [
       ["🛣️", "Udržiavanie pruhu", "Sleduje vozovku a drží kamión v pruhu."],

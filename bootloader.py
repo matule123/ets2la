@@ -33,12 +33,35 @@ def run_ui(shared_dict):
     logging.basicConfig(level=logging.INFO)
     logging.info("Launching UI Process...")
     from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtCore import QTimer
     from ui.app import UltraPilotApp
+    from ui.splash import BootSplash
     from core.ipc.shared_state import SharedState
     from core.settings.manager import SettingsManager
 
     app = QApplication(sys.argv)
     state = SharedState(shared_dict)
+
+    # Show the boot splash immediately so the user sees a clear loading state
+    # (logo + spinner + „Initializing“) instead of an empty desktop while the
+    # dashboard / onboarding is being built. It closes once ``ui_ready`` flips.
+    splash = BootSplash()
+    splash.show()
+    app.processEvents()
+
+    splash_closed = {"v": False}
+
+    def _maybe_close_splash():
+        if splash_closed["v"]:
+            return
+        if state.get("ui_ready", False):
+            splash_closed["v"] = True
+            splash.close()
+            splash.deleteLater()
+
+    poll = QTimer()
+    poll.timeout.connect(_maybe_close_splash)
+    poll.start(100)
 
     # First-run onboarding: if the user hasn't completed setup yet, show the
     # wizard before the main window. When the wizard finishes it writes
