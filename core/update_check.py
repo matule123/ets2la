@@ -24,7 +24,7 @@ import os
 import subprocess
 import sys
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 REPO = "matule123/ets2la"
 API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 ARCHIVE_URL = f"https://github.com/{REPO}/archive/refs/heads/main.zip"

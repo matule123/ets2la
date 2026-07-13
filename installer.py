@@ -35,7 +35,7 @@ from PyQt6.QtGui import QPixmap, QIcon, QColor, QPainter, QFont, QPen
 from PyQt6.QtWidgets import QGraphicsOpacityEffect
 
 APP_NAME = "UltraPilot"
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.4.1"
 
 # GitHub source — files are ALWAYS fetched from here.
 REPO = "matule123/ets2la"
@@ -1834,10 +1834,10 @@ class _MaintenanceDialog(QDialog):
         lay.setContentsMargins(28, 24, 28, 20)
         lay.setSpacing(10)
         title = QLabel("UltraPilot — údržba")
-        title.setStyleSheet("font-size:22px; font-weight:800; color:#34D399;")
+        title.setStyleSheet("font-size:22px; font-weight:800; color:#2EA043;")
         lay.addWidget(title)
         sub = QLabel("UltraPilot je už nainštalovaný.\nČo chceš spraviť?")
-        sub.setStyleSheet("font-size:14px; color:#9AA4B2;")
+        sub.setStyleSheet("font-size:14px; color:#8B949E;")
         sub.setWordWrap(True)
         lay.addWidget(sub)
         lay.addStretch()
@@ -1873,19 +1873,19 @@ class _UninstallDialog(QDialog):
         lay.setContentsMargins(24, 20, 24, 20)
         lay.setSpacing(10)
         title = QLabel("Odinštalovanie UltraPilot")
-        title.setStyleSheet("font-size:20px; font-weight:800; color:#34D399;")
+        title.setStyleSheet("font-size:20px; font-weight:800; color:#2EA043;")
         lay.addWidget(title)
         sub = QLabel("Vyber, čo chceš odinštalovať:")
-        sub.setStyleSheet("font-size:13px; color:#9AA4B2;")
+        sub.setStyleSheet("font-size:13px; color:#8B949E;")
         lay.addWidget(sub)
 
         # Shared checkbox style: bright text + a visible check indicator on the
         # dark palette (the default QCheckBox colours were nearly invisible).
-        _chk_qss = ("QCheckBox{color:#E6E8EB; font-size:14px; spacing:10px;"
+        _chk_qss = ("QCheckBox{color:#E6EDF3; font-size:14px; spacing:10px;"
                     " padding:4px 0;} QCheckBox::indicator{width:18px; height:18px;"
-                    " border:2px solid #3D4654; border-radius:4px; background:#232932;}"
-                    "QCheckBox::indicator:checked{background:#10B981; border-color:#10B981;}"
-                    "QCheckBox::indicator:hover{border-color:#34D399;}")
+                    " border:2px solid #30363D; border-radius:4px; background:#0D1117;}"
+                    "QCheckBox::indicator:checked{background:#2EA043; border-color:#2EA043;}"
+                    "QCheckBox::indicator:hover{border-color:#2EA043;}")
 
         self.chk_app = QCheckBox("Aplikácia UltraPilot (priečinok, skratky, záznam)")
         self.chk_app.setChecked(True)
@@ -1941,7 +1941,7 @@ class _UninstallDialog(QDialog):
         ts = datetime.now().strftime("%H:%M:%S")
         self.log_view.append(
             '<span style="color:#5B6573; font-size:11px;">[' + ts + ']</span> '
-            '<span style="color:#E6E8EB;">' + _esc(msg) + '</span>')
+            '<span style="color:#E6EDF3;">' + _esc(msg) + '</span>')
         try:
             self.log_view.ensureCursorVisible()
         except Exception:
@@ -2024,10 +2024,10 @@ class _RepairDialog(QDialog):
         lay.setContentsMargins(24, 20, 24, 20)
         lay.setSpacing(10)
         title = QLabel("Oprava UltraPilot")
-        title.setStyleSheet("font-size:20px; font-weight:800; color:#34D399;")
+        title.setStyleSheet("font-size:20px; font-weight:800; color:#2EA043;")
         lay.addWidget(title)
-        sub = QLabel("Skontrolujem súbory oproti GitHubu, doplním chýbajúce\na znova nainštalujem SDK a Python knižnice.")
-        sub.setStyleSheet("font-size:13px; color:#9AA4B2;")
+        sub = QLabel("Skontrolujem súbory oproti GitHubu, doplním chýbajúce\na znova nainštalujem SDK a Python kniňnice.")
+        sub.setStyleSheet("font-size:13px; color:#8B949E;")
         sub.setWordWrap(True)
         lay.addWidget(sub)
         lay.addSpacing(6)
@@ -2055,7 +2055,7 @@ class _RepairDialog(QDialog):
         ts = datetime.now().strftime("%H:%M:%S")
         self.log_view.append(
             '<span style="color:#5B6573; font-size:11px;">[' + ts + ']</span> '
-            '<span style="color:#E6E8EB;">' + _esc(msg) + '</span>')
+            '<span style="color:#E6EDF3;">' + _esc(msg) + '</span>')
         try:
             self.log_view.ensureCursorVisible()
         except Exception:
