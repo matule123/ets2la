@@ -53,8 +53,8 @@ class UltraPilotHUD(QWidget):
     without blocking the view of the road ahead.
     """
 
-    # Left-panel size (wider than before for a richer scene + nicer models).
-    W, H = 440, 500
+    # Left-panel size — larger so the 3D scene + truck models read clearly.
+    W, H = 560, 640
 
     def __init__(self, shared_state):
         super().__init__()
@@ -121,6 +121,9 @@ class UltraPilotHUD(QWidget):
             # during lane changes, like a real side/rear mirror inset.
             "blinker": (s.get("active_blinker") or "off"),
             "rear_cam": bool(s.get("rear_cam", False)),
+            # Total lane count on the road under the truck (drives the road
+            # width in the 3D scene — 2 lanes default when unknown).
+            "lanes": int(s.get("road_lanes", 2) or 2),
         }
 
     # --- Painting -------------------------------------------------------------
@@ -216,6 +219,35 @@ class UltraPilotHUD(QWidget):
         s = f / d
         return QPointF(view.center().x() + lateral * s, horizon + (H - height) * s)
 
+    @staticmethod
+    def _smooth_path(pts, samples=6):
+        """Catmull-Rom spline through ``pts`` (list of (ahead, lateral)).
+
+        Produces a much denser, smoothly-curving polyline so bends read as
+        real curves instead of a kinked zig-zag of a few points. ``samples``
+        is the number of interpolated points inserted between each pair."""
+        n = len(pts)
+        if n < 2:
+            return list(pts)
+        out = []
+        for i in range(n - 1):
+            p0 = pts[max(0, i - 1)]
+            p1 = pts[i]
+            p2 = pts[i + 1]
+            p3 = pts[min(n - 1, i + 2)]
+            for t in range(samples + 1):
+                f = t / samples
+                f2 = f * f
+                f3 = f2 * f
+                a = 0.5 * (2 * p1[0] + (-p0[0] + p2[0]) * f +
+                           (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * f2 +
+                           (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * f3)
+                b = 0.5 * (2 * p1[1] + (-p0[1] + p2[1]) * f +
+                           (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * f2 +
+                           (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * f3)
+                out.append((a, b))
+        return out
+
     def _draw_driving_view(self, qp, view, d):
         # Slightly darker ground band below the horizon for depth.
         horizon_y = view.top() + view.height() * 0.26
@@ -233,7 +265,14 @@ class UltraPilotHUD(QWidget):
 
         if pos:
             path = d["nav_path"]
-            al = [to_truck(px, pz) for px, pz in path]
+            raw = [to_truck(px, pz) for px, pz in path]
+            # Smooth the path so curves are continuous (no hard kinks).
+            al = self._smooth_path(raw) if len(raw) >= 2 else raw
+
+            # Dynamic half-width from the live lane count (not a fixed 2 lanes).
+            # ~3.6 m per lane + 1.5 m shoulder on each side, clamped sanely.
+            lanes = max(1, d.get("lanes", 2))
+            HALF = max(4.0, min(16.0, lanes * 3.6 / 2 + 1.5))
 
             def offset_pt(i, off):
                 a, l = al[i]
@@ -242,25 +281,36 @@ class UltraPilotHUD(QWidget):
                 n = math.hypot(da, dl) or 1.0
                 return self._project(a, l + (-da / n) * off, view)
 
+            def polyline_at(off):
+                return [p for p in (offset_pt(i, off) for i in range(len(al))) if p]
+
             if len(al) >= 2:
-                HALF = 6.5  # half road width (m)
                 # 1) Filled asphalt ribbon (left edge → right edge), curving.
-                left = [offset_pt(i, -HALF) for i in range(len(al))]
-                right = [offset_pt(i, HALF) for i in range(len(al))]
-                ribbon = [p for p in left if p] + [p for p in reversed(right) if p]
+                left = polyline_at(-HALF)
+                right = polyline_at(HALF)
+                ribbon = left + list(reversed(right))
                 if len(ribbon) >= 3:
                     qp.setPen(Qt.PenStyle.NoPen)
                     qp.setBrush(QColor(36, 40, 46, 235))
                     qp.drawPolygon(QPolygonF(ribbon))
-                # 2) Solid white edge lines + dashed centre line.
-                for off, dash in ((-HALF, False), (HALF, False), (0.0, True)):
-                    pts = [offset_pt(i, off) for i in range(len(al))]
-                    pts = [p for p in pts if p]
+                # 2) Solid white edge lines.
+                for off in (-HALF, HALF):
+                    pts = polyline_at(off)
                     if len(pts) >= 2:
-                        style = Qt.PenStyle.DashLine if dash else Qt.PenStyle.SolidLine
-                        qp.setPen(QPen(QColor(240, 240, 245, 200), 2, style))
+                        qp.setPen(QPen(QColor(240, 240, 245, 210), 2, Qt.PenStyle.SolidLine))
                         qp.drawPolyline(QPolygonF(pts))
-                # 3) Anticipated route (blue) glow on the road.
+                # 3) Dashed lane dividers — one fewer line than the lane count,
+                #    placed symmetrically so a 4-lane road shows 3 dividers etc.
+                if lanes >= 2:
+                    spacing = (2 * HALF) / lanes
+                    first = -HALF + spacing
+                    for k in range(lanes - 1):
+                        off = first + k * spacing
+                        pts = polyline_at(off)
+                        if len(pts) >= 2:
+                            qp.setPen(QPen(QColor(245, 220, 120, 200), 2, Qt.PenStyle.DashLine))
+                            qp.drawPolyline(QPolygonF(pts))
+                # 4) Anticipated route (blue) glow on the road.
                 pts = [self._project(a, l, view) for a, l in al]
                 pts = [p for p in pts if p is not None]
                 if len(pts) >= 2:
@@ -270,14 +320,14 @@ class UltraPilotHUD(QWidget):
                     qp.drawPolyline(QPolygonF(pts))
             else:
                 # No route: a straight filled ribbon ahead so the road is visible.
-                left = [self._project(a, -6.5, view) for a in range(2, 80, 6)]
-                right = [self._project(a, 6.5, view) for a in range(2, 80, 6)]
+                left = [self._project(a, -HALF, view) for a in range(2, 90, 6)]
+                right = [self._project(a, HALF, view) for a in range(2, 90, 6)]
                 ribbon = [p for p in left if p] + [p for p in reversed(right) if p]
                 if len(ribbon) >= 3:
                     qp.setPen(Qt.PenStyle.NoPen); qp.setBrush(QColor(36, 40, 46, 220))
                     qp.drawPolygon(QPolygonF(ribbon))
-                for lat, dash in ((-6.5, False), (6.5, False), (0.0, True)):
-                    pts = [self._project(a, lat, view) for a in range(2, 80, 6)]
+                for lat, dash in ((-HALF, False), (HALF, False), (0.0, True)):
+                    pts = [self._project(a, lat, view) for a in range(2, 90, 6)]
                     pts = [p for p in pts if p is not None]
                     if len(pts) >= 2:
                         st = Qt.PenStyle.DashLine if dash else Qt.PenStyle.SolidLine
@@ -288,15 +338,67 @@ class UltraPilotHUD(QWidget):
             vehs = []
             for v in d["traffic"]:
                 a, l = to_truck(v["x"], v["z"])
-                if -6 < a < 70 and abs(l) < 18:
+                if -6 < a < 80 and abs(l) < (HALF + 6):
                     vehs.append((a, l, v))
             vehs.sort(key=lambda t: -t[0])
             for a, l, v in vehs:
                 self._draw_box(qp, view, a, l, v)
 
         # Ego truck as a 3D model at the bottom centre (cab + trailer).
-        self._draw_box(qp, view, 6.0, 0.0,
-                       {"type": "truck", "width": 2.6, "length": 14.0, "yaw": d["heading"]})
+        self._draw_ego_truck(qp, view, d["heading"])
+
+    def _draw_ego_truck(self, qp, view, heading):
+        """The player's articulated truck: a detailed cab + a long box trailer.
+
+        Drawn fixed at the bottom centre of the scene (chase-cam). Richer than
+        the generic traffic model: chassis with wheel shadows, a tinted-glass
+        cab, exhaust stack, and a tall trailer box with a visible roof line."""
+        # Geometry (metres, truck-space): cab at the front, trailer behind.
+        cab_h = 2.9
+        trailer_h = 3.7
+        hw = 1.25            # half truck width
+        # Cab occupies ~2.5..0 m ahead (closest to camera), trailer -10.5..-2.5 m.
+        cab_n, cab_f = -2.5, 0.5
+        tr_n, tr_f = -11.0, -2.6
+
+        body = "#C8CCD2"
+        body_dark = "#7A8088"
+        cab_glass = "#0F2A33"
+        chassis = "#3A3F47"
+
+        # --- Chassis slab under everything (ground presence + wheel shadow). ---
+        self._box3d(qp, tr_n - 0.3, cab_f + 0.3, hw + 0.2, 0.0, 0.0, 0.45, view,
+                    (chassis, chassis))
+
+        # --- Wheels: dark cylinders peeking below the chassis (axle pairs). ---
+        wheel_h = 0.95
+        for ax in (cab_n + 0.4, tr_n + 1.2, tr_f - 1.2):
+            self._box3d(qp, ax - 0.3, ax + 0.3, hw + 0.35, 0.0, 0.0, wheel_h, view,
+                        ("#15181C", "#1F2329"))
+
+        # --- Trailer box (long, tall) — the big rectangular cargo body. ---
+        self._box3d(qp, tr_n, tr_f, hw, 0.0, 0.45, trailer_h, view, (body, "#E5E7EB"))
+        # Trailer roof trim (slightly raised rail along the top).
+        self._box3d(qp, tr_n + 0.2, tr_f - 0.2, hw * 0.9, 0.0, trailer_h, trailer_h + 0.18,
+                    view, (body_dark, body_dark))
+
+        # --- Fifth-wheel gap (the hitch between cab and trailer). ---
+        self._box3d(qp, cab_f - 0.6, tr_f + 0.1, hw * 0.5, 0.0, 0.45, 0.9, view,
+                    (chassis, chassis))
+
+        # --- Cab: taller, with a tinted windshield + side windows. ---
+        self._box3d(qp, cab_n, cab_f, hw, 0.0, 0.45, cab_h, view, (body, "#E5E7EB"))
+        # Greenhouse: tinted glass band wrapping the upper cab.
+        self._box3d(qp, cab_n + 0.15, cab_f - 0.15, hw * 0.92, 0.0, cab_h * 0.55, cab_h + 0.35,
+                    view, (cab_glass, "#1B3A44"))
+        # Exhaust stack (thin dark column behind the cab, right side).
+        self._box3d(qp, cab_n - 0.1, cab_n + 0.2, 0.18, hw - 0.25, 0.5, cab_h + 0.6,
+                    view, ("#2A2E33", "#3A3F47"))
+
+        # --- Head lamps (warm) at the front bumper + tail lamps (red) at trailer back. ---
+        self._draw_lights(qp, view, cab_n, cab_f, hw, 0.0, cab_h)
+        # Trailer rear lights.
+        self._draw_lights(qp, view, tr_n, tr_f, hw, 0.0, trailer_h)
 
     def _box3d(self, qp, n, fr, hw, lateral, z0, z1, view, faces):
         """Draw one shaded cuboid between heights z0..z1. faces=(side,top) colors.
