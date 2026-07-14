@@ -105,11 +105,24 @@ def _looks_like_sha(s: str) -> bool:
 
 
 def _is_newer(remote: str, local: str) -> bool:
-    # If remote is a commit SHA (no published releases), "newer" simply means
-    # "different from the local ref" — any divergence implies there's something
-    # new on main to pull. Compare case-insensitively (git SHAs are lowercase).
-    if _looks_like_sha(remote):
+    """Decide whether ``remote`` represents a newer release than ``local``.
+
+    Three regimes:
+      • both SHA-like  → newer iff they differ (any divergence = pull main)
+      • both versions  → numeric semver compare
+      • mixed (one SHA, one version) → CANNOT compare reliably → return False.
+        This was the root cause of „always shows update available“: in a
+        frozen/non-git install ``local`` is the VERSION constant while
+        ``remote`` is a commit SHA, so the old „different ⇒ newer“ rule fired
+        forever. Treating that case as „not newer“ stops the false positive."""
+    r_sha = _looks_like_sha(remote)
+    l_sha = _looks_like_sha(local)
+    if r_sha and l_sha:
         return (remote or "").lower() != (local or "").lower()
+    if r_sha or l_sha:
+        # Mixed type: can't meaningfully compare — don't claim an update.
+        return False
+
     def parts(v):
         out = []
         for p in str(v).split("."):
@@ -131,6 +144,8 @@ def check_for_update() -> tuple:
     has no releases, ``latest_tag`` is the short remote commit SHA and an
     update is available whenever it differs from the local one."""
     remote = latest_release()
+    # Prefer the git commit SHA when available (source/dev). Fall back to the
+    # bundled VERSION constant only in a frozen build without .git.
     local_ref = git_commit() or VERSION
     if remote and _is_newer(remote, local_ref):
         return True, remote
