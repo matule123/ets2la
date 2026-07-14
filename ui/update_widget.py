@@ -188,9 +188,15 @@ class UpdateCheckerWidget(QWidget):
         top.setContentsMargins(0, 0, 0, 0)
         top.setSpacing(6)
         self.version_lbl = QLabel(self._version_text())
-        self.version_lbl.setStyleSheet("font-size: 11px; font-weight: 600; color: #9CA3AF; border:none;")
+        self.version_lbl.setStyleSheet("font-size: 11px; font-weight: 700; color: #9CA3AF; border:none;")
         self.version_lbl.setWordWrap(True)
         top.addWidget(self.version_lbl)
+        # A separate status line (check result / progress) so the version is
+        # ALWAYS visible above it and never overwritten.
+        self.status_lbl = QLabel("")
+        self.status_lbl.setStyleSheet("font-size: 10px; color: #8B949E; border:none;")
+        self.status_lbl.setWordWrap(True)
+        top.addWidget(self.status_lbl)
         top.addStretch()
         self.spinner = Spinner(size=14)
         self.spinner.hide()
@@ -232,7 +238,7 @@ class UpdateCheckerWidget(QWidget):
             return
         self.btn.hide()
         self.spinner.show()
-        self.version_lbl.setText("Kontrolujem aktualizácie…")
+        self.status_lbl.setText("Kontrolujem aktualizácie…")
         self._check_worker = _CheckWorker()
         self._check_worker.done.connect(self._on_checked)
         self._check_worker.start()
@@ -244,7 +250,7 @@ class UpdateCheckerWidget(QWidget):
             # Remember the tag/SHA so the confirm dialog can show it.
             self._latest_tag = str(latest)
             # Show the remote commit short SHA so the user knows what's coming.
-            self.version_lbl.setText("Dostupná aktualizácia: " + str(latest))
+            self.status_lbl.setText("Dostupná: " + str(latest))
             self.btn.setText("Aktualizovať")
             self._apply_btn_style(update_available=True)
             try:
@@ -253,7 +259,7 @@ class UpdateCheckerWidget(QWidget):
                 pass
             self.btn.clicked.connect(self._confirm_update)
         else:
-            self.version_lbl.setText(self._version_text() + "  ·  aktuálna")
+            self.status_lbl.setText("aktuálna")
             self.btn.setText("Aktualizácia")
             self._apply_btn_style(update_available=False)
             try:
@@ -274,7 +280,7 @@ class UpdateCheckerWidget(QWidget):
             return
         self.btn.hide()
         self.spinner.show()
-        self.version_lbl.setText("Aktualizujem…")
+        self.status_lbl.setText("Aktualizujem…")
         self.progress.setVisible(True)
         self.progress.setRange(0, 100)
         self._update_worker = _UpdateWorker()
@@ -284,16 +290,16 @@ class UpdateCheckerWidget(QWidget):
 
     def _on_progress(self, fraction, text):
         self.progress.setValue(int(fraction * 100))
-        self.version_lbl.setText("Aktualizujem… " + text)
+        self.status_lbl.setText("Aktualizujem… " + text)
 
     def _on_updated(self, ok):
         self.spinner.hide()
         self.progress.setVisible(False)
         if ok:
-            self.version_lbl.setText("✔ Aktualizované — reštartujem…")
+            self.status_lbl.setText("✔ Aktualizované — reštartujem…")
             QTimer.singleShot(800, self._restart)
         else:
-            self.version_lbl.setText("Aktualizácia zlyhala — skús znova.")
+            self.status_lbl.setText("Aktualizácia zlyhala — skús znova.")
             self.btn.show()
             self.btn.setText("Aktualizácia")
             try:
