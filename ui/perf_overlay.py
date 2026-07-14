@@ -137,6 +137,7 @@ class PerfOverlay(QWidget):
         self.total_bar.setFixedHeight(8)
         self.total_bar.setRange(0, 100)
         self.total_bar.setTextVisible(False)
+        self._style_total_bar()
         bw.addWidget(self.total_bar)
         root.addWidget(bar_wrap)
 
