@@ -391,8 +391,30 @@ class VisualizationPage(QWidget):
         # OpenGL widget updates itself internally; the 2D fallback needs update().
         if isinstance(self.hud_preview, _HUDPreview):
             self.timer.timeout.connect(self.hud_preview.update)
+        # If the GL scene broke at runtime (driver crash during paintGL),
+        # swap it for the 2D QPainter preview so the page is never empty.
+        self.timer.timeout.connect(self._check_gl_fallback)
         self.timer.timeout.connect(self.island.update)
         self.timer.start(120)
+
+    def _check_gl_fallback(self):
+        """If the DrivingScene GL context broke after init, replace it with the
+        2D _HUDPreview so the user sees a real scene instead of „only red dots“."""
+        scene = getattr(self, "scene", None)
+        if (scene is not None and not isinstance(self.hud_preview, _HUDPreview)
+                and getattr(scene, "_gl_broken", False)):
+            try:
+                self.layout().replaceWidget(self.hud_preview, self.hud_preview)
+            except Exception:
+                pass
+            self.hud_preview.setParent(None)
+            self.hud_preview.deleteLater()
+            self.hud_preview = _HUDPreview(self.state)
+            self.hud_preview._pal = self._pal
+            self.layout().insertWidget(self.layout().indexOf(self.island),
+                                       self.hud_preview, stretch=1)
+            self.timer.timeout.connect(self.hud_preview.update)
+            logging.info("Visualization: GL broke — switched to 2D preview.")
 
     def restyle(self, theme):
         """Re-apply palette colours when the theme switches (dark ↔ light)."""

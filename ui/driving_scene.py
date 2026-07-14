@@ -12,6 +12,14 @@ Falls back to nothing (no crash) if OpenGL isn't available.
 import logging
 import math
 
+# Silence PyOpenGL's chatty INFO log (e.g. „No OpenGL_accelerate module loaded“)
+# BEFORE importing OpenGL.GL — that import is what emits the message.
+try:
+    logging.getLogger("OpenGL").setLevel(logging.WARNING)
+    logging.getLogger("OpenGL.acceleratesupport").setLevel(logging.WARNING)
+except Exception:
+    pass
+
 try:
     from OpenGL.GL import *
     import numpy as np
