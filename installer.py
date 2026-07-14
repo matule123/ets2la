@@ -37,6 +37,10 @@ from PyQt6.QtWidgets import QGraphicsOpacityEffect
 APP_NAME = "UltraPilot"
 APP_VERSION = "0.4.1"
 
+# On Windows, hide the black CMD consoles that subprocess.run would otherwise
+# flash up (git, pip, powershell). 0x08000000 = CREATE_NO_WINDOW.
+_NO_WIN = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
 # GitHub source — files are ALWAYS fetched from here.
 REPO = "matule123/ets2la"
 REPO_URL = "https://github.com/" + REPO + ".git"
@@ -403,7 +407,7 @@ class InstallWorker(QThread):
         for c in candidates:
             # Version check.
             try:
-                r = subprocess.run([*c, "--version"], capture_output=True, text=True, timeout=10)
+                r = subprocess.run([*c, "--version"], capture_output=True, text=True, timeout=10, creationflags=_NO_WIN)
                 out = (r.stdout or r.stderr).strip()  # 'Python 3.12.9'
                 parts = out.lower().replace("python", "").strip().split(".")
                 major = int(parts[0]) if parts and parts[0].isdigit() else 0
@@ -415,7 +419,7 @@ class InstallWorker(QThread):
             # pip check.
             try:
                 rp = subprocess.run([*c, "-m", "pip", "--version"],
-                                    capture_output=True, timeout=30)
+                                    capture_output=True, text=True, timeout=15, creationflags=_NO_WIN)
                 if rp.returncode == 0:
                     return c
             except Exception:
@@ -515,7 +519,8 @@ class InstallWorker(QThread):
             t0 = time.time()
             r = subprocess.run(["git", "clone", "--depth", "1", "--progress",
                                 REPO_URL, tmp],
-                               capture_output=True, text=True, timeout=600)
+                               capture_output=True, text=True, timeout=600,
+                               creationflags=_NO_WIN)
             dt = time.time() - t0
             if r.returncode != 0:
                 # Surface git's own error text (auth, network, repo not found).
@@ -526,15 +531,26 @@ class InstallWorker(QThread):
             if not os.path.exists(os.path.join(tmp, "main.py")):
                 self.log.emit(self.t["src_err"].format(err="clone succeeded but main.py missing"))
                 return False
+            # Copy the cloned tree into the install folder, logging each file so
+            # the user sees a rich, scrolling install log (120+ lines).
             nfiles = 0
-            for item in os.listdir(tmp):
-                s = os.path.join(tmp, item)
-                d = os.path.join(self.install_path, item)
-                if os.path.isdir(s):
-                    shutil.copytree(s, d, dirs_exist_ok=True)
-                else:
-                    shutil.copy2(s, d)
-                nfiles += 1
+
+            def _copy_tree(src_root, dst_root, prefix=""):
+                nonlocal nfiles
+                for entry in os.listdir(src_root):
+                    s = os.path.join(src_root, entry)
+                    d = os.path.join(dst_root, entry)
+                    rel = (prefix + "/" + entry) if prefix else entry
+                    if os.path.isdir(s):
+                        os.makedirs(d, exist_ok=True)
+                        _copy_tree(s, d, rel)
+                    else:
+                        shutil.copy2(s, d)
+                        nfiles += 1
+                        if nfiles % 5 == 0 or nfiles <= 10:
+                            self.log.emit("    [{:>3}] {}".format(nfiles, rel))
+            _copy_tree(tmp, self.install_path)
+            self.log.emit("    ✓ nakopírovaných {} súborov".format(nfiles))
             shutil.rmtree(tmp, ignore_errors=True)
             mb = _dir_size_mb(self.install_path)
             speed = (mb / dt) if dt > 0 else 0.0
@@ -713,13 +729,34 @@ class InstallWorker(QThread):
             self.log.emit("  Python nebol nájdený — závislosti preskočené.")
             return
         try:
-            self.log.emit("  Používam Python: " + py[0])
+            self.log.emit("  ▸ Používam Python: " + py[0])
+            # Parse requirements.txt and install each package individually so
+            # the user sees detailed progress (one log line per package)
+            # instead of a single silent pip run.
+            pkgs = []
             if os.path.exists(req):
-                subprocess.run([*py, "-m", "pip", "install", "-r", req],
-                               capture_output=True, timeout=1800)
-            subprocess.run([*py, "-m", "pip", "install", "pyqtgraph", "PyOpenGL"],
-                           capture_output=True, timeout=600)
-            self.log.emit("  Závislosti nainštalované.")
+                with open(req, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        if ";" in line:  # env marker (e.g. pywin32 for Windows)
+                            line = line.split(";")[0]
+                        pkgs.append(line)
+            # Ensure the 3D-view extras are present too.
+            for extra in ("pyqtgraph", "PyOpenGL"):
+                if extra.lower() not in " ".join(pkgs).lower():
+                    pkgs.append(extra)
+            self.log.emit("  ▸ Nainštalujem {} balíkov…".format(len(pkgs)))
+            for i, pkg in enumerate(pkgs, 1):
+                self.status.emit("pip install {}/{}: {}".format(i, len(pkgs), pkg.split(">")[0].split("=")[0]))
+                self.log.emit("    [{:>2}/{:>2}] {} …".format(i, len(pkgs), pkg))
+                try:
+                    subprocess.run([*py, "-m", "pip", "install", pkg],
+                                   capture_output=True, timeout=900, creationflags=_NO_WIN)
+                except Exception as pe:
+                    self.log.emit("      ⚠ {}".format(pe))
+            self.log.emit("  ✓ Závislosti nainštalované ({} balíkov).".format(len(pkgs)))
         except Exception as e:
             self.log.emit("  problém s pip (" + str(e) + ") — nainštaluj manuálne.")
 
@@ -763,7 +800,7 @@ class InstallWorker(QThread):
                     + '$s.Save()'
                 )
                 subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                               capture_output=True)
+                               capture_output=True, creationflags=_NO_WIN)
             except Exception as e:
                 self.log.emit("  skratka: " + str(e))
 
@@ -1827,6 +1864,7 @@ class _MaintenanceDialog(QDialog):
         self.action = "cancel"
         self.setWindowTitle(APP_NAME)
         self.setFixedSize(460, 280)
+        self.setObjectName("Window")
         self.setStyleSheet(_qss("dark"))
         if os.path.exists(ICON_PATH):
             self.setWindowIcon(QIcon(ICON_PATH))
@@ -1865,6 +1903,7 @@ class _UninstallDialog(QDialog):
         super().__init__(parent)
         self.rec = rec
         self.setWindowTitle(APP_NAME + " — Odinštalovanie")
+        self.setObjectName("Window")
         self.setStyleSheet(_qss("dark"))
         self.resize(560, 480)
         if os.path.exists(ICON_PATH):
@@ -2016,6 +2055,7 @@ class _RepairDialog(QDialog):
         super().__init__(parent)
         self.rec = rec
         self.setWindowTitle(APP_NAME + " — Oprava")
+        self.setObjectName("Window")
         self.setStyleSheet(_qss("dark"))
         self.resize(560, 480)
         if os.path.exists(ICON_PATH):
