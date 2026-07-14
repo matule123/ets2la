@@ -28,10 +28,29 @@ def _play_boot_sound(state):
         pass
 
 
+def _set_app_id():
+    """Set a stable Windows AppUserModelID so all windows group under one
+    taskbar button with our icon. Must run BEFORE any window is created."""
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("UltraPilot.App")
+    except Exception:
+        pass
+
+
+def _app_icon():
+    """Resolve the app icon (QIcon) from assets/favicon.ico."""
+    from PyQt6.QtGui import QIcon
+    from core.paths import resource
+    p = resource("assets", "favicon.ico")
+    return QIcon(p) if p and os.path.exists(p) else QIcon()
+
+
 def run_ui(shared_dict):
     """Process for the Main Control Panel UI."""
     logging.basicConfig(level=logging.INFO)
     logging.info("Launching UI Process...")
+    _set_app_id()
     from PyQt6.QtWidgets import QApplication
     from PyQt6.QtCore import QTimer
     from ui.app import UltraPilotApp
@@ -40,12 +59,14 @@ def run_ui(shared_dict):
     from core.settings.manager import SettingsManager
 
     app = QApplication(sys.argv)
+    app.setWindowIcon(_app_icon())
     state = SharedState(shared_dict)
 
     # Show the boot splash immediately so the user sees a clear loading state
     # (logo + spinner + „Initializing“) instead of an empty desktop while the
     # dashboard / onboarding is being built. It closes once ``ui_ready`` flips.
     splash = BootSplash()
+    splash.setWindowIcon(_app_icon())
     splash.show()
     app.processEvents()
 
@@ -94,6 +115,7 @@ def run_ui(shared_dict):
 def run_hud(shared_dict):
     """Process for the transparent HUD overlay."""
     logging.basicConfig(level=logging.INFO)
+    _set_app_id()
     from core.hud import run_hud as _run_hud
     from core.ipc.shared_state import SharedState
     _run_hud(SharedState(shared_dict))
@@ -102,6 +124,7 @@ def run_hud(shared_dict):
 def run_ar(shared_dict):
     """Process for the click-through AR overlay drawn over the game."""
     logging.basicConfig(level=logging.INFO)
+    _set_app_id()
     from PyQt6.QtWidgets import QApplication
     from core.ar_overlay import AROverlay
     from core.ipc.shared_state import SharedState
