@@ -61,6 +61,7 @@ class UltraPilotHUD(QWidget):
         self.shared_state = shared_state
         self._blink = True
         self._drag = None
+        self._t = 0.0          # animation clock (seconds) for moving lane dashes
         self._shown = False   # becomes True once the UI process signals ready
         self.init_ui()
 
@@ -82,6 +83,7 @@ class UltraPilotHUD(QWidget):
 
     def _tick(self):
         self._blink = not self._blink
+        self._t += 0.08   # advance the animation clock (timer fires every 80 ms)
         # Wait for the UI process to flag itself ready before we show the HUD.
         try:
             if not self._shown and self.shared_state.get("ui_ready", False):
@@ -301,15 +303,32 @@ class UltraPilotHUD(QWidget):
                         qp.drawPolyline(QPolygonF(pts))
                 # 3) Dashed lane dividers — one fewer line than the lane count,
                 #    placed symmetrically so a 4-lane road shows 3 dividers etc.
+                #    The dashes ANIMATE (scroll toward the truck) so the road
+                #    reads as moving, driven by the _tick animation clock.
                 if lanes >= 2:
                     spacing = (2 * HALF) / lanes
                     first = -HALF + spacing
+                    # Move the dashes faster the quicker we go (visual speed cue).
+                    spd = max(0.4, min(4.0, d.get("speed_kmh", 0) / 25.0))
+                    dash_off = -(self._t * spd * 6) % 12
+                    pen = QPen(QColor(245, 220, 120, 210), 2.2, Qt.PenStyle.DashLine)
+                    pen.setDashPattern([3, 3])
+                    pen.setDashOffset(dash_off)
                     for k in range(lanes - 1):
                         off = first + k * spacing
                         pts = polyline_at(off)
                         if len(pts) >= 2:
-                            qp.setPen(QPen(QColor(245, 220, 120, 200), 2, Qt.PenStyle.DashLine))
+                            qp.setPen(pen)
                             qp.drawPolyline(QPolygonF(pts))
+                # 3b) Stop lines / cross-road markings at intersections: draw a
+                #     solid white bar across the road ~40 m ahead (a stand-in
+                #     for junctions; the real prefab data isn't published yet).
+                bar_a = 40.0
+                bl = self._project(bar_a, -HALF, view)
+                br = self._project(bar_a, HALF, view)
+                if bl and br and abs(bl.y() - br.y()) < 80:
+                    qp.setPen(QPen(QColor(240, 240, 245, 90), 3, Qt.PenStyle.SolidLine))
+                    qp.drawLine(bl, br)
                 # 4) Anticipated route (blue) glow on the road.
                 pts = [self._project(a, l, view) for a, l in al]
                 pts = [p for p in pts if p is not None]
@@ -361,10 +380,12 @@ class UltraPilotHUD(QWidget):
         cab_n, cab_f = -2.5, 0.5
         tr_n, tr_f = -11.0, -2.6
 
-        body = "#C8CCD2"
-        body_dark = "#7A8088"
-        cab_glass = "#0F2A33"
-        chassis = "#3A3F47"
+        body = "#B8BCC4"        # cab body — slightly cooler silver
+        body_dark = "#6E747C"
+        cab_glass = "#102833"   # deep tinted windshield
+        chassis = "#2E3239"
+        trailer_body = "#C8CCD2"  # trailer — a touch lighter than the cab
+        trailer_dark = "#838A93"
 
         # --- Chassis slab under everything (ground presence + wheel shadow). ---
         self._box3d(qp, tr_n - 0.3, cab_f + 0.3, hw + 0.2, 0.0, 0.0, 0.45, view,
@@ -377,10 +398,10 @@ class UltraPilotHUD(QWidget):
                         ("#15181C", "#1F2329"))
 
         # --- Trailer box (long, tall) — the big rectangular cargo body. ---
-        self._box3d(qp, tr_n, tr_f, hw, 0.0, 0.45, trailer_h, view, (body, "#E5E7EB"))
+        self._box3d(qp, tr_n, tr_f, hw, 0.0, 0.45, trailer_h, view, (trailer_body, "#E5E7EB"))
         # Trailer roof trim (slightly raised rail along the top).
         self._box3d(qp, tr_n + 0.2, tr_f - 0.2, hw * 0.9, 0.0, trailer_h, trailer_h + 0.18,
-                    view, (body_dark, body_dark))
+                    view, (trailer_dark, trailer_dark))
 
         # --- Fifth-wheel gap (the hitch between cab and trailer). ---
         self._box3d(qp, cab_f - 0.6, tr_f + 0.1, hw * 0.5, 0.0, 0.45, 0.9, view,
