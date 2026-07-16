@@ -10,7 +10,8 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 def run_engine(shared_dict):
     """Process for the Autopilot Engine."""
-    logging.basicConfig(level=logging.INFO)
+    from core.logger import setup as _log_setup
+    _log_setup()
     logging.info("Launching Engine Process...")
     from core.engine import UltraPilotEngine
     engine = UltraPilotEngine(shared_dict)
@@ -48,7 +49,8 @@ def _app_icon():
 
 def run_ui(shared_dict):
     """Process for the Main Control Panel UI."""
-    logging.basicConfig(level=logging.INFO)
+    from core.logger import setup as _log_setup
+    _log_setup()
     logging.info("Launching UI Process...")
     _set_app_id()
     from PyQt6.QtWidgets import QApplication
@@ -123,7 +125,8 @@ def run_ui(shared_dict):
 
 def run_hud(shared_dict):
     """Process for the transparent HUD overlay."""
-    logging.basicConfig(level=logging.INFO)
+    from core.logger import setup as _log_setup
+    _log_setup()
     _set_app_id()
     from core.hud import run_hud as _run_hud
     from core.ipc.shared_state import SharedState
@@ -132,7 +135,8 @@ def run_hud(shared_dict):
 
 def run_ar(shared_dict):
     """Process for the click-through AR overlay drawn over the game."""
-    logging.basicConfig(level=logging.INFO)
+    from core.logger import setup as _log_setup
+    _log_setup()
     _set_app_id()
     from PyQt6.QtWidgets import QApplication
     from core.ar_overlay import AROverlay

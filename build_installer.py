@@ -118,6 +118,34 @@ def _ensure(pkg, import_name=None):
             return False
 
 
+def _run_pyinstaller(cmd):
+    """Run PyInstaller with calm, human-readable progress heartbeats."""
+    messages = [
+        "Analyzujem Python moduly a skryté importy…",
+        "Zhromažďujem PyQt6 knižnice a systémové závislosti…",
+        "Pridávam ikonu, SDK súbory, assety a jazykové balíky…",
+        "Kontrolujem binárne knižnice potrebné na inom počítači…",
+        "Vytváram interný balík aplikácie…",
+        "Komprimujem dáta do jedného spustiteľného súboru…",
+        "Pripájam bootloader a metadata programu…",
+        "Dokončujem EXE a kontrolujem výstupný priečinok…",
+    ]
+    process = subprocess.Popen(cmd)
+    phase_started = time.monotonic()
+    index = 0
+    info(messages[index])
+    next_message = phase_started + 7.0
+    while process.poll() is None:
+        time.sleep(0.5)
+        now = time.monotonic()
+        if now >= next_message:
+            index = min(index + 1, len(messages) - 1)
+            elapsed = int(now - phase_started)
+            info(f"{messages[index]} · uplynulo {elapsed} s")
+            next_message = now + 7.0
+    return process.returncode
+
+
 def build_installer_exe():
     """Build the single branded installer exe (PyInstaller, onefile/windowed).
 
@@ -179,11 +207,15 @@ def build_installer_exe():
 
     step(4, 5, "Zostavujem UltraPilot_Installer.exe")
     warn("Táto fáza môže trvať niekoľko minút. Okno nezatváraj.")
-    r = subprocess.run(cmd)
-    if r.returncode != 0:
-        fail(f"PyInstaller skončil s chybovým kódom {r.returncode}.",
+    info("Čistím dočasné súbory z predchádzajúceho buildu…")
+    info("Spúšťam PyInstaller v režime one-file/windowed…")
+    returncode = _run_pyinstaller(cmd)
+    if returncode != 0:
+        fail(f"PyInstaller skončil s chybovým kódom {returncode}.",
              "pozri posledné červené riadky vyššie")
         return None
+    info("PyInstaller ukončil zostavenie bez chyby")
+    info("Kontrolujem, či bol výsledný súbor korektne zapísaný na disk…")
     ok("Balenie programu bolo dokončené")
 
     step(5, 5, "Overujem výsledný inštalátor")

@@ -11,6 +11,7 @@ formatter if ``rich`` is not installed so logging never breaks.
 """
 import logging
 import os
+import sys
 
 # Enable ANSI colours on Windows terminals (best effort).
 try:
@@ -19,49 +20,80 @@ except Exception:
     pass
 
 
-def _make_console_handler():
-    """Return a rich-based console handler, or a plain ANSI fallback."""
+def _ensure_windows_console():
+    """Create the one main runtime console for a frozen GUI build."""
+    # Installed source builds launch through pythonw.exe (stdout=None), while
+    # frozen builds use a GUI executable. Both need an allocated console. A
+    # developer running from an existing terminal already has stdout, so no
+    # second window is created there.
+    needs_console = getattr(sys, "frozen", False) or sys.stdout is None
+    if os.name != "nt" or not needs_console:
+        return
     try:
-        from rich.console import Console
-        from rich.logging import RichHandler
-        # force_terminal so colours show even when stdout is piped/redirected.
-        console = Console(force_terminal=True, soft_wrap=False)
-        handler = RichHandler(
-            console=console,
-            show_time=True,
-            show_level=True,
-            show_path=False,
-            markup=True,
-            rich_tracebacks=True,
-            tracebacks_show_locals=False,
-            log_time_format="[%H:%M:%S]",
-        )
-        # RichHandler already adds time + level; the message carries the rest.
-        handler.setFormatter(logging.Formatter("%(message)s", datefmt="[%H:%M:%S]"))
-        return handler
+        import ctypes
+        from multiprocessing import current_process
+        k32 = ctypes.windll.kernel32
+        # Only the parent owns the console. Spawned processes inherit it.
+        if current_process().name == "MainProcess" and not k32.GetConsoleWindow():
+            k32.AllocConsole()
+            k32.SetConsoleTitleW("UltraPilot · Runtime log")
+        if k32.GetConsoleWindow():
+            # GUI executables and their multiprocessing children start with
+            # sys.stdout/sys.stderr=None even though the console is inherited.
+            # Bind every process to that same console explicitly.
+            sys.stdout = open("CONOUT$", "w", encoding="utf-8", buffering=1)
+            sys.stderr = open("CONOUT$", "w", encoding="utf-8", buffering=1)
+            if current_process().name == "MainProcess":
+                sys.stdin = open("CONIN$", "r", encoding="utf-8")
+        # Enable ANSI colours in the inherited/new console.
+        handle = k32.GetStdHandle(-11)
+        mode = ctypes.c_uint32()
+        if k32.GetConsoleMode(handle, ctypes.byref(mode)):
+            k32.SetConsoleMode(handle, mode.value | 0x0004)
     except Exception:
-        # Fallback: simple ANSI colour formatter.
-        _RESET = "\033[0m"
-        _COLORS = {
-            "DEBUG": "\033[90m", "INFO": "\033[92m",
-            "WARNING": "\033[93m", "ERROR": "\033[91m", "CRITICAL": "\033[97;41m",
-        }
-        _TAG = "\033[96mUltraPilot\033[0m"
+        pass
 
-        class _ColorFormatter(logging.Formatter):
-            def format(self, record):
-                color = _COLORS.get(record.levelname, "")
-                ts = self.formatTime(record, "%H:%M:%S")
-                level = f"{color}{record.levelname:<8}{_RESET}"
-                return f"\033[90m[{ts}]{_RESET} {_TAG} {level} {record.getMessage()}"
 
-        handler = logging.StreamHandler()
-        handler.setFormatter(_ColorFormatter())
-        return handler
+class _ETS2LAFormatter(logging.Formatter):
+    RESET = "\033[0m"
+    GREY = "\033[90m"
+    WHITE = "\033[97m"
+    COLORS = {
+        logging.DEBUG: "\033[96m", logging.INFO: "\033[92m",
+        logging.WARNING: "\033[93m", logging.ERROR: "\033[91m",
+        logging.CRITICAL: "\033[97;41m",
+    }
+    TAGS = {
+        logging.DEBUG: "DBG", logging.INFO: "INF", logging.WARNING: "WRN",
+        logging.ERROR: "ERR", logging.CRITICAL: "CRT",
+    }
+
+    def format(self, record):
+        color = self.COLORS.get(record.levelno, self.WHITE)
+        tag = self.TAGS.get(record.levelno, "LOG")
+        ts = self.formatTime(record, "%H:%M:%S")
+        msg = record.getMessage()
+        source = f"{record.filename}:{record.lineno}"
+        # Aim the source column at 96, while allowing long messages to remain
+        # intact instead of truncating useful diagnostics.
+        visible = 6 + 9 + len(msg)
+        gap = " " * max(2, 96 - visible)
+        line = (f"{color}[{tag}]{self.RESET} {self.GREY}{ts}{self.RESET}  "
+                f"{self.WHITE}{msg}{self.RESET}{gap}{self.GREY}{source}{self.RESET}")
+        if record.exc_info:
+            line += "\n" + self.formatException(record.exc_info)
+        return line
+
+
+def _make_console_handler():
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(_ETS2LAFormatter())
+    return handler
 
 
 def setup(level=logging.INFO):
     """Install the rich console handler on the root logger + a shared log file."""
+    _ensure_windows_console()
     root = logging.getLogger()
     root.setLevel(level)
     for h in list(root.handlers):
