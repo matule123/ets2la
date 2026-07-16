@@ -322,6 +322,28 @@ class UltraPilotEngine:
                 self.controller.release_all()
         self._hotkey_was_down = down
 
+    def _process_autopilot_command(self):
+        """Apply and acknowledge the UI's explicit master-switch command."""
+        command = self.shared_state.get("autopilot_command")
+        if not isinstance(command, dict):
+            return
+        seq = command.get("seq")
+        if not seq or seq == getattr(self, "_last_autopilot_command", None):
+            return
+        desired = bool(command.get("enabled", False))
+        self._last_autopilot_command = seq
+        self.shared_state.set("autopilot_active", desired)
+        if not desired:
+            self.controller.release_all()
+            self._was_active = False
+            self.shared_state.update_batch({
+                CTL_STEERING: 0.0, CTL_THROTTLE: 0.0, CTL_BRAKE: 0.0,
+            })
+        self.shared_state.set("autopilot_command_ack", seq)
+        self.shared_state.set("autopilot_command_pending", None)
+        logging.info("Autopilot %s (command acknowledged).",
+                     "enabled" if desired else "disabled")
+
     # --- Control flush --------------------------------------------------------
     def _flush_controls(self):
         """Apply the latest control intents to the physical device.
@@ -400,8 +422,10 @@ class UltraPilotEngine:
             delta_time = current_time - last_time
             last_time = current_time
 
-            # 0. Global hotkey (toggle autopilot from inside the game)
+            # 0. Global hotkey + explicit UI command. Process the UI command
+            # last so a click always wins over a coincident N-key edge.
             self._check_hotkey()
+            self._process_autopilot_command()
 
             # 1. Telemetry
             if self.telemetry.update():

@@ -53,10 +53,25 @@ def git_commit() -> str:
     env_commit = (os.environ.get("ULTRAPILOT_COMMIT") or "").strip()
     if env_commit:
         return _display_commit(env_commit) or "build"
-    # A real checkout is authoritative; an old external marker from a previous
-    # ZIP update must never override the current HEAD after git pull.
+    marker = ""
+    for name in ("commit.txt", "BUILD_COMMIT"):
+        try:
+            with open(os.path.join(_app_dir(), name), "r", encoding="utf-8") as f:
+                marker = _display_commit(f.read())
+            if marker:
+                break
+        except Exception:
+            pass
+    # In a clean checkout HEAD is authoritative. If a ZIP fallback replaced
+    # files without moving HEAD, the tree is dirty and commit.txt identifies
+    # the code that is actually installed.
     if os.path.isdir(os.path.join(_app_dir(), ".git")):
         try:
+            status = subprocess.run(
+                ["git", "-C", _app_dir(), "status", "--porcelain"],
+                capture_output=True, text=True, timeout=8)
+            if marker and status.returncode == 0 and status.stdout.strip():
+                return marker
             out = subprocess.run(
                 ["git", "-C", _app_dir(), "rev-parse", "--short", "HEAD"],
                 capture_output=True, text=True, timeout=8)
@@ -64,14 +79,8 @@ def git_commit() -> str:
                 return _display_commit(out.stdout) or "build"
         except Exception:
             pass
-    for name in ("commit.txt", "BUILD_COMMIT"):
-        try:
-            with open(os.path.join(_app_dir(), name), "r", encoding="utf-8") as f:
-                value = f.read().strip()
-            if value:
-                return _display_commit(value) or "build"
-        except Exception:
-            pass
+    if marker:
+        return marker
     # A frozen build must still show an explicit revision instead of silently
     # omitting the field. Installer/build scripts can replace this value.
     return "build"
@@ -189,6 +198,14 @@ def _git_pull(progress_cb=None) -> bool:
         r = subprocess.run(["git", "-C", _app_dir(), "pull", "--ff-only"],
                            capture_output=True, text=True, timeout=120)
         ok = r.returncode == 0
+        if ok:
+            head = subprocess.run(
+                ["git", "-C", _app_dir(), "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, timeout=8)
+            commit = _display_commit(head.stdout) if head.returncode == 0 else ""
+            if commit:
+                with open(os.path.join(_app_dir(), "commit.txt"), "w", encoding="utf-8") as f:
+                    f.write(commit)
         if progress_cb:
             progress_cb(1.0, "git pull " + ("OK" if ok else "failed"))
         return ok

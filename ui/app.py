@@ -499,9 +499,21 @@ class UltraPilotApp(QMainWindow):
             self.start_btn.setStyleSheet("background-color: " + self._pal['success'] + "; color: #FFFFFF; font-weight: bold; padding: 8px 18px; border-radius: 8px;")
 
     def toggle_autopilot(self):
-        current = self.state.get("autopilot_active", False)
-        self.state.set("autopilot_active", not current)
-        logging.info(f"Autopilot master switch -> {not current}")
+        import time
+        current = bool(self.state.get("autopilot_active", False))
+        desired = not current
+        seq = time.time_ns()
+        # Apply immediately for responsive UI, then let Engine authoritatively
+        # acknowledge the explicit desired state (not a second toggle).
+        self.state.set("autopilot_active", desired)
+        self.state.set("autopilot_command", {"seq": seq, "enabled": desired})
+        self.state.set("autopilot_command_pending", seq)
+        if not desired:
+            # Clear stale intents immediately; Engine also releases the device.
+            self.state.set("ctl_steering", 0.0)
+            self.state.set("ctl_throttle", 0.0)
+            self.state.set("ctl_brake", 0.0)
+        logging.info("Autopilot requested -> %s (command %s)", desired, seq)
         self._render_start_btn()
 
     def toggle_perf_overlay(self):
