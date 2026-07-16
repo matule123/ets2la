@@ -15,6 +15,11 @@ _LOG_RE = re.compile(
     r"^(?P<date>\d{4}-\d{2}-\d{2}) (?P<time>\d{2}:\d{2}:\d{2}),\d+\s+"
     r"(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL)\s+(?P<src>\S+)\s+(?P<msg>.*)$"
 )
+_ACTIVITY = (
+    "loading", "loaded", "download", "unpack", "extract", "initializ",
+    "starting", "started", "ready", "map", "dataset", "road network",
+    "plugin", "connected", "install", "repair", "update", "error", "failed",
+)
 
 
 class DynamicIsland(QWidget):
@@ -23,7 +28,7 @@ class DynamicIsland(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.setFixedHeight(40)
+        self.setFixedHeight(36)
         self._visible = False
         self._animation = None
         self._log_file = None
@@ -44,18 +49,18 @@ class DynamicIsland(QWidget):
         self.frame = QFrame()
         self.frame.setObjectName("DynamicIsland")
         self.frame.setStyleSheet(
-            "#DynamicIsland{background:rgba(18,22,29,0.96);"
-            "border:1px solid #3B4554;border-radius:16px;}"
+            "#DynamicIsland{background:#FFFFFF;"
+            "border:1px solid #D9DCE1;border-radius:15px;}"
         )
         row = QHBoxLayout(self.frame)
         row.setContentsMargins(14, 6, 14, 6)
         row.setSpacing(9)
         self.time_lbl = QLabel()
-        self.time_lbl.setStyleSheet("color:#8B949E;font-size:11px;font-weight:600;border:none;")
+        self.time_lbl.setStyleSheet("color:#9CA3AF;font-size:10px;font-weight:600;border:none;")
         self.msg_lbl = QLabel()
         self.msg_lbl.setStyleSheet("color:#2EA043;font-size:12px;font-weight:700;border:none;")
         self.src_lbl = QLabel()
-        self.src_lbl.setStyleSheet("color:#687384;font-size:10px;border:none;")
+        self.src_lbl.setStyleSheet("color:#9CA3AF;font-size:10px;border:none;")
         row.addWidget(self.time_lbl)
         row.addWidget(self.msg_lbl, 1)
         row.addWidget(self.src_lbl, 0, Qt.AlignmentFlag.AlignRight)
@@ -97,14 +102,17 @@ class DynamicIsland(QWidget):
             if not match:
                 continue
             item = match.groupdict()
-            if item["msg"].startswith("Logging to ") or "OpenGL_accelerate" in item["msg"]:
+            message = item["msg"]
+            low = message.lower()
+            if (message.startswith("Logging to ") or "OpenGL_accelerate" in message
+                    or not any(word in low for word in _ACTIVITY)):
                 continue
-            self.show_record(item["msg"], item["level"], item["time"], item["src"])
+            self.show_record(message, item["level"], item["time"], item["src"])
             break
 
     def show_record(self, msg, level, ts, src):
         color = _LEVEL_COLOR.get(level, "#8B949E")
-        short = msg if len(msg) <= 96 else msg[:93] + "..."
+        short = msg if len(msg) <= 62 else msg[:59] + "..."
         self.time_lbl.setText(ts)
         self.msg_lbl.setText(short)
         self.msg_lbl.setStyleSheet(
@@ -118,9 +126,9 @@ class DynamicIsland(QWidget):
         if not parent:
             return
         self.adjustSize()
-        width = min(max(310, self.frame.sizeHint().width() + 4), max(310, parent.width() - 28))
+        width = min(max(250, self.frame.sizeHint().width() + 4), min(520, parent.width() - 28))
         self.setFixedWidth(width)
-        self.move(parent.width() // 2 - width // 2, 10)
+        self.move(parent.width() // 2 - width // 2, parent.height() - self.height() - 48)
 
     def _animate(self, start, end, duration, easing, finished=None):
         if self._animation:
@@ -141,7 +149,7 @@ class DynamicIsland(QWidget):
             self.raise_()
             return
         self._visible = True
-        start = QPoint(end.x(), -self.height())
+        start = QPoint(end.x(), self.parentWidget().height() + self.height())
         self.move(start)
         self.show()
         self.raise_()
@@ -152,7 +160,7 @@ class DynamicIsland(QWidget):
             return
         self._visible = False
         start = self.pos()
-        self._animate(start, QPoint(start.x(), -self.height()), 170,
+        self._animate(start, QPoint(start.x(), self.parentWidget().height() + self.height()), 170,
                       QEasingCurve.Type.InCubic, self.hide)
 
     def reposition(self):

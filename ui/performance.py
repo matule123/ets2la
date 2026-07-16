@@ -1,6 +1,6 @@
 import os
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QProgressBar
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QTimer, Qt
 from core.theme import palette
 
 try:
@@ -17,15 +17,27 @@ class PerformancePage(QWidget):
         self.state = state
         self._pal = palette(state.get("ui_theme", "light") or "light")
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(30, 30, 30, 30)
-        lay.setSpacing(12)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(10)
 
-        title = QLabel("📊 Performance")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: " + self._pal['title'] + ";")
+        title = QLabel("Performance")
+        title.setStyleSheet("font-size:18px;font-weight:700;color:" + self._pal['text'] + ";")
         self._title = title
         lay.addWidget(title)
 
-        # Total system RAM bar.
+        summary = QHBoxLayout()
+        self.ram_card = QLabel("RAM\n—")
+        self.cpu_card = QLabel("CPU\n—")
+        self.proc_card = QLabel("PROCESSES\n—")
+        for card in (self.ram_card, self.cpu_card, self.proc_card):
+            card.setMinimumHeight(62)
+            card.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            card.setStyleSheet(
+                "background:#F7F8FA;color:#1F2937;border:1px solid #E5E7EB;"
+                "border-radius:9px;padding:8px;font-size:11px;font-weight:700;")
+            summary.addWidget(card)
+        lay.addLayout(summary)
+
         self.total_lbl = QLabel("System RAM")
         self.total_lbl.setStyleSheet("color:" + self._pal['muted'] + "; font-weight:bold;")
         lay.addWidget(self.total_lbl)
@@ -38,7 +50,7 @@ class PerformancePage(QWidget):
 
         # Per-process rows container.
         self.rows_frame = QFrame()
-        self.rows_frame.setStyleSheet("background:" + self._pal['card'] + "; border:1px solid " + self._pal['border'] + "; border-radius:12px; padding:10px;")
+        self.rows_frame.setStyleSheet("background:#FFFFFF;border:1px solid #E5E7EB;border-radius:10px;padding:8px;")
         self.rows = QVBoxLayout(self.rows_frame)
         lay.addWidget(self.rows_frame)
         lay.addStretch()
@@ -53,7 +65,7 @@ class PerformancePage(QWidget):
     def restyle(self, theme):
         self._pal = palette(theme)
         p = self._pal
-        self._title.setStyleSheet("font-size: 24px; font-weight: bold; color: " + p['title'] + ";")
+        self._title.setStyleSheet("font-size:18px;font-weight:700;color:" + p['text'] + ";")
         self.total_lbl.setStyleSheet("color:" + p['muted'] + "; font-weight:bold;")
         self.rows_frame.setStyleSheet("background:" + p['card'] + "; border:1px solid " + p['border'] + "; border-radius:12px; padding:10px;")
 
@@ -101,6 +113,13 @@ class PerformancePage(QWidget):
         plug_rss = sum(r for _, r in plugins) or 1
         self.app_lbl.setText(f"UltraPilot RAM: {app_rss/1e6:.0f} MB total · "
                              f"plugins {plug_rss/1e6:.0f} MB")
+        try:
+            cpu = psutil.cpu_percent(interval=None)
+        except Exception:
+            cpu = 0.0
+        self.ram_card.setText(f"APP RAM\n{app_rss/1e6:.0f} MB")
+        self.cpu_card.setText(f"SYSTEM CPU\n{cpu:.0f}%")
+        self.proc_card.setText(f"PROCESSES\n{len(procs)}")
 
         self._clear_rows()
         if not plugins:

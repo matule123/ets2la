@@ -36,6 +36,10 @@ class RoadNetLoadWorker(QThread):
     # (network, reason) — reason is "" on success, a human hint otherwise.
     done = pyqtSignal(object, str)
 
+    def __init__(self, key=None):
+        super().__init__()
+        self.key = key
+
     def run(self):
         try:
             from core.navigation import map_data
@@ -44,8 +48,9 @@ class RoadNetLoadWorker(QThread):
             if not downloaded:
                 self.done.emit(None, "no_map")
                 return
+            chosen = next((d for d in downloaded if d["key"] == self.key), downloaded[0])
             net = RoadNetwork()
-            if net.load(map_data.dataset_dir(downloaded[0]["key"])):
+            if net.load(map_data.dataset_dir(chosen["key"])):
                 self.done.emit(net, "")
             else:
                 # Files present but couldn't be parsed — usually a corrupt or
@@ -264,6 +269,13 @@ class MapPage(QWidget):
         self.btn_dl = QPushButton("↓  Download map data")
         self.btn_dl.clicked.connect(self.download_map)
         ctl.addWidget(self.btn_dl)
+        self.btn_use = QPushButton("Use & load selected map")
+        self.btn_use.setStyleSheet(
+            "QPushButton{background:#159957;color:white;border:none;border-radius:7px;padding:9px;font-weight:700;}"
+            "QPushButton:hover{background:#118249;}"
+        )
+        self.btn_use.clicked.connect(self.use_selected_map)
+        ctl.addWidget(self.btn_use)
         self.active_map_lbl = QLabel("Active map: —")
         self.active_map_lbl.setStyleSheet(
             "color:#FFFFFF!important;background:#159957;font-size:12px;font-weight:700;"
@@ -337,6 +349,7 @@ class MapPage(QWidget):
             self.dl_status.setText("Pick your game version (or ProMods) and download once.")
         self.map_combo.blockSignals(False)
         self._update_active_map_label()
+        self._update_map_actions()
 
     def _on_map_selected(self, _idx):
         """User picked a dataset in the combo — remember it as the active map."""
@@ -351,6 +364,31 @@ class MapPage(QWidget):
         # Mirror to shared state so the engine/map plugin can switch without restart.
         self.state.set("selected_map", key)
         self._update_active_map_label()
+        self._update_map_actions()
+
+    def _update_map_actions(self):
+        key = self.map_combo.currentData()
+        downloaded = False
+        try:
+            from core.navigation import map_data
+            downloaded = bool(key and map_data.is_downloaded(key))
+        except Exception:
+            pass
+        self.btn_dl.setVisible(not downloaded)
+        self.btn_use.setEnabled(downloaded and self._net_worker is None)
+        self.btn_use.setText("Use & load selected map" if downloaded else "Download map first")
+
+    def use_selected_map(self):
+        key = self.map_combo.currentData()
+        if not key:
+            return
+        self._on_map_selected(self.map_combo.currentIndex())
+        self.view.road_net = None
+        self.state.set("nav_arg", key)
+        self.state.set("nav_cmd", "switch_map")
+        self.dl_status.setText(f"Loading roads, prefabs and cities from {key}...")
+        self.btn_use.setEnabled(False)
+        self._load_road_net(key, force=True)
 
     def _update_active_map_label(self):
         """Show which map the autopilot is actually using."""
@@ -390,9 +428,9 @@ class MapPage(QWidget):
         if ok:
             self._load_road_net()
 
-    def _load_road_net(self):
+    def _load_road_net(self, key=None, force=False):
         """Load the downloaded road network in the background (for the map view)."""
-        if self.view.road_net is not None or self._net_worker is not None:
+        if (self.view.road_net is not None and not force) or self._net_worker is not None:
             return
         try:
             from core.navigation import map_data
@@ -401,12 +439,13 @@ class MapPage(QWidget):
         except Exception:
             return
         self.dl_status.setText("Loading road network…")
-        self._net_worker = RoadNetLoadWorker()
+        self._net_worker = RoadNetLoadWorker(key or self.map_combo.currentData())
         self._net_worker.done.connect(self._on_net_loaded)
         self._net_worker.start()
 
     def _on_net_loaded(self, net, reason=""):
         self._net_worker = None
+        self._update_map_actions()
         if net is not None:
             self.view.road_net = net
             self.dl_status.setText(f"✓ Map loaded ({len(net.segments)} road segments). "

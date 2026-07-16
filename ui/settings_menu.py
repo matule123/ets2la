@@ -286,6 +286,11 @@ class SettingsMenu(QWidget):
         if not code:
             return
         self.state.set("ui_language_code", code)
+        try:
+            from core.settings.manager import SettingsManager
+            SettingsManager().set("ui_language_code", code)
+        except Exception:
+            pass
         cov = i18n.coverage(code)
         name = next((i["name"] for i in i18n.available() if i["code"] == code), code)
         self.cov_label.setText(f"{name} — {cov}% translated")

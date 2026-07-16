@@ -1058,11 +1058,11 @@ class InstallerWindow(QWidget):
     Steps live in a QStackedWidget; the hero header + step rail stay fixed.
     Switching pages applies a short fade so the transition feels smooth."""
 
-    def __init__(self):
+    def __init__(self, lang="sk", theme="dark"):
         super().__init__()
         self.setObjectName("Window")
-        self.lang = "sk"
-        self.theme = "dark"
+        self.lang = lang
+        self.theme = theme
         self.exe_path = ""
         self._worker = None
         self._cur = 0
@@ -1489,6 +1489,14 @@ class InstallerWindow(QWidget):
         if code:
             self.lang = code
             _ensure_lang_loaded(code)
+            # Rebuild the installer immediately so every page, the step rail
+            # and footer use the selected translation.
+            fresh = InstallerWindow(lang=code, theme=self.theme)
+            fresh.move(self.pos())
+            fresh.show()
+            self._language_replacement = fresh
+            fresh._language_previous = self
+            self.close()
 
     def _update_path_status(self):
         if not hasattr(self, "path_status"):
@@ -1794,7 +1802,13 @@ def _do_uninstall_app(rec, log=None):
 
 def _do_uninstall_sdk(rec, log=None):
     """Remove the SDK DLLs from each recorded game's plugins folder."""
-    targets = rec.get("sdk_targets") or []
+    targets = list(rec.get("sdk_targets") or [])
+    if not targets:
+        try:
+            from core.sdk.game_utils import find_scs_games
+            targets = find_scs_games()
+        except Exception:
+            targets = []
     if not targets:
         if log:
             log("Žiadne cieľové hry v zázname — SDK nemožno nájsť.")
@@ -1932,7 +1946,22 @@ class _UninstallDialog(QDialog):
         lay.addWidget(self.chk_app)
 
         self.chk_sdk = QCheckBox("SDK pluginy (DLL z hry)")
-        has_sdk = bool(rec.get("sdk_targets"))
+        # Do not rely only on the install record: older versions did not always
+        # save sdk_targets. Detect the actual DLLs in every installed game.
+        sdk_targets = list(rec.get("sdk_targets") or [])
+        try:
+            from core.sdk.game_utils import find_scs_games
+            for game in find_scs_games():
+                plugins = os.path.join(game, "bin", "win_x64", "plugins")
+                if any(os.path.exists(os.path.join(plugins, dll)) for dll in
+                       ("scs-telemetry.dll", "scs_sdk_controller.dll", "ets2la_plugin.dll")):
+                    if game not in sdk_targets:
+                        sdk_targets.append(game)
+        except Exception:
+            pass
+        if sdk_targets:
+            self.rec["sdk_targets"] = sdk_targets
+        has_sdk = bool(sdk_targets)
         self.chk_sdk.setChecked(has_sdk)
         self.chk_sdk.setEnabled(has_sdk)
         self.chk_sdk.setStyleSheet(_chk_qss)

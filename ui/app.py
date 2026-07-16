@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QWidget, QStackedWidget, QFrame, QScrollArea,
 )
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QTimer, Qt, QSize
 
 from ui.settings_menu import SettingsMenu
 from ui.map_page import MapPage
@@ -378,14 +378,14 @@ class UltraPilotApp(QMainWindow):
         # Segoe MDL2 icon font (not emoji), so they stay crisp at every DPI.
         nav = [
             ("Main", None, None),
-            ("\ue80f", "Dashboard", 0),
-            ("\ue707", "Navigation", 1),
-            ("\ue7f4", "Visualization", 2),
+            ("dashboard", "Dashboard", 0),
+            ("navigation", "Navigation", 1),
+            ("visualization", "Visualization", 2),
             ("Plugins", None, None),
-            ("\ue713", "Manager", 3),
+            ("plugins", "Manager", 3),
             ("Application", None, None),
-            ("\ue713", "Settings", 4),
-            ("\ue946", "About", 5),
+            ("settings", "Settings", 4),
+            ("about", "About", 5),
         ]
         self._nav_btns = []
         for icon_text, text, idx in nav:
@@ -397,11 +397,15 @@ class UltraPilotApp(QMainWindow):
                     "padding:14px 18px 5px 18px;border:none;")
                 sb.addWidget(section)
                 continue
-            b = QPushButton(f"{icon_text}    {text}")
+            from ui.icons import line_icon
+            b = QPushButton(text)
+            b.setIcon(line_icon(icon_text))
+            b.setIconSize(QSize(20, 20))
             b.setObjectName("NavButton")
             b.setProperty("navIndex", idx)
+            b.setProperty("navKey", "plugins" if text == "Manager" else text.lower())
             b.setStyleSheet(
-                "QPushButton{font-family:'Segoe UI','Segoe MDL2 Assets';"
+                "QPushButton{font-family:'Segoe UI';"
                 "font-size:13px;text-align:left;background:transparent;color:#30343B;"
                 "border:none;border-radius:7px;padding:8px 12px;margin:1px 10px;}"
                 "QPushButton:hover{background:#F5F5F6;color:#111827;}"
@@ -472,6 +476,8 @@ class UltraPilotApp(QMainWindow):
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_ui)
         self.timer.start(100)
+        self._language = state.get("ui_language_code", "sk") or "sk"
+        self._apply_language(self._language)
 
         # Dynamic Island: a floating pill at the top that shows live log output
         # (INFO green / WARNING amber / ERROR red + grey timestamp + source).
@@ -482,12 +488,14 @@ class UltraPilotApp(QMainWindow):
             logging.debug("Dynamic Island unavailable: %s", e)
 
     def _render_start_btn(self):
+        from core.i18n import t
+        lang = self.state.get("ui_language_code", "sk") or "sk"
         active = self.state.get("autopilot_active", False)
         if active:
-            self.start_btn.setText("■ VYPNÚŤ AUTOPILOT")
+            self.start_btn.setText("■  " + t(lang, "app", "disable_ap"))
             self.start_btn.setStyleSheet("background-color: " + self._pal['danger'] + "; color: #FFFFFF; font-weight: bold; padding: 8px 18px; border-radius: 8px;")
         else:
-            self.start_btn.setText("▶ ZAPNÚŤ AUTOPILOT")
+            self.start_btn.setText("▶  " + t(lang, "app", "enable_ap"))
             self.start_btn.setStyleSheet("background-color: " + self._pal['success'] + "; color: #FFFFFF; font-weight: bold; padding: 8px 18px; border-radius: 8px;")
 
     def toggle_autopilot(self):
@@ -524,6 +532,14 @@ class UltraPilotApp(QMainWindow):
         for i, b in enumerate(getattr(self, "_nav_btns", [])):
             b.setChecked(i == index)
 
+    def _apply_language(self, code):
+        from core.i18n import t
+        for button in self._nav_btns:
+            key = button.property("navKey")
+            label = "Visualization" if key == "visualization" else t(code, "app", key)
+            button.setText(label)
+        self._render_start_btn()
+
     def showEvent(self, event):
         """The main window is up — let the HUD process know it can appear now."""
         try:
@@ -533,6 +549,10 @@ class UltraPilotApp(QMainWindow):
         super().showEvent(event)
 
     def update_ui(self):
+        new_language = self.state.get("ui_language_code", "sk") or "sk"
+        if new_language != getattr(self, "_language", None):
+            self._language = new_language
+            self._apply_language(new_language)
         # Live theme switching from the Settings page.
         new_theme = self.state.get("ui_theme", "light") or "light"
         if new_theme != getattr(self, "_theme", None):

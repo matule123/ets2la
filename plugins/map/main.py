@@ -93,6 +93,17 @@ class Plugin(BasePlugin):
             self.sdk.set("nav_steering", 0.0)
             logging.info("Navigation: stopped.")
 
+        elif cmd == "switch_map":
+            self.road_net = None
+            self._net_attempted = False
+            self._net_loading = False
+            self.sdk.set("active_map_key", None)
+            self.sdk.set("active_map_name", None)
+            self.sdk.set("map_path", [])
+            self.sdk.set("nav_active", False)
+            self.sdk.set("map_status", f"Loading map dataset {arg}...")
+            logging.info("Navigation: switching map dataset to %s.", arg)
+
     def _load_road_net(self):
         """Load the downloaded road network once, in the background (non-blocking).
 
