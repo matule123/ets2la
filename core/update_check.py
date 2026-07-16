@@ -45,6 +45,17 @@ def git_commit() -> str:
     env_commit = (os.environ.get("ULTRAPILOT_COMMIT") or "").strip()
     if env_commit:
         return env_commit[:10]
+    # A real checkout is authoritative; an old external marker from a previous
+    # ZIP update must never override the current HEAD after git pull.
+    if os.path.isdir(os.path.join(_app_dir(), ".git")):
+        try:
+            out = subprocess.run(
+                ["git", "-C", _app_dir(), "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, timeout=8)
+            if out.returncode == 0:
+                return out.stdout.strip()
+        except Exception:
+            pass
     for name in ("commit.txt", "BUILD_COMMIT"):
         try:
             with open(os.path.join(_app_dir(), name), "r", encoding="utf-8") as f:
@@ -53,14 +64,6 @@ def git_commit() -> str:
                 return value[:10]
         except Exception:
             pass
-    try:
-        out = subprocess.run(
-            ["git", "-C", _app_dir(), "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=8)
-        if out.returncode == 0:
-            return out.stdout.strip()
-    except Exception:
-        pass
     # A frozen build must still show an explicit revision instead of silently
     # omitting the field. Installer/build scripts can replace this value.
     return "build"
@@ -195,7 +198,7 @@ _PROTECTED = {
 }
 
 
-def _zip_update(progress_cb=None) -> bool:
+def _zip_update(progress_cb=None, target_commit=None) -> bool:
     """Fallback: download the main-branch zip and overwrite non-protected files."""
     try:
         import requests, zipfile, io, shutil
@@ -225,6 +228,12 @@ def _zip_update(progress_cb=None) -> bool:
             with open(dest, "wb") as f:
                 f.write(zf.read(n))
             replaced += 1
+        # Persist the exact remote revision outside the bundled executable.
+        # git_commit() reads this file before the embedded build metadata, so
+        # the same downloaded update is not offered again after restart.
+        if target_commit and _looks_like_sha(target_commit):
+            with open(os.path.join(_app_dir(), "commit.txt"), "w", encoding="utf-8") as f:
+                f.write(str(target_commit).strip())
         if progress_cb:
             progress_cb(1.0, f"Aktualizované ({replaced} súborov)")
         return True
@@ -239,4 +248,5 @@ def perform_update(progress_cb=None) -> bool:
     """Apply the latest code: git pull first, zip fallback otherwise."""
     if _git_pull(progress_cb):
         return True
-    return _zip_update(progress_cb)
+    target = latest_release()
+    return _zip_update(progress_cb, target_commit=target)

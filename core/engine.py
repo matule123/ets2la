@@ -46,6 +46,8 @@ class UltraPilotEngine:
         # Surrounding traffic + traffic lights from the ETS2LA game plugin (if installed).
         from core.sdk.ets2la_data import ETS2LAData
         self.ets2la = ETS2LAData()
+        from core.sdk.ets2la_route import ETS2LARouteReader
+        self.ets2la_route = ETS2LARouteReader()
         self.perception = Perception(self.shared_state)
         self.planner = UltraPilotPlanner()
 
@@ -68,6 +70,9 @@ class UltraPilotEngine:
         self._engine_off_samples = 0
         self._engine_start_attempt = 0
         self._last_engine_start = 0.0
+        self._last_game_route_distance = None
+        self._last_game_destination = ""
+        self._last_route_signature = None
         # Track autopilot on/off edges so we release controls only once on disable.
         self._was_active = False
         try:
@@ -402,6 +407,39 @@ class UltraPilotEngine:
             if self.telemetry.update():
                 truck = self.telemetry.get("truck", {}) or {}
                 self._autostart_truck(truck)
+                dest_city = self.telemetry.get("dest_city", "") or ""
+                try:
+                    route_distance = float(truck.get("routeDistance", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    route_distance = 0.0
+                prev_distance = self._last_game_route_distance
+                destination_changed = bool(
+                    dest_city and dest_city != self._last_game_destination)
+                route_changed = bool(
+                    route_distance > 0 and prev_distance is not None and prev_distance > 0
+                    and abs(route_distance - prev_distance) > 1000.0)
+                first_route = bool(route_distance > 0 and prev_distance in (None, 0))
+                planned_points = self.ets2la_route.read()
+                route_signature = None
+                if len(planned_points) >= 2:
+                    end = planned_points[-1]
+                    route_signature = (len(planned_points), round(end[0], -1), round(end[1], -1))
+                    self.shared_state.set("game_route_points",
+                                          [list(p) for p in planned_points])
+                planned_route_changed = bool(
+                    route_signature and route_signature != self._last_route_signature)
+                if destination_changed or route_changed or first_route or planned_route_changed:
+                    request = f"{time.time():.3f}:{dest_city}:{route_distance:.0f}"
+                    self.shared_state.set("nav_recalc_request", request)
+                    self.shared_state.set("nav_destination", dest_city or "nový cieľ")
+                    logging.info("Navigation: new in-game destination detected (%s, %.1f km).",
+                                 dest_city or "map waypoint", route_distance / 1000.0)
+                if route_signature:
+                    self._last_route_signature = route_signature
+                if route_distance > 0:
+                    self._last_game_route_distance = route_distance
+                if dest_city:
+                    self._last_game_destination = dest_city
                 self.shared_state.update_batch({
                     "telemetry": self.telemetry.data,
                     "speed": truck.get("speed", 0),
@@ -410,7 +448,9 @@ class UltraPilotEngine:
                     "truck_heading": truck.get("rotation", 0.0),
                     "truck_speed_ms": truck.get("speed", 0.0),
                     # Destination city of the current job (for the gantry sign).
-                    "dest_city": self.telemetry.get("dest_city", "") or "",
+                    "dest_city": dest_city,
+                    "game_route_distance": route_distance,
+                    "game_route_time": float(truck.get("routeTime", 0.0) or 0.0),
                 })
 
                 # Trailer (articulated semi-trailer, Zone 14). We publish its

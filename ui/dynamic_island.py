@@ -4,7 +4,7 @@ import os
 import re
 
 from PyQt6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, QPoint, QEvent
-from PyQt6.QtWidgets import QWidget, QHBoxLayout, QLabel, QFrame
+from PyQt6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel, QFrame, QProgressBar
 
 
 _LEVEL_COLOR = {
@@ -28,11 +28,12 @@ class DynamicIsland(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.setFixedHeight(36)
+        self.setFixedHeight(46)
         self._visible = False
         self._animation = None
         self._log_file = None
         self._log_pos = 0
+        self._navigation_was_active = False
         self._build()
         self.hide()
 
@@ -52,8 +53,10 @@ class DynamicIsland(QWidget):
             "#DynamicIsland{background:#FFFFFF;"
             "border:1px solid #D9DCE1;border-radius:15px;}"
         )
-        row = QHBoxLayout(self.frame)
-        row.setContentsMargins(14, 6, 14, 6)
+        content = QVBoxLayout(self.frame)
+        content.setContentsMargins(14, 5, 14, 5)
+        content.setSpacing(3)
+        row = QHBoxLayout()
         row.setSpacing(9)
         self.time_lbl = QLabel()
         self.time_lbl.setStyleSheet("color:#9CA3AF;font-size:10px;font-weight:600;border:none;")
@@ -64,6 +67,16 @@ class DynamicIsland(QWidget):
         row.addWidget(self.time_lbl)
         row.addWidget(self.msg_lbl, 1)
         row.addWidget(self.src_lbl, 0, Qt.AlignmentFlag.AlignRight)
+        content.addLayout(row)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setTextVisible(False)
+        self.progress.setFixedHeight(4)
+        self.progress.setStyleSheet(
+            "QProgressBar{background:#E5E7EB;border:none;border-radius:2px;}"
+            "QProgressBar::chunk{background:#10B981;border-radius:2px;}")
+        self.progress.hide()
+        content.addWidget(self.progress)
         outer.addWidget(self.frame)
 
     @staticmethod
@@ -80,6 +93,8 @@ class DynamicIsland(QWidget):
 
     def _poll_log(self):
         """Read new records written by the engine, UI, HUD and all plugins."""
+        if self._poll_navigation():
+            return
         if not self._log_file:
             return
         try:
@@ -110,6 +125,37 @@ class DynamicIsland(QWidget):
             self.show_record(message, item["level"], item["time"], item["src"])
             break
 
+    def _poll_navigation(self):
+        parent = self.parentWidget()
+        state = getattr(parent, "state", None)
+        if state is None:
+            return False
+        active = bool(state.get("navigation_recalculating", False))
+        progress = float(state.get("navigation_progress", 0.0) or 0.0)
+        status = state.get("navigation_status", "") or "Prepočítavam navigáciu…"
+        if active:
+            self._navigation_was_active = True
+            self.time_lbl.setText("NAV")
+            self.msg_lbl.setText(status)
+            self.msg_lbl.setStyleSheet("color:#047857;font-size:12px;font-weight:700;border:none;")
+            self.src_lbl.setText(f"{int(progress * 100)}%")
+            self.progress.setValue(int(progress * 100))
+            self.progress.show()
+            self._hide_timer.stop()
+            self._slide_in()
+            return True
+        if self._navigation_was_active:
+            self._navigation_was_active = False
+            self.time_lbl.setText("NAV")
+            self.msg_lbl.setText(status or "Trasa je pripravená")
+            self.src_lbl.setText("100%")
+            self.progress.setValue(100)
+            self.progress.show()
+            self._slide_in()
+            self._hide_timer.start(2600)
+            return True
+        return False
+
     def show_record(self, msg, level, ts, src):
         color = _LEVEL_COLOR.get(level, "#8B949E")
         short = msg if len(msg) <= 62 else msg[:59] + "..."
@@ -118,6 +164,7 @@ class DynamicIsland(QWidget):
         self.msg_lbl.setStyleSheet(
             f"color:{color};font-size:12px;font-weight:700;border:none;")
         self.src_lbl.setText((src or "UltraPilot").rsplit(".", 1)[-1])
+        self.progress.hide()
         self._slide_in()
         self._hide_timer.start(4500 if level in ("WARNING", "ERROR", "CRITICAL") else 3000)
 

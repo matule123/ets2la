@@ -68,6 +68,8 @@ class Telemetry:
             "gear": ti.get("gear", 0),
             "fuel": tf.get("fuel", 0.0),
             "fuelRange": tf.get("fuelRange", 0.0),
+            "routeDistance": tf.get("routeDistance", 0.0),
+            "routeTime": tf.get("routeTime", 0.0),
             "speedLimit": tf.get("speedLimit", 0.0),
             "cruiseControlSpeed": tf.get("cruiseControlSpeed", 0.0),
             "parkBrake": tb.get("parkBrake", False),
@@ -121,6 +123,8 @@ class Telemetry:
             "fuel": truck.get("fuel", 0.0),
             "speedLimit": truck.get("speedLimit", 0.0),
             "cruiseControlSpeed": truck.get("cruiseControlSpeed", 0.0),
+            "routeDistance": truck.get("routeDistance", 0.0),
+            "routeTime": truck.get("routeTime", 0.0),
         }
         return {"raw": payload, "truck": norm}
 

@@ -1,6 +1,7 @@
 import logging
 import os
 import math
+import time
 from sdk.base_plugin import BasePlugin
 from core.navigation.route import Route
 from core.paths import app_dir
@@ -38,6 +39,8 @@ class Plugin(BasePlugin):
         self._net_attempted = False  # tried to load the road network this run?
         self._net_loading = False    # background load in progress (don't re-enter)
         self._diag_t = 0.0           # throttle for localization diagnostics
+        self._last_recalc_request = None
+        self._recalc_started = 0.0
         os.makedirs(ROUTES_DIR, exist_ok=True)
         self._publish_route_list()
 
@@ -233,6 +236,18 @@ class Plugin(BasePlugin):
         Falls back to whatever the UI process publishes as ``map_path`` if the
         engine-side network isn't available yet.
         """
+        # Prefer the actual route selected in ETS2's world map, exported by the
+        # ETS2LA route buffer. This is the planned route, not merely the nearest
+        # road segment in front of the truck.
+        game_route = self.sdk.get("game_route_points", []) or []
+        if len(game_route) >= 2:
+            route = Route([tuple(p) for p in game_route])
+            idx = route.closest_index(pos)
+            remaining = [list(p) for p in route.points[idx:]]
+            self.sdk.set("map_path", remaining)
+            self.sdk.set("distance_to_dest", route.distance_to_end(pos))
+            return remaining[:60]
+
         # Prefer the engine-side network (works regardless of which UI page is open).
         if self.road_net is not None and self.road_net.loaded:
             try:
@@ -247,6 +262,50 @@ class Plugin(BasePlugin):
         # Fallback: reuse a path the UI process may have published.
         return self.sdk.get("map_path", []) or []
 
+    def _update_recalculation(self, pos, heading):
+        request = self.sdk.get("nav_recalc_request")
+        if request and request != self._last_recalc_request:
+            self._last_recalc_request = request
+            self._recalc_started = time.monotonic()
+            self.sdk.set("navigation_recalculating", True)
+            self.sdk.set("navigation_progress", 0.08)
+            self.sdk.set("navigation_status", "Nový cieľ · načítavam trasu z hry…")
+            self.sdk.set("nav_path", [])
+            logging.info("Navigation: recalculating route for new in-game destination.")
+        if not self.sdk.get("navigation_recalculating", False):
+            return
+        elapsed = time.monotonic() - self._recalc_started
+        points = self.sdk.get("game_route_points", []) or []
+        if elapsed < 0.25:
+            self.sdk.set("navigation_progress", 0.25)
+            self.sdk.set("navigation_status", "Kontrolujem cieľ a mapové dáta…")
+            return
+        if len(points) < 2:
+            if elapsed > 3.0:
+                fallback = []
+                if self.road_net is not None and self.road_net.loaded:
+                    try:
+                        fallback = self.road_net.path_ahead(pos, heading)
+                    except Exception:
+                        fallback = []
+                self.sdk.set("nav_path", [list(p) for p in fallback[:60]])
+                self.sdk.set("navigation_progress", 1.0)
+                self.sdk.set("navigation_status", "Trasa obnovená podľa mapových dát")
+                self.sdk.set("navigation_recalculating", False)
+                return
+            self.sdk.set("navigation_progress", 0.42)
+            self.sdk.set("navigation_status", "Čakám na naplánovanú trasu z ETS2…")
+            return
+        self.sdk.set("navigation_progress", 0.72)
+        self.sdk.set("navigation_status", f"Spracúvam {len(points)} bodov trasy…")
+        path = self._ensure_map_path(pos, heading)
+        if len(path) >= 2 and elapsed >= 0.55:
+            self.sdk.set("nav_path", path[:60])
+            self.sdk.set("navigation_progress", 1.0)
+            self.sdk.set("navigation_status", "Trasa prepočítaná · navigácia pripravená")
+            self.sdk.set("navigation_recalculating", False)
+            logging.info("Navigation: route recalculated (%d planned points).", len(points))
+
     # --- Tick -----------------------------------------------------------------
     def on_tick(self, delta_time: float):
         if not self.enabled:
@@ -260,6 +319,8 @@ class Plugin(BasePlugin):
 
         if not pos:
             return
+
+        self._update_recalculation(pos, heading)
 
         # Lazily load the downloaded road network (engine process) the first
         # time we have a position. Cheap no-op once attempted.

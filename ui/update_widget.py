@@ -96,7 +96,7 @@ class _UpdateWorker(QThread):
 
 
 class UpdateConfirmDialog(QDialog):
-    """A bespoke dark ETS2LA-style confirmation dialog (replaces the drab
+    """A clean light ETS2LA-style confirmation dialog (replaces the drab
     native QMessageBox). Shows the new version, a short note that the app will
     restart, and green/grey Yes–No buttons."""
 
@@ -105,26 +105,28 @@ class UpdateConfirmDialog(QDialog):
         self.setWindowTitle("Aktualizovať UltraPilot")
         self.setModal(True)
         self.setFixedSize(420, 230)
-        # GitHub-style dark card.
+        # Match the application's default white ETS2LA-style surfaces.
         self.setStyleSheet(
-            "UpdateConfirmDialog { background: #0D1117; }"
-            "QLabel { color: #E6EDF3; background: transparent; }")
+            "UpdateConfirmDialog{background:#FFFFFF;}"
+            "QLabel{color:#111827;background:transparent;}")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(28, 24, 28, 20)
         lay.setSpacing(12)
 
         head = QHBoxLayout()
         head.setSpacing(14)
-        icon = QLabel("⬇")
-        icon.setStyleSheet("font-size: 34px; color: #2EA043; background: transparent;")
+        icon = QLabel("↓")
+        icon.setFixedSize(48, 48)
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon.setStyleSheet("font-size:28px;font-weight:800;color:#047857;background:#ECFDF5;border:1px solid #A7F3D0;border-radius:14px;")
         head.addWidget(icon)
         col = QVBoxLayout()
         col.setSpacing(2)
         title = QLabel("Dostupná aktualizácia")
-        title.setStyleSheet("font-size: 18px; font-weight: 800; color: #2EA043; background: transparent;")
+        title.setStyleSheet("font-size:18px;font-weight:800;color:#111827;")
         col.addWidget(title)
         ver = QLabel("Nová verzia: " + str(latest_tag))
-        ver.setStyleSheet("font-size: 13px; color: #8B949E; background: transparent;")
+        ver.setStyleSheet("font-size:12px;color:#047857;font-weight:700;")
         col.addWidget(ver)
         head.addLayout(col, stretch=1)
         lay.addLayout(head)
@@ -132,7 +134,7 @@ class UpdateConfirmDialog(QDialog):
         note = QLabel("Aplikácia sa po dokončení reštartuje.\n"
                       "Tvoje nastavenia, trasy a mapy zostanú zachované.")
         note.setWordWrap(True)
-        note.setStyleSheet("font-size: 13px; color: #C9D1D9; background: transparent;")
+        note.setStyleSheet("font-size:13px;color:#4B5563;background:#F9FAFB;border:1px solid #E5E7EB;border-radius:10px;padding:12px;")
         lay.addWidget(note)
         lay.addStretch()
 
@@ -142,9 +144,9 @@ class UpdateConfirmDialog(QDialog):
         no.setCursor(Qt.CursorShape.PointingHandCursor)
         no.setFixedWidth(110)
         no.setStyleSheet(
-            "QPushButton{background:transparent;color:#C9D1D9;border:1px solid #30363D;"
+            "QPushButton{background:#FFFFFF;color:#374151;border:1px solid #D1D5DB;"
             "border-radius:8px;padding:9px;font-weight:600;}"
-            "QPushButton:hover{border-color:#8B949E;color:#E6EDF3;}")
+            "QPushButton:hover{background:#F9FAFB;border-color:#9CA3AF;}")
         no.clicked.connect(self.reject)
         row.addWidget(no)
         yes = QPushButton("Aktualizovať")
@@ -152,10 +154,10 @@ class UpdateConfirmDialog(QDialog):
         yes.setFixedWidth(130)
         yes.setStyleSheet(
             "QPushButton{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            "stop:0 #2EA043, stop:1 #238636);color:#FFFFFF;border:none;"
+            "stop:0 #10B981, stop:1 #059669);color:#FFFFFF;border:none;"
             "border-radius:8px;padding:9px;font-weight:700;}"
             "QPushButton:hover{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            "stop:0 #34D058, stop:1 #2EA043);}")
+            "stop:0 #34D399, stop:1 #059669);}")
         yes.clicked.connect(self.accept)
         yes.setDefault(True)
         row.addWidget(yes)
@@ -188,20 +190,20 @@ class UpdateCheckerWidget(QWidget):
         top.setContentsMargins(0, 0, 0, 0)
         top.setSpacing(6)
         self.version_lbl = QLabel(self._version_text())
-        self.version_lbl.setStyleSheet("font-size: 11px; font-weight: 700; color: #9CA3AF; border:none;")
+        self.version_lbl.setStyleSheet("font-size:11px;font-weight:700;color:#6B7280;border:none;")
         self.version_lbl.setWordWrap(True)
         top.addWidget(self.version_lbl)
         # A separate status line (check result / progress) so the version is
         # ALWAYS visible above it and never overwritten.
-        self.status_lbl = QLabel("")
-        self.status_lbl.setStyleSheet("font-size: 10px; color: #8B949E; border:none;")
-        self.status_lbl.setWordWrap(True)
-        top.addWidget(self.status_lbl)
         top.addStretch()
         self.spinner = Spinner(size=14)
         self.spinner.hide()
         top.addWidget(self.spinner)
         lay.addLayout(top)
+        self.status_lbl = QLabel("")
+        self.status_lbl.setStyleSheet("font-size:10px;color:#6B7280;border:none;")
+        self.status_lbl.setWordWrap(True)
+        lay.addWidget(self.status_lbl)
         # Button (full width, short label so it fits the narrow sidebar).
         self.btn = QPushButton("Aktualizácia")
         self.btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -223,9 +225,9 @@ class UpdateCheckerWidget(QWidget):
                 "QPushButton:hover{background:#059669;}")
         else:
             self.btn.setStyleSheet(
-                "QPushButton{background:transparent;color:#9CA3AF;border:1px solid #3D4654;"
+                "QPushButton{background:#FFFFFF;color:#4B5563;border:1px solid #D1D5DB;"
                 "border-radius:6px;padding:4px 10px;font-size:11px;font-weight:600;}"
-                "QPushButton:hover{color:" + ACCENT + ";border-color:" + ACCENT + ";}")
+                "QPushButton:hover{background:#F0FDF4;color:" + ACCENT + ";border-color:" + ACCENT + ";}")
 
     def _version_text(self):
         t = "v" + self._version

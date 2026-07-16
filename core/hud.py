@@ -240,7 +240,11 @@ class UltraPilotHUD(QWidget):
             p1 = pts[i]
             p2 = pts[i + 1]
             p3 = pts[min(n - 1, i + 2)]
-            for t in range(samples + 1):
+            # Do not repeat the segment endpoint as the next segment's start.
+            # Those duplicate points produced a zero tangent in offset_pt(),
+            # collapsing both road edges to the centre every few samples and
+            # drawing the ladder-like horizontal bars seen in the HUD.
+            for t in range(samples):
                 f = t / samples
                 f2 = f * f
                 f3 = f2 * f
@@ -251,6 +255,7 @@ class UltraPilotHUD(QWidget):
                            (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * f2 +
                            (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * f3)
                 out.append((a, b))
+        out.append(pts[-1])
         return out
 
     def _draw_driving_view(self, qp, view, d):
@@ -302,8 +307,9 @@ class UltraPilotHUD(QWidget):
 
             def offset_pt(i, off):
                 a, l = al[i]
-                j = min(i + 1, len(al) - 1)
-                da, dl = al[j][0] - a, al[j][1] - l
+                prev = al[max(0, i - 1)]
+                nxt = al[min(i + 1, len(al) - 1)]
+                da, dl = nxt[0] - prev[0], nxt[1] - prev[1]
                 n = math.hypot(da, dl) or 1.0
                 return self._project(a, l + (-da / n) * off, view)
 

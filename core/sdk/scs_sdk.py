@@ -174,6 +174,8 @@ class SCSTelemetry:
             tf["cruiseControlSpeed"] = self.read_float(988)[0]
             tf["fuel"] = self.read_float(1000)[0]               # liters
             tf["fuelRange"] = self.read_float(1008)[0]          # km
+            tf["routeDistance"] = self.read_float(1060)[0]      # metres
+            tf["routeTime"] = self.read_float(1064)[0]          # seconds
             tf["speedLimit"] = self.read_float(1068)[0]         # m/s
             data["truckFloat"] = tf
 
