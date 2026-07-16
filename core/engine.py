@@ -64,6 +64,10 @@ class UltraPilotEngine:
         # game without alt-tabbing.  Uses GetAsyncKeyState (works app-wide).
         self._hotkey_vk = 0x4E  # 'N'
         self._hotkey_was_down = False
+        self._cranking = False
+        self._engine_off_samples = 0
+        self._engine_start_attempt = 0
+        self._last_engine_start = 0.0
         # Track autopilot on/off edges so we release controls only once on disable.
         self._was_active = False
         try:
@@ -92,41 +96,73 @@ class UltraPilotEngine:
         logging.info("ETS2-UltraPilot Engine stopped.")
 
     def _autostart_truck(self, truck):
-        """Start the engine the way the game expects: hold the ignition key.
-
-        In ETS2's realistic mode a tap turns on the electrics and HOLDING the
-        key cranks the starter until the engine catches. A single press() left
-        the engine dead, so the truck never moved. We hold 'e' for ~1.2 s."""
+        """Recover a stalled engine using telemetry-controlled ignition steps."""
         if not self.shared_state.get("autopilot_active", False):
+            self._engine_off_samples = 0
             return
-        if truck.get("engineEnabled", True):
-            # Engine running — clear any held-key state.
-            self._cranking = False
+        running = bool(truck.get("engineEnabled", False)) or float(
+            truck.get("engineRpm", 0.0) or 0.0) > 150.0
+        if running:
+            self._engine_off_samples = 0
+            self._engine_start_attempt = 0
+            return
+
+        # Ignore short false telemetry frames. Previously one false boolean was
+        # enough to press E, which could turn a healthy engine off.
+        self._engine_off_samples += 1
+        if self._engine_off_samples < max(8, int(self.fps * 0.35)):
+            return
+        if self._cranking:
             return
         now = time.time()
-        if now - getattr(self, "_last_engine_start", 0) < 3.0:
-            return   # cooldown so we don't spam the ignition
+        if now - self._last_engine_start < 5.0:
+            return
         self._last_engine_start = now
-        try:
+        self._engine_start_attempt += 1
+        self._cranking = True
+
+        def _running_now():
+            current = ((self.shared_state.get("telemetry", {}) or {})
+                       .get("truck", {}) or {})
+            return (bool(current.get("engineEnabled", False)) or
+                    float(current.get("engineRpm", 0.0) or 0.0) > 150.0)
+
+        def _start_sequence():
             import pydirectinput
-            # Hold the key like a real driver would crank the ignition.
-            pydirectinput.keyDown('e')
-            self._cranking = True
-            # Schedule the release shortly after (separate timer so we don't
-            # block the engine loop while cranking).
-            import threading
-            def _release():
-                time.sleep(1.2)
+            try:
+                # ETS2 configurations differ: a tap may enable electrics, a
+                # second tap may select ignition, and realistic ignition needs
+                # a hold. Check telemetry after every stage and stop instantly
+                # when the engine catches so E can never toggle it back off.
+                for _ in range(2):
+                    if _running_now():
+                        return
+                    pydirectinput.press('e')
+                    time.sleep(0.45)
+                if _running_now():
+                    return
+                hold_s = min(2.4, 1.25 + 0.25 * (self._engine_start_attempt - 1))
+                pydirectinput.keyDown('e')
+                deadline = time.time() + hold_s
+                while time.time() < deadline and not _running_now():
+                    time.sleep(0.08)
+            except Exception as e:
+                logging.warning("Engine start sequence failed: %s", e)
+            finally:
                 try:
                     pydirectinput.keyUp('e')
                 except Exception:
                     pass
                 self._cranking = False
-            threading.Thread(target=_release, daemon=True).start()
-            logging.info("Truck engine off — cranking the starter (hold 'e').")
+
+        try:
+            import threading
+            threading.Thread(target=_start_sequence, daemon=True).start()
+            logging.info("Truck engine off — adaptive ignition sequence started.")
             self.shared_state.set("tts_message", "Štartujem motor.")
-        except Exception:
-            pass
+        except Exception as e:
+            self._cranking = False
+            logging.warning("Could not start ignition worker: %s", e)
 
     # --- Traffic following ----------------------------------------------------
     def _lead_brake(self, traffic, pos, heading):

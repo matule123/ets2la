@@ -134,7 +134,10 @@ class Controller:
     def pay_toll(self):
         logging.info("Paying toll...")
         if _HAS_PDI:
-            pydirectinput.press('e')
+            # Keep the interaction key separate from ETS2's E ignition key.
+            # Using E here was able to switch off a running engine at a false
+            # toll detection; Enter confirms the toll/menu interaction safely.
+            pydirectinput.press('enter')
 
     def release_all(self):
         """Release every input — used on shutdown / when autopilot turns off."""

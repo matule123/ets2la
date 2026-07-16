@@ -509,7 +509,7 @@ class UltraPilotApp(QMainWindow):
         try:
             if self.perf_overlay is None:
                 from ui.perf_overlay import PerfOverlay
-                self.perf_overlay = PerfOverlay(self.state)
+                self.perf_overlay = PerfOverlay(self.state, self)
             if self.perf_overlay.isVisible():
                 self.perf_overlay.hide()
                 self.perf_btn.setStyleSheet(
@@ -517,7 +517,7 @@ class UltraPilotApp(QMainWindow):
                     "border-radius:8px;color:" + self._pal['muted'] + ";font-size:16px;font-weight:700;}"
                     "QPushButton:hover{border-color:" + self._pal['title'] + ";color:" + self._pal['title'] + ";}")
             else:
-                self.perf_overlay.show()
+                self.perf_overlay.show_above(self.perf_btn)
                 self.perf_overlay.refresh()
                 # Active state: filled accent chip.
                 self.perf_btn.setStyleSheet(

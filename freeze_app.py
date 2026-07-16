@@ -8,6 +8,8 @@ This is NOT the installer — it only turns the source into a runnable
     python freeze_app.py build      # -> build/exe.win-amd64-*/UltraPilot.exe
 """
 
+import os
+import subprocess
 import sys
 from cx_Freeze import setup, Executable
 
@@ -16,6 +18,19 @@ from cx_Freeze import setup, Executable
 sys.setrecursionlimit(10000)
 
 VERSION = "0.4.1"
+
+# Preserve the source revision in frozen installations where .git is absent.
+_meta_dir = os.path.join(os.path.dirname(__file__), "build", "metadata")
+os.makedirs(_meta_dir, exist_ok=True)
+try:
+    _commit = subprocess.check_output(
+        ["git", "rev-parse", "--short", "HEAD"], cwd=os.path.dirname(__file__),
+        text=True, timeout=8).strip()
+except Exception:
+    _commit = "build"
+_commit_file = os.path.join(_meta_dir, "commit.txt")
+with open(_commit_file, "w", encoding="utf-8") as _f:
+    _f.write(_commit)
 
 build_exe_options = {
     "packages": [
@@ -37,6 +52,7 @@ build_exe_options = {
         ("assets/", "assets/"),
         ("plugins/", "plugins/"),
         ("README.md", "README.md"),
+        (_commit_file, "commit.txt"),
     ],
     # The optional AI/ML stack (~1.2 GB) is excluded — the lane model degrades to
     # OpenCV when absent, and bundling it bloats the build enormously.

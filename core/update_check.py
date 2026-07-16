@@ -41,7 +41,18 @@ def current_version() -> str:
 
 
 def git_commit() -> str:
-    """Short HEAD commit hash, or '' if not a git checkout / git missing."""
+    """Short build commit, including frozen installs without a .git folder."""
+    env_commit = (os.environ.get("ULTRAPILOT_COMMIT") or "").strip()
+    if env_commit:
+        return env_commit[:10]
+    for name in ("commit.txt", "BUILD_COMMIT"):
+        try:
+            with open(os.path.join(_app_dir(), name), "r", encoding="utf-8") as f:
+                value = f.read().strip()
+            if value:
+                return value[:10]
+        except Exception:
+            pass
     try:
         out = subprocess.run(
             ["git", "-C", _app_dir(), "rev-parse", "--short", "HEAD"],
@@ -50,7 +61,9 @@ def git_commit() -> str:
             return out.stdout.strip()
     except Exception:
         pass
-    return ""
+    # A frozen build must still show an explicit revision instead of silently
+    # omitting the field. Installer/build scripts can replace this value.
+    return "build"
 
 
 def latest_release() -> str | None:

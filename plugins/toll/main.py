@@ -48,10 +48,11 @@ class Plugin(BasePlugin):
 
         speed = abs(float(self.sdk.shared_state.get("truck_speed_ms", 0.0) or 0.0))
         nav = bool(self.sdk.shared_state.get("nav_active", False))
+        toll_confirmed = bool(self.sdk.shared_state.get("toll_detected", False))
         now = time.time()
         on_cooldown = (now - self._last_pay) < COOLDOWN_S
 
-        if nav and not on_cooldown and speed <= APPROACH_SPEED_MS:
+        if nav and toll_confirmed and not on_cooldown and speed <= APPROACH_SPEED_MS:
             # We're creeping on a route — likely approaching a booth. If we then
             # come to a full stop, that's the pay moment.
             if speed <= STOP_SPEED_MS:

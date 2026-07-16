@@ -78,17 +78,13 @@ class PerfOverlay(QWidget):
             Qt.WindowType.WindowStaysOnTopHint |
             Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
-        self.setFixedSize(280, 250)
+        self.setFixedSize(330, 360)
         self._drag = None
         # Resolve the palette BEFORE _build() so the labels can read _pal.
         from core.theme import palette
         self._pal = palette(state.get("ui_theme", "light") or "light")
         self._build()
-        self.setStyleSheet("background-color: " + self._pal['card'] + "; border: 1px solid " + self._pal['border'] + "; border-radius: 14px;")
-        # Anchor bottom-left.
-        screen = self.screen().geometry() if self.screen() else None
-        if screen is not None:
-            self.move(24, screen.height() - self.height() - 24)
+        self._apply_window_style()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh)
         self.timer.start(500)
@@ -98,20 +94,40 @@ class PerfOverlay(QWidget):
         from core.theme import palette
         self._pal = palette(theme)
         p = self._pal
-        self.setStyleSheet("background-color: " + p['card'] + "; border: 1px solid " + p['border'] + "; border-radius: 14px;")
+        self._apply_window_style()
         self._style_total_bar()
         # Rebuild the labels so the new palette's text colours apply.
         # Simplest reliable path: clear and re-add via a fresh _build-like refresh.
         self.refresh()
 
+    def _apply_window_style(self):
+        p = self._pal
+        self.setStyleSheet(
+            "PerfOverlay{background:" + p['card'] + ";border:1px solid " + p['border'] + ";border-radius:16px;}"
+            "QLabel{background:transparent;border:none;}"
+            "QWidget{font-family:'Segoe UI';}")
+
+    def show_above(self, anchor):
+        """Open as a compact popover directly above the performance button."""
+        point = anchor.mapToGlobal(QPoint(0, 0))
+        screen = anchor.screen().availableGeometry() if anchor.screen() else None
+        x = point.x()
+        y = point.y() - self.height() - 10
+        if screen is not None:
+            x = max(screen.left() + 8, min(x, screen.right() - self.width() - 8))
+            y = max(screen.top() + 8, min(y, screen.bottom() - self.height() - 8))
+        self.move(x, y)
+        self.show()
+        self.raise_()
+
     def _build(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(14, 10, 14, 12)
-        root.setSpacing(6)
+        root.setContentsMargins(18, 16, 18, 16)
+        root.setSpacing(10)
         head = QHBoxLayout()
         head.setSpacing(6)
-        title = QLabel("⚡ Performance")
-        title.setStyleSheet("font-size: 13px; font-weight: 800; color: " + self._pal['title'] + ";")
+        title = QLabel("Performance")
+        title.setStyleSheet("font-size:17px;font-weight:800;color:" + self._pal['title'] + ";")
         head.addWidget(title)
         head.addStretch()
         close = QPushButton("✕")
@@ -122,12 +138,18 @@ class PerfOverlay(QWidget):
         head.addWidget(close)
         root.addLayout(head)
 
-        self.total_lbl = QLabel("UltraPilot: — MB")
-        self.total_lbl.setStyleSheet("font-size: 12px; font-weight: 700; color: " + self._pal['text'] + ";")
-        root.addWidget(self.total_lbl)
-        self.cpu_lbl = QLabel("CPU: — %")
-        self.cpu_lbl.setStyleSheet("font-size: 11px; font-weight: 600; color: " + self._pal['muted'] + ";")
-        root.addWidget(self.cpu_lbl)
+        summary = QFrame()
+        summary.setStyleSheet("QFrame{background:" + self._pal['field'] + ";border:1px solid " + self._pal['border'] + ";border-radius:12px;}")
+        summary_lay = QHBoxLayout(summary)
+        summary_lay.setContentsMargins(13, 10, 13, 10)
+        self.total_lbl = QLabel("RAM\n— MB")
+        self.total_lbl.setStyleSheet("font-size:12px;font-weight:700;color:" + self._pal['text'] + ";")
+        self.cpu_lbl = QLabel("CPU\n— %")
+        self.cpu_lbl.setStyleSheet("font-size:12px;font-weight:700;color:" + self._pal['text'] + ";")
+        summary_lay.addWidget(self.total_lbl)
+        summary_lay.addStretch()
+        summary_lay.addWidget(self.cpu_lbl)
+        root.addWidget(summary)
 
         bar_wrap = QFrame()
         bar_wrap.setStyleSheet("background: transparent; border: none;")
@@ -142,8 +164,8 @@ class PerfOverlay(QWidget):
         bw.addWidget(self.total_bar)
         root.addWidget(bar_wrap)
 
-        hint = QLabel("Per plugin:")
-        hint.setStyleSheet("font-size: 11px; color: " + self._pal['muted'] + ";")
+        hint = QLabel("PROCESY A PLUGINY")
+        hint.setStyleSheet("font-size:10px;font-weight:700;letter-spacing:1px;color:" + self._pal['muted'] + ";")
         root.addWidget(hint)
         self.rows_box = QVBoxLayout()
         self.rows_box.setSpacing(3)
@@ -169,8 +191,8 @@ class PerfOverlay(QWidget):
 
     def refresh(self):
         app_mb, app_cpu, plugins = _collect()
-        self.total_lbl.setText(f"UltraPilot: {app_mb:.0f} MB")
-        self.cpu_lbl.setText(f"CPU: {app_cpu:.0f} %")
+        self.total_lbl.setText(f"RAM\n{app_mb:.0f} MB")
+        self.cpu_lbl.setText(f"CPU\n{app_cpu:.0f} %")
         # The total bar is relative to a 1 GB soft cap for a quick visual feel.
         self.total_bar.setValue(min(100, int(app_mb / 1024 * 100)))
         self._clear_rows()
