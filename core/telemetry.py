@@ -53,19 +53,13 @@ class Telemetry:
         tp = raw.get("truckPlacement", {}) or {}
         ti = raw.get("truckInt", {}) or {}
         speed_ms = tf.get("speed", 0.0) or 0.0
-        # rotationX from the SCS SDK is the truck's heading angle in RADIANS
-        # (confirmed against the ETS2LA reference, which reads it as a raw
-        # double and uses it directly — no 0..1 fraction, no scaling). The old
-        # code multiplied it by 2π, turning a real ~0.76 rad heading into ~4.8
-        # rad and making the Stanley controller command full-lock steering
-        # (nav_steering stuck at -1.0 → truck yanked hard left on autopilot).
-        # Use the value as-is, wrapped to [-π, π].
+        # SCS stores rotationX in turns (ETS2LA likewise multiplies it by 360
+        # for degrees). Convert once here and expose radians to navigation.
         rot_x = float(tp.get("rotationX", 0.0) or 0.0)
-        heading = (rot_x + math.pi) % (2.0 * math.pi) - math.pi
+        heading = (rot_x * math.tau + math.pi) % math.tau - math.pi
         if not getattr(self, "_logged_rot_convention", False):
-            logging.info("telemetry: rotationX=%.4f rad → heading %.4f rad (%.1f°)",
+            logging.info("telemetry: rotationX=%.4f turns -> heading %.4f rad (%.1f deg)",
                          rot_x, heading, math.degrees(heading))
-            self._logged_rot_convention = True
             self._logged_rot_convention = True
         truck = {
             "speed": speed_ms,                       # m/s (plugins convert)
@@ -94,7 +88,8 @@ class Telemetry:
         try:
             raw_tr = self.sdk_reader.read_trailer(0)
             if raw_tr and raw_tr.get("attached"):
-                tr_heading = (raw_tr.get("rotationX", 0.0) or 0.0) * 2.0 * math.pi
+                raw_tr_heading = float(raw_tr.get("rotationX", 0.0) or 0.0)
+                tr_heading = (raw_tr_heading * math.tau + math.pi) % math.tau - math.pi
                 trailer = {
                     "attached": True,
                     "speed": speed_ms,                 # approximated by the truck's

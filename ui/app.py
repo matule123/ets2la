@@ -446,6 +446,14 @@ class UltraPilotApp(QMainWindow):
         self.timer.timeout.connect(self.update_ui)
         self.timer.start(100)
 
+        # Dynamic Island: a floating pill at the top that shows live log output
+        # (INFO green / WARNING amber / ERROR red + grey timestamp + source).
+        try:
+            from ui.dynamic_island import DynamicIsland
+            self.island = DynamicIsland.install(self)
+        except Exception as e:
+            logging.debug("Dynamic Island unavailable: %s", e)
+
     def _render_start_btn(self):
         active = self.state.get("autopilot_active", False)
         if active:

@@ -245,7 +245,9 @@ class Route:
         # Truck forward vector in ETS2 world space.
         fx, fz = -math.sin(heading), -math.cos(heading)
         # Signed heading error: +angle means the target is to the right.
-        cross = fx * dz - fz * dx
+        # Standard 2-D cross(target, forward): positive means target is on the
+        # truck's right in ETS2's x/z coordinate system.
+        cross = fz * dx - fx * dz
         dot = fx * dx + fz * dz
         heading_error = math.atan2(cross, dot)
 
@@ -267,7 +269,9 @@ class Route:
         # old pure-gain sum produced in S-bends. The speed_gain schedule scales
         # the whole command down with speed (gentle inputs at 90 km/h).
         v = max(abs(speed_ms), 0.0)
-        cte_steer = math.atan((K_CTE * cte) / (K_SOFT + v))
+        # cross_track_error is negative when a +z route lies to our right, so
+        # negate it to match the controller convention: positive = right.
+        cte_steer = math.atan((-K_CTE * cte) / (K_SOFT + v))
         steer = K_HEADING * heading_error + cte_steer
         # Clamp the *angle* before the speed gain — without this a 90° heading
         # error + maxed CTE produced steer values > 2.0, which then became ±1.0

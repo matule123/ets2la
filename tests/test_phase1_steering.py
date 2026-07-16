@@ -126,6 +126,9 @@ def run_brake_ramp():
     p._last_brake = 0.0
     p._blinker = "off"
     p._speed_kmh = 0.0
+    p._engage_blend = 0.0
+    p._was_active = False
+    p._diag_t = 0.0
     p.tags = FakeTags()
     p.sdk = type("S", (), {})()
     p.sdk.controller = FakeCtl()
@@ -200,9 +203,38 @@ def run_route_steering():
     print("  OK: steering tracks the route smoothly (no fishtail).")
 
 
+def run_heading_and_steering_signs():
+    """Lock down SCS turn conversion and left/right controller signs."""
+    from core.telemetry import Telemetry
+    from core.navigation.route import Route
+
+    telemetry = Telemetry.__new__(Telemetry)
+    telemetry.sdk_reader = type("Reader", (), {
+        "read_trailer": lambda self, index: {},
+        "read_job_destination": lambda self: "",
+    })()
+    base = {"truckFloat": {}, "truckBool": {}, "truckInt": {}}
+    headings = []
+    for turns in (0.0, 0.25, 0.5, -0.25):
+        raw = dict(base, truckPlacement={
+            "rotationX": turns, "coordinateX": 0.0, "coordinateZ": 0.0})
+        headings.append(telemetry._normalize_sdk(raw)["heading"])
+    expected = (0.0, math.pi / 2, -math.pi, -math.pi / 2)
+    for got, want in zip(headings, expected):
+        assert math.isclose(got, want, abs_tol=1e-9), (got, want)
+
+    heading = heading_towards(0, 1)
+    right = Route([(5, 0), (5, 100)])
+    left = Route([(-5, 0), (-5, 100)])
+    assert right.steering((0, 0), heading, 10.0) > 0.0
+    assert left.steering((0, 0), heading, 10.0) < 0.0
+    print("  OK: SCS turns convert to radians and steering signs are symmetric.")
+
+
 if __name__ == "__main__":
     run_lead_brake()
     run_light_brake()
     run_brake_ramp()
     run_route_steering()
-    print("\nAll Phase 1 synthetic tests passed. ✅")
+    run_heading_and_steering_signs()
+    print("\nAll Phase 1 synthetic tests passed.")

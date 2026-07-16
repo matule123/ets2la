@@ -99,6 +99,7 @@ class PerfOverlay(QWidget):
         self._pal = palette(theme)
         p = self._pal
         self.setStyleSheet("background-color: " + p['card'] + "; border: 1px solid " + p['border'] + "; border-radius: 14px;")
+        self._style_total_bar()
         # Rebuild the labels so the new palette's text colours apply.
         # Simplest reliable path: clear and re-add via a fresh _build-like refresh.
         self.refresh()
@@ -155,6 +156,16 @@ class PerfOverlay(QWidget):
             if w:
                 w.setParent(None)
                 w.deleteLater()
+
+    def _style_total_bar(self):
+        """Style the total-RAM bar's chunk so it matches the themed plugin bars
+        (was the native platform blue because no QSS was set on it)."""
+        p = self._pal
+        self.total_bar.setStyleSheet(
+            "QProgressBar{background:" + p['field'] + "; border:none; border-radius:4px;}"
+            "QProgressBar::chunk{border-radius:4px;"
+            "background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 " + p['title'] + ", stop:1 " + p['accent2'] + ");}")
 
     def refresh(self):
         app_mb, app_cpu, plugins = _collect()
