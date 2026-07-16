@@ -23,6 +23,7 @@ import os
 import sys
 import shutil
 import subprocess
+import time
 
 # Force UTF-8 on stdout/stderr so tick / arrow glyphs print fine everywhere
 # (a bare print of \u2714 crashed the build under Windows-1250 consoles).
@@ -68,10 +69,37 @@ def cprint(color, msg):
 
 
 def step(n, total, msg):
-    cprint("c", f"\n{_C['b']}[{n}/{total}]{_C['x']}{_C['c']} {msg}")
+    cprint("c", f"\n[{n}/{total}] {msg}")
+
+
+def info(msg):
+    cprint("c", "      • " + msg)
+
+
+def ok(msg):
+    cprint("g", "      ✓ " + msg)
+
+
+def warn(msg):
+    cprint("y", "      ! " + msg)
+
+
+def fail(msg, hint=None):
+    cprint("r", "      ✗ " + msg)
+    if hint:
+        cprint("y", "        Riešenie: " + hint)
 
 
 ICON = os.path.join("assets", "favicon.ico")
+
+
+def _build_commit():
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"], text=True,
+            stderr=subprocess.DEVNULL, timeout=8).strip()
+    except Exception:
+        return "nezistený"
 
 
 def _ensure(pkg, import_name=None):
@@ -79,13 +107,14 @@ def _ensure(pkg, import_name=None):
         __import__(import_name or pkg)
         return True
     except ImportError:
-        print(f"Installing {pkg}...")
+        info(f"Balík {pkg} chýba — skúšam ho doinštalovať…")
         subprocess.run([sys.executable, "-m", "pip", "install", pkg], check=False)
         try:
             __import__(import_name or pkg)
             return True
         except ImportError:
-            print(f"Could not install {pkg}.")
+            fail(f"Balík {pkg} sa nepodarilo nainštalovať.",
+                 f"Spusti: {sys.executable} -m pip install {pkg}")
             return False
 
 
@@ -100,12 +129,32 @@ def build_installer_exe():
     ``core.sdk.vigembus``). The actual application source is NOT bundled — the
     installer always pulls the latest from GitHub, so the build stays tiny and
     users always get a fresh copy."""
-    step(1, 1, "Building UltraPilot_Installer.exe (PyInstaller)...")
+    started = time.monotonic()
+    cprint("c", "\n============================================================")
+    cprint("c", "  UltraPilot · zostavenie inštalátora")
+    cprint("c", "============================================================")
+
+    step(1, 5, "Kontrolujem buildovacie prostredie")
+    info("Python: " + sys.version.split()[0])
+    info("Commit zdrojov: " + _build_commit())
+    info("Pracovný priečinok: " + os.path.abspath(os.curdir))
     if not _ensure("pyinstaller", "PyInstaller"):
         return None
+    ok("PyInstaller je pripravený")
+
+    step(2, 5, "Kontrolujem súbory inštalátora")
     if not os.path.exists(ICON):
-        cprint("r", f"  ERROR: icon not found at {ICON}")
+        fail("Chýba ikona: " + ICON,
+             "obnov súbor assets/favicon.ico a spusti build znova")
         return None
+    for folder in ("assets", "languages"):
+        if not os.path.isdir(folder):
+            fail("Chýba priečinok: " + folder)
+            return None
+        info(f"{folder}/ · {sum(len(files) for _, _, files in os.walk(folder))} súborov")
+    ok("Ikona, assety a jazyky sú dostupné")
+
+    step(3, 5, "Pripravujem konfiguráciu balíka")
     sep = ";" if os.name == "nt" else ":"
     # Bundle only the installer's own runtime data. App sources come from GitHub.
     data = [
@@ -114,6 +163,7 @@ def build_installer_exe():
     ]
     cmd = [
         sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
+        "--log-level", "WARN",
         "--onefile", "--windowed", "--name", "UltraPilot_Installer",
         f"--icon={ICON}", *data,
         # These are lazy-imported inside InstallWorker.run(); tell PyInstaller
@@ -123,17 +173,29 @@ def build_installer_exe():
         "--collect-submodules=core.sdk",
         "installer.py",
     ]
-    cprint("y", "  Running PyInstaller (this takes a minute)...")
+    info("Režim: jeden samostatný EXE súbor bez konzolového okna")
+    info("Aplikácia sa pri inštalácii stiahne z najnovšieho commitu na GitHube")
+    ok("Konfigurácia je pripravená")
+
+    step(4, 5, "Zostavujem UltraPilot_Installer.exe")
+    warn("Táto fáza môže trvať niekoľko minút. Okno nezatváraj.")
     r = subprocess.run(cmd)
     if r.returncode != 0:
-        cprint("r", "  ERROR: PyInstaller failed.")
+        fail(f"PyInstaller skončil s chybovým kódom {r.returncode}.",
+             "pozri posledné červené riadky vyššie")
         return None
+    ok("Balenie programu bolo dokončené")
+
+    step(5, 5, "Overujem výsledný inštalátor")
     exe = os.path.join("dist", "UltraPilot_Installer.exe")
     if not os.path.exists(exe):
-        cprint("r", "  ERROR: installer exe not produced.")
+        fail("Build skončil bez výsledného EXE súboru.",
+             "skontroluj priečinok build/ a výpis PyInstalleru")
         return None
     size_mb = os.path.getsize(exe) / (1024 * 1024)
-    cprint("g", f"  Installer built: {exe}  ({size_mb:.1f} MB)")
+    elapsed = time.monotonic() - started
+    ok(f"Súbor existuje a má {size_mb:.1f} MB")
+    ok(f"Build dokončený za {elapsed:.1f} sekundy")
     return exe
 
 
@@ -141,8 +203,12 @@ def main():
     exe = build_installer_exe()
     if not exe:
         return 1
-    cprint("g", f"\nDone!  Single-file installer: {os.path.abspath(exe)}")
-    cprint("c", "  Ship UltraPilot_Installer.exe on its own — it downloads the app from GitHub at install time.")
+    cprint("g", "\n============================================================")
+    cprint("g", "  HOTOVO · inštalátor je pripravený")
+    cprint("g", "============================================================")
+    cprint("c", "  Umiestnenie: " + os.path.abspath(exe))
+    cprint("c", "  Na zdieľanie stačí tento jediný EXE súbor.")
+    cprint("c", "  Počas inštalácie si stiahne aktuálne súbory z GitHubu.\n")
     return 0
 
 
