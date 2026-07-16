@@ -91,6 +91,15 @@ def run_ui(shared_dict):
         sm = SettingsManager()
         if not sm.get("onboarded", False):
             from ui.onboarding import OnboardingWizard
+            # Onboarding is itself the first visible app window. Close the
+            # initializing splash before showing it; waiting for ui_ready here
+            # deadlocked visually because ui_ready is only set by the main UI.
+            if not splash_closed["v"]:
+                splash_closed["v"] = True
+                poll.stop()
+                splash.close()
+                splash.deleteLater()
+                app.processEvents()
             wizard = OnboardingWizard(state)
             wizard.show()
             main_window = {"w": None}

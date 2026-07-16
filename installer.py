@@ -703,11 +703,17 @@ class InstallWorker(QThread):
 
     def _fetch_repo(self):
         """Always fetch the latest sources from GitHub. Three fallback strategies."""
-        self.status.emit(self.t["src_try_git"])
-        if self._try_git_clone():
-            self.log.emit("  ✓ Zdrojové súbory pripravené ({:.1f} MB).".format(
-                _dir_size_mb(self.install_path)))
-            return True
+        # Git is optional. Most end-user PCs do not have it installed, so skip
+        # straight to GitHub's ZIP endpoint instead of displaying a scary
+        # "git unavailable" error for a perfectly normal configuration.
+        if shutil.which("git"):
+            self.status.emit(self.t["src_try_git"])
+            if self._try_git_clone():
+                self.log.emit("  ✓ Zdrojové súbory pripravené ({:.1f} MB).".format(
+                    _dir_size_mb(self.install_path)))
+                return True
+        else:
+            self.log.emit("  [INF] Git nie je potrebný — používam priamy GitHub archív.")
         self.status.emit(self.t["src_try_zip"])
         if self._try_zip_archive():
             self.log.emit("  ✓ Zdrojové súbory pripravené ({:.1f} MB).".format(
@@ -1123,10 +1129,10 @@ class InstallerWindow(QWidget):
 
     def _build_step_rail_widget(self, parent_layout):
         rail = QWidget()
-        rail.setFixedHeight(64)
+        rail.setFixedHeight(82)
         h = QHBoxLayout(rail)
-        h.setContentsMargins(30, 14, 30, 14)
-        h.setSpacing(10)
+        h.setContentsMargins(28, 17, 28, 17)
+        h.setSpacing(8)
         self._step_labels = []
         steps = TR[self.lang]["steps"]
         for i, name in enumerate(steps):
@@ -1135,7 +1141,7 @@ class InstallerWindow(QWidget):
             # 34×34 badge with ample rail room (64px rail, 14+14 margins) so the
             # circle never clips vertically — the old 28px badge in a 50px rail
             # with 10+10 margins left only ~1px of breathing room.
-            badge.setFixedSize(34, 34)
+            badge.setFixedSize(42, 42)
             badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
             badge.setMargin(0)
             badge.setContentsMargins(0, 0, 0, 0)
@@ -1368,6 +1374,10 @@ class InstallerWindow(QWidget):
         lay.addWidget(self.progress)
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
+        self.log_view.setStyleSheet(
+            "QTextEdit{background:#0A0A0A;color:#E5E7EB;border:1px solid #2F3338;"
+            "border-radius:8px;padding:10px;font-family:'Cascadia Mono','Consolas';font-size:12px;}"
+        )
         # Cap the buffer so a long install (lots of pip output) can't grow the
         # document unbounded and lag the UI; older lines drop off the top.
         try:
@@ -1472,7 +1482,7 @@ class InstallerWindow(QWidget):
                 # fully inside the 34×34 badge (radius = half width = round).
                 badge.setStyleSheet(
                     "color:" + fg + "; background:" + bg + "; border:1px solid " + bd + ";"
-                    " border-radius:17px; font-size:15px; font-weight:700;"
+                    " border-radius:21px; font-size:15px; font-weight:700;"
                     " padding:0; margin:0;")
                 lbl.setStyleSheet("color:" + (c['title'] if active else c['muted']) +
                                   "; font-size:13px; font-weight:" + ("700" if active else "600") +
@@ -1657,24 +1667,27 @@ class InstallerWindow(QWidget):
             return
 
         if line.startswith("✓") or line.startswith("✔"):
-            color, sym, rest = SUCCESS, line[0], line[1:]
+            color, sym, rest = SUCCESS, "[INF]", line[1:]
         elif line.startswith("✗"):
-            color, sym, rest = DANGER, "✗", line[1:]
+            color, sym, rest = DANGER, "[ERR]", line[1:]
         elif line.startswith("⚠"):
-            color, sym, rest = WARN, "⚠", line[1:]
+            color, sym, rest = WARN, "[WRN]", line[1:]
+        elif line.lstrip().startswith("[INF]"):
+            color, sym, rest = SUCCESS, "[INF]", line.lstrip()[5:]
         elif line.startswith(" "):
             # Indented sub-output (pip, git) — render dimmer.
             color, sym, rest = self._log_muted(), "", line
         else:
             color, sym, rest = self._log_text(), "", line
 
-        ts_html = '<span style="color:{ts}; font-size:11px;">[{ts}]</span> '.format(
-            ts=self._log_dim())
+        ts_html = '<span style="color:#6B7280; font-size:11px;">{ts}</span> '.format(
+            ts=ts)
         if sym:
-            mark = '<span style="color:{c}; font-weight:700;">{s}</span>'.format(c=color, s=_esc(sym))
-            body = '<span style="color:{c};">{r}</span>'.format(c=self._log_text(), r=_esc(rest))
+            mark = '<span style="color:{c}; font-weight:700;">{s}</span> '.format(c=color, s=_esc(sym))
+            body = '<span style="color:#E5E7EB;">{r}</span>'.format(r=_esc(rest))
         else:
             mark = ""
+            mark = '<span style="color:#22C55E;font-weight:700;">[INF]</span> '
             body = '<span style="color:{c};">{r}</span>'.format(c=color, r=_esc(rest))
         self._append_html(ts_html + mark + body)
 
@@ -1879,17 +1892,17 @@ class _MaintenanceDialog(QDialog):
         self.setWindowTitle(APP_NAME)
         self.setFixedSize(460, 280)
         self.setObjectName("Window")
-        self.setStyleSheet(_qss("dark"))
+        self.setStyleSheet(_qss("light"))
         if os.path.exists(ICON_PATH):
             self.setWindowIcon(QIcon(ICON_PATH))
         lay = QVBoxLayout(self)
         lay.setContentsMargins(28, 24, 28, 20)
         lay.setSpacing(10)
         title = QLabel("UltraPilot — údržba")
-        title.setStyleSheet("font-size:22px; font-weight:800; color:#2EA043;")
+        title.setStyleSheet("font-size:22px;font-weight:800;color:#047857;")
         lay.addWidget(title)
         sub = QLabel("UltraPilot je už nainštalovaný.\nČo chceš spraviť?")
-        sub.setStyleSheet("font-size:14px; color:#8B949E;")
+        sub.setStyleSheet("font-size:14px;color:#64748B;")
         sub.setWordWrap(True)
         lay.addWidget(sub)
         lay.addStretch()
@@ -1918,7 +1931,7 @@ class _UninstallDialog(QDialog):
         self.rec = rec
         self.setWindowTitle(APP_NAME + " — Odinštalovanie")
         self.setObjectName("Window")
-        self.setStyleSheet(_qss("dark"))
+        self.setStyleSheet(_qss("light"))
         self.resize(560, 480)
         if os.path.exists(ICON_PATH):
             self.setWindowIcon(QIcon(ICON_PATH))
@@ -1926,17 +1939,17 @@ class _UninstallDialog(QDialog):
         lay.setContentsMargins(24, 20, 24, 20)
         lay.setSpacing(10)
         title = QLabel("Odinštalovanie UltraPilot")
-        title.setStyleSheet("font-size:20px; font-weight:800; color:#2EA043;")
+        title.setStyleSheet("font-size:20px;font-weight:800;color:#047857;")
         lay.addWidget(title)
         sub = QLabel("Vyber, čo chceš odinštalovať:")
-        sub.setStyleSheet("font-size:13px; color:#8B949E;")
+        sub.setStyleSheet("font-size:13px;color:#64748B;")
         lay.addWidget(sub)
 
         # Shared checkbox style: bright text + a visible check indicator on the
         # dark palette (the default QCheckBox colours were nearly invisible).
-        _chk_qss = ("QCheckBox{color:#E6EDF3; font-size:14px; spacing:10px;"
+        _chk_qss = ("QCheckBox{color:#0F172A; font-size:14px; spacing:10px;"
                     " padding:4px 0;} QCheckBox::indicator{width:18px; height:18px;"
-                    " border:2px solid #30363D; border-radius:4px; background:#0D1117;}"
+                    " border:2px solid #CBD5E1; border-radius:4px; background:#FFFFFF;}"
                     "QCheckBox::indicator:checked{background:#2EA043; border-color:#2EA043;}"
                     "QCheckBox::indicator:hover{border-color:#2EA043;}")
 
@@ -1989,6 +2002,7 @@ class _UninstallDialog(QDialog):
         lay.addWidget(self.progress)
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
+        self.log_view.setStyleSheet("QTextEdit{background:#0A0A0A;color:#E5E7EB;border:1px solid #D5DAE1;border-radius:8px;padding:8px;font-family:'Cascadia Mono','Consolas';}")
         self.log_view.document().setMaximumBlockCount(2000)
         self.log_view.setMinimumHeight(140)
         lay.addWidget(self.log_view, stretch=1)
@@ -2085,7 +2099,7 @@ class _RepairDialog(QDialog):
         self.rec = rec
         self.setWindowTitle(APP_NAME + " — Oprava")
         self.setObjectName("Window")
-        self.setStyleSheet(_qss("dark"))
+        self.setStyleSheet(_qss("light"))
         self.resize(560, 480)
         if os.path.exists(ICON_PATH):
             self.setWindowIcon(QIcon(ICON_PATH))
@@ -2093,10 +2107,10 @@ class _RepairDialog(QDialog):
         lay.setContentsMargins(24, 20, 24, 20)
         lay.setSpacing(10)
         title = QLabel("Oprava UltraPilot")
-        title.setStyleSheet("font-size:20px; font-weight:800; color:#2EA043;")
+        title.setStyleSheet("font-size:20px;font-weight:800;color:#047857;")
         lay.addWidget(title)
         sub = QLabel("Skontrolujem súbory oproti GitHubu, doplním chýbajúce\na znova nainštalujem SDK a Python kniňnice.")
-        sub.setStyleSheet("font-size:13px; color:#8B949E;")
+        sub.setStyleSheet("font-size:13px;color:#64748B;")
         sub.setWordWrap(True)
         lay.addWidget(sub)
         lay.addSpacing(6)
@@ -2105,6 +2119,7 @@ class _RepairDialog(QDialog):
         lay.addWidget(self.progress)
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
+        self.log_view.setStyleSheet("QTextEdit{background:#0A0A0A;color:#E5E7EB;border:1px solid #D5DAE1;border-radius:8px;padding:8px;font-family:'Cascadia Mono','Consolas';}")
         self.log_view.document().setMaximumBlockCount(2000)
         self.log_view.setMinimumHeight(160)
         lay.addWidget(self.log_view, stretch=1)
