@@ -1082,6 +1082,20 @@ def _esc(text: str) -> str:
             .replace(">", "&gt;"))
 
 
+def _append_log_preserving_scroll(view, html):
+    """Append while following only when the reader is already at the bottom."""
+    bar = view.verticalScrollBar()
+    old_value = bar.value()
+    follow = old_value >= max(0, bar.maximum() - 2)
+    view.append(html)
+    if follow:
+        bar.setValue(bar.maximum())
+    else:
+        # QTextEdit.append() moves its cursor to the end; restore the reader's
+        # viewport so inspecting even one older line is never interrupted.
+        bar.setValue(min(old_value, bar.maximum()))
+
+
 def _primary_btn(text):
     b = QPushButton(text)
     b.setObjectName("Primary")
@@ -1730,11 +1744,7 @@ class InstallerWindow(QWidget):
         self._append_html(ts_html + mark + body)
 
     def _append_html(self, html):
-        self.log_view.append(html)
-        try:
-            self.log_view.ensureCursorVisible()
-        except Exception:
-            pass
+        _append_log_preserving_scroll(self.log_view, html)
 
     def _log_text(self):
         return DARK["text"] if self.theme == "dark" else LIGHT["text"]
@@ -2059,13 +2069,9 @@ class _UninstallDialog(QDialog):
     def _log(self, msg):
         from datetime import datetime
         ts = datetime.now().strftime("%H:%M:%S")
-        self.log_view.append(
+        _append_log_preserving_scroll(self.log_view,
             '<span style="color:#5B6573; font-size:11px;">[' + ts + ']</span> '
             '<span style="color:#E6EDF3;">' + _esc(msg) + '</span>')
-        try:
-            self.log_view.ensureCursorVisible()
-        except Exception:
-            pass
 
     def _run(self):
         if self._worker is not None and self._worker.isRunning():
@@ -2175,13 +2181,9 @@ class _RepairDialog(QDialog):
     def _log(self, msg):
         from datetime import datetime
         ts = datetime.now().strftime("%H:%M:%S")
-        self.log_view.append(
+        _append_log_preserving_scroll(self.log_view,
             '<span style="color:#5B6573; font-size:11px;">[' + ts + ']</span> '
             '<span style="color:#E6EDF3;">' + _esc(msg) + '</span>')
-        try:
-            self.log_view.ensureCursorVisible()
-        except Exception:
-            pass
 
     def _run(self):
         if self._worker is not None and self._worker.isRunning():

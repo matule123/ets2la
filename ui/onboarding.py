@@ -933,6 +933,8 @@ class OnboardingWizard(QWidget):
         from core.i18n import t as _t
         pct = int(frac * 100)
         btn.setText(_t(_lang_code, "onboarding", "map_downloading", pct=pct))
+        status.setText(txt)
+        status.setStyleSheet("font-size:12px;color:#4B5563;border:none;")
 
     def _on_map_downloaded(self, ok, key):
         # Refresh the matching card.

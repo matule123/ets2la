@@ -141,12 +141,13 @@ def download(key: str, progress_cb=None) -> bool:
                 pass
 
     try:
-        report(0.0, f"Connecting… ({key})")
+        report(0.0, f"Pripájam sa k serveru… ({key})")
         r = requests.get(url, stream=True, timeout=30)
         if r.status_code != 200:
             logging.error("map_data: download HTTP %s for %s", r.status_code, key)
             return False
         total = int(r.headers.get("content-length", 0)) or 1
+        report(0.03, f"Spojenie nadviazané · sťahujem archív {total/1e6:.0f} MB")
         done = 0
         import time as _t
         t0 = _t.time()
@@ -161,19 +162,32 @@ def download(key: str, progress_cb=None) -> bool:
                     el = max(0.1, now - t0)
                     spd = done / el / 1e6      # MB/s
                     pct = done / total * 100
-                    report(min(0.95, done / total),
-                           f"{key}: {pct:.0f}%  ·  {done/1e6:.0f} / {total/1e6:.0f} MB  ·  {spd:.1f} MB/s")
+                    report(0.03 + min(0.67, (done / total) * 0.67),
+                           f"Sťahujem mapu · {pct:.0f}% · {done/1e6:.0f}/{total/1e6:.0f} MB · {spd:.1f} MB/s")
 
-        report(0.96, "Unpacking…")
+        report(0.71, "Kontrolujem stiahnutý ZIP archív…")
+        with zipfile.ZipFile(zip_path, "r") as z:
+            bad = z.testzip()
+            if bad:
+                raise RuntimeError("Poškodený súbor v archíve: " + bad)
+
+        report(0.74, "Pripravujem priečinok mapy…")
         if os.path.isdir(out_dir):
             import shutil
             shutil.rmtree(out_dir)
         os.makedirs(out_dir, exist_ok=True)
         with zipfile.ZipFile(zip_path, "r") as z:
-            z.extractall(out_dir)
+            members = [m for m in z.infolist() if not m.is_dir()]
+            count = max(1, len(members))
+            for i, member in enumerate(members, 1):
+                z.extract(member, out_dir)
+                if i == 1 or i == count or i % max(1, count // 100) == 0:
+                    report(0.75 + 0.19 * (i / count),
+                           f"Rozbaľujem mapu · {i}/{count} súborov · {i/count*100:.0f}%")
         os.remove(zip_path)
 
         # Save the config alongside for reference.
+        report(0.95, "Sťahujem a kontrolujem konfiguráciu mapy…")
         try:
             cfg = requests.get(_BASE + entry["config"], timeout=20)
             if cfg.status_code == 200 and yaml is not None:
@@ -182,7 +196,10 @@ def download(key: str, progress_cb=None) -> bool:
         except Exception:
             pass
 
-        report(1.0, f"Ready: {key}")
+        report(0.98, "Overujem rozbalené mapové súbory…")
+        if not is_downloaded(key):
+            raise RuntimeError("Mapa je neúplná alebo neobsahuje požadované súbory")
+        report(1.0, f"Mapa {key} je pripravená a overená")
         logging.info("map_data: downloaded dataset %s", key)
         return is_downloaded(key)
     except Exception as e:
