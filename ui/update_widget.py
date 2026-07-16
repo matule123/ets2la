@@ -246,6 +246,16 @@ class UpdateCheckerWidget(QWidget):
     def _on_checked(self, available, latest):
         self.spinner.hide()
         self.btn.show()
+        if latest is None:
+            self.status_lbl.setText("Kontrola zlyhala")
+            self.btn.setText("Skúsiť znova")
+            self._apply_btn_style(update_available=False)
+            try:
+                self.btn.clicked.disconnect()
+            except Exception:
+                pass
+            self.btn.clicked.connect(self.check)
+            return
         if available and latest:
             # Remember the tag/SHA so the confirm dialog can show it.
             self._latest_tag = str(latest)

@@ -80,27 +80,26 @@ def latest_release() -> str | None:
     if token:
         headers["Authorization"] = f"Bearer {token}"
     try:
-        # 1) Try a published release first (works once you create one).
-        r = requests.get(API_URL, headers=headers, timeout=8)
-        if r.status_code == 200:
-            tag = (r.json().get("tag_name") or "").lstrip("vV")
-            if tag:
-                return tag
-        elif r.status_code in (403, 429):
-            logging.warning("update check: GitHub API rate-limited (HTTP %s).",
-                            r.status_code)
-        # 404 here is expected (no releases yet) — not worth a warning.
-        # 2) No releases — use the latest commit SHA on main as the "version".
+        headers["Cache-Control"] = "no-cache"
+        # main is authoritative: a commit pushed after the latest Release must
+        # be detected immediately, even when VERSION did not change.
         rc = requests.get(f"https://api.github.com/repos/{REPO}/commits/main",
                           headers=headers, timeout=8)
         if rc.status_code == 200:
-            return (rc.json().get("sha", "") or "")[:7] or None
+            return (rc.json().get("sha", "") or "")[:10] or None
         elif rc.status_code in (403, 429):
             logging.warning("update check: GitHub commits API rate-limited (HTTP %s).",
                             rc.status_code)
         else:
             logging.warning("update check: commits API returned HTTP %s.",
                             rc.status_code)
+        # Fallback only: use the latest published release when the commits API
+        # is unavailable for this installation.
+        r = requests.get(API_URL, headers=headers, timeout=8)
+        if r.status_code == 200:
+            tag = (r.json().get("tag_name") or "").lstrip("vV")
+            if tag:
+                return tag
     except Exception as e:
         logging.warning("update check: network error — %s", e)
     return None
@@ -131,10 +130,14 @@ def _is_newer(remote: str, local: str) -> bool:
     r_sha = _looks_like_sha(remote)
     l_sha = _looks_like_sha(local)
     if r_sha and l_sha:
-        return (remote or "").lower() != (local or "").lower()
+        r, l = (remote or "").lower(), (local or "").lower()
+        return not (r.startswith(l) or l.startswith(r))
     if r_sha or l_sha:
-        # Mixed type: can't meaningfully compare — don't claim an update.
-        return False
+        # Legacy frozen builds reported only "build" or VERSION. A known
+        # remote commit must be offered or these installs stay stuck forever.
+        if r_sha and (not local or str(local).lower() == "build"):
+            return True
+        return True
 
     def parts(v):
         out = []
