@@ -88,7 +88,13 @@ class UltraPilotPlanner:
 
     def set_state(self, new_state):
         if self.current_state != new_state:
-            logging.info(f"System transitioning: {self.current_state.name} -> {new_state.name}")
+            # CRUISE <-> FOLLOW_LANE is a routine steering correction that may
+            # change many times per minute. It is not a useful system event and
+            # used to flood the main runtime log continuously.
+            routine = {SystemState.CRUISE, SystemState.FOLLOW_LANE}
+            if not ({self.current_state, new_state} <= routine):
+                logging.info("Driving state: %s -> %s",
+                             self.current_state.name, new_state.name)
             self.current_state = new_state
             self.state_duration = 0.0
 
