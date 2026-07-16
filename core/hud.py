@@ -254,7 +254,7 @@ class UltraPilotHUD(QWidget):
         # Slightly darker ground band below the horizon for depth.
         horizon_y = view.top() + view.height() * 0.26
         qp.setPen(Qt.PenStyle.NoPen)
-        qp.setBrush(QColor(20, 25, 32, 160))
+        qp.setBrush(QColor(9, 11, 14, 235))
         qp.drawRect(QRectF(view.left(), horizon_y, view.width(), view.bottom() - horizon_y))
 
         pos, h = d["pos"], d["heading"]
@@ -267,7 +267,8 @@ class UltraPilotHUD(QWidget):
 
         if pos:
             path = d["nav_path"]
-            raw = [to_truck(px, pz) for px, pz in path]
+            raw = [pt for pt in (to_truck(px, pz) for px, pz in path)
+                   if 0.5 <= pt[0] <= 140.0]
             # Smooth the path so curves are continuous (no hard kinks).
             al = self._smooth_path(raw) if len(raw) >= 2 else raw
 
@@ -293,7 +294,7 @@ class UltraPilotHUD(QWidget):
                 ribbon = left + list(reversed(right))
                 if len(ribbon) >= 3:
                     qp.setPen(Qt.PenStyle.NoPen)
-                    qp.setBrush(QColor(36, 40, 46, 235))
+                    qp.setBrush(QColor(24, 27, 31, 250))
                     qp.drawPolygon(QPolygonF(ribbon))
                 # 2) Solid white edge lines.
                 for off in (-HALF, HALF):
@@ -311,7 +312,7 @@ class UltraPilotHUD(QWidget):
                     # Move the dashes faster the quicker we go (visual speed cue).
                     spd = max(0.4, min(4.0, d.get("speed_kmh", 0) / 25.0))
                     dash_off = -(self._t * spd * 6) % 12
-                    pen = QPen(QColor(245, 220, 120, 210), 2.2, Qt.PenStyle.DashLine)
+                    pen = QPen(QColor(225, 228, 233, 205), 2.2, Qt.PenStyle.DashLine)
                     pen.setDashPattern([3, 3])
                     pen.setDashOffset(dash_off)
                     for k in range(lanes - 1):
@@ -320,15 +321,6 @@ class UltraPilotHUD(QWidget):
                         if len(pts) >= 2:
                             qp.setPen(pen)
                             qp.drawPolyline(QPolygonF(pts))
-                # 3b) Stop lines / cross-road markings at intersections: draw a
-                #     solid white bar across the road ~40 m ahead (a stand-in
-                #     for junctions; the real prefab data isn't published yet).
-                bar_a = 40.0
-                bl = self._project(bar_a, -HALF, view)
-                br = self._project(bar_a, HALF, view)
-                if bl and br and abs(bl.y() - br.y()) < 80:
-                    qp.setPen(QPen(QColor(240, 240, 245, 90), 3, Qt.PenStyle.SolidLine))
-                    qp.drawLine(bl, br)
                 # 4) Anticipated route (blue) glow on the road.
                 pts = [self._project(a, l, view) for a, l in al]
                 pts = [p for p in pts if p is not None]
@@ -376,9 +368,11 @@ class UltraPilotHUD(QWidget):
         cab_h = 2.9
         trailer_h = 3.7
         hw = 1.25            # half truck width
-        # Cab occupies ~2.5..0 m ahead (closest to camera), trailer -10.5..-2.5 m.
-        cab_n, cab_f = -2.5, 0.5
-        tr_n, tr_f = -11.0, -2.6
+        # Keep the complete rig in front of the chase camera. The former
+        # negative coordinates put the trailer almost behind the projection
+        # plane and expanded it into a huge distorted trapezoid.
+        tr_n, tr_f = 3.5, 13.8
+        cab_n, cab_f = 13.4, 18.2
 
         body = "#B8BCC4"        # cab body — slightly cooler silver
         body_dark = "#6E747C"
@@ -393,9 +387,11 @@ class UltraPilotHUD(QWidget):
 
         # --- Wheels: dark cylinders peeking below the chassis (axle pairs). ---
         wheel_h = 0.95
-        for ax in (cab_n + 0.4, tr_n + 1.2, tr_f - 1.2):
-            self._box3d(qp, ax - 0.3, ax + 0.3, hw + 0.35, 0.0, 0.0, wheel_h, view,
-                        ("#15181C", "#1F2329"))
+        for ax in (cab_n + 0.9, cab_f - 0.7, tr_n + 1.2, tr_f - 1.2):
+            for side in (-1, 1):
+                self._box3d(qp, ax - 0.35, ax + 0.35, 0.22,
+                            side * (hw + 0.16), 0.0, wheel_h, view,
+                            ("#101216", "#2A2E35"))
 
         # --- Trailer box (long, tall) — the big rectangular cargo body. ---
         self._box3d(qp, tr_n, tr_f, hw, 0.0, 0.45, trailer_h, view, (trailer_body, "#E5E7EB"))
@@ -404,7 +400,7 @@ class UltraPilotHUD(QWidget):
                     view, (trailer_dark, trailer_dark))
 
         # --- Fifth-wheel gap (the hitch between cab and trailer). ---
-        self._box3d(qp, cab_f - 0.6, tr_f + 0.1, hw * 0.5, 0.0, 0.45, 0.9, view,
+        self._box3d(qp, tr_f - 0.3, cab_n + 0.3, hw * 0.5, 0.0, 0.45, 0.9, view,
                     (chassis, chassis))
 
         # --- Cab: taller, with a tinted windshield + side windows. ---
@@ -461,8 +457,7 @@ class UltraPilotHUD(QWidget):
         hw = max(0.9, v.get("width", 2.0) / 2)
         ln = max(3.5, v.get("length", 4.5))
         n, fr = ahead - ln / 2, ahead + ln / 2
-        body = "#C8CCD2"      # light silver-grey body
-        body_dark = "#9AA0A8"
+        body, body_dark = _car_colour(v)
         glass = "#0F2A33"     # dark tinted glass
 
         # Floor slab: wider/longer than the body so it pokes out a touch = wheels
@@ -496,6 +491,13 @@ class UltraPilotHUD(QWidget):
         # Lights: small lamps at the front (warm white) and back (red). These are
         # what make the silhouette read as a real vehicle facing a direction.
         self._draw_lights(qp, view, n, fr, hw, lateral, body_h)
+
+        # Four separate dark wheels instead of a single full-width floor block.
+        for axle in (n + ln * 0.22, fr - ln * 0.22):
+            for side in (-1, 1):
+                self._box3d(qp, axle - 0.18, axle + 0.18, 0.13,
+                            lateral + side * (hw + 0.08), 0.0, 0.62, view,
+                            ("#0D0F12", "#30343A"))
 
     def _draw_lights(self, qp, view, n, fr, hw, lateral, body_h):
         """Head/tail lamps as small bright quads projected onto the body's ends."""

@@ -222,6 +222,7 @@ class _HUDPreview(QWidget):
             "light": s.get("traffic_light"),
             "nav_path": (s.get("nav_path", []) or s.get("map_path", []) or []),
             "limit_ms": truck.get("speedLimit", 0.0) or 0.0,
+            "lanes": int(s.get("road_lanes", 2) or 2),
         }
 
     def _limit(self, qp, x, y, kmh):
@@ -257,7 +258,8 @@ class _HUDPreview(QWidget):
             return ahead, lat
 
         if pos:
-            al = [to_truck(px, pz) for px, pz in d["nav_path"]]
+            al = [pt for pt in (to_truck(px, pz) for px, pz in d["nav_path"])
+                  if 0.5 <= pt[0] <= 140.0]
 
             def offset_pt(i, off):
                 a, l = al[i]
@@ -267,14 +269,18 @@ class _HUDPreview(QWidget):
                 return self._proj(a, l + (-da / n) * off, view)
 
             if len(al) >= 2:
-                HALF = 6.5
+                lanes = max(1, d.get("lanes", 2))
+                HALF = max(4.0, min(15.0, lanes * 3.6 / 2 + 1.2))
                 left = [offset_pt(i, -HALF) for i in range(len(al))]
                 right = [offset_pt(i, HALF) for i in range(len(al))]
                 ribbon = [p for p in left if p] + [p for p in reversed(right) if p]
                 if len(ribbon) >= 3:
                     qp.setPen(Qt.PenStyle.NoPen); qp.setBrush(QColor(36, 40, 46, 235))
                     qp.drawPolygon(QPolygonF(ribbon))
-                for off, dash in ((-HALF, False), (HALF, False), (0.0, True)):
+                markings = [(-HALF, False), (HALF, False)]
+                spacing = 2 * HALF / lanes
+                markings += [(-HALF + spacing * k, True) for k in range(1, lanes)]
+                for off, dash in markings:
                     pts = [p for p in [offset_pt(i, off) for i in range(len(al))] if p]
                     if len(pts) >= 2:
                         st = Qt.PenStyle.DashLine if dash else Qt.PenStyle.SolidLine
@@ -304,7 +310,7 @@ class _HUDPreview(QWidget):
             vehs.sort(key=lambda t: -t[0])
             for a, l, v in vehs:
                 self._box(qp, view, a, l, v)
-            self._box(qp, view, 6.0, 0.0,
+            self._box(qp, view, 15.0, 0.0,
                       {"type": "truck", "width": 2.6, "length": 14.0})
 
         # Traffic light + countdown.
