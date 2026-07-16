@@ -336,9 +336,9 @@ class UltraPilotApp(QMainWindow):
 
         self.sidebar = QFrame()
         self.sidebar.setObjectName("Sidebar")
-        self.sidebar.setFixedWidth(210)
+        self.sidebar.setFixedWidth(224)
         sb = QVBoxLayout(self.sidebar)
-        sb.setContentsMargins(0, 18, 0, 12)
+        sb.setContentsMargins(0, 16, 0, 12)
         sb.setSpacing(0)
 
         # Brand block at the top: logo + wordmark + version.
@@ -374,12 +374,39 @@ class UltraPilotApp(QMainWindow):
         sb.addWidget(brand_w)
         sb.addSpacing(18)
 
-        nav = [("🏠  Dashboard", 0), ("🗺️  Navigation", 1),
-               ("🛰️  Visualization", 2), ("🧩  Plugins", 3),
-               ("⚙️  Settings", 4), ("ℹ️  About", 5)]
+        # ETS2LA-style navigation. The glyphs come from Windows' monochrome
+        # Segoe MDL2 icon font (not emoji), so they stay crisp at every DPI.
+        nav = [
+            ("Main", None, None),
+            ("\ue80f", "Dashboard", 0),
+            ("\ue707", "Navigation", 1),
+            ("\ue7f4", "Visualization", 2),
+            ("Plugins", None, None),
+            ("\ue713", "Manager", 3),
+            ("Application", None, None),
+            ("\ue713", "Settings", 4),
+            ("\ue946", "About", 5),
+        ]
         self._nav_btns = []
-        for text, idx in nav:
-            b = QPushButton(text)
+        for icon_text, text, idx in nav:
+            if idx is None:
+                section = QLabel(icon_text)
+                section.setObjectName("NavSection")
+                section.setStyleSheet(
+                    "color:#7B818A;font-size:11px;font-weight:500;"
+                    "padding:14px 18px 5px 18px;border:none;")
+                sb.addWidget(section)
+                continue
+            b = QPushButton(f"{icon_text}    {text}")
+            b.setObjectName("NavButton")
+            b.setProperty("navIndex", idx)
+            b.setStyleSheet(
+                "QPushButton{font-family:'Segoe UI','Segoe MDL2 Assets';"
+                "font-size:13px;text-align:left;background:transparent;color:#30343B;"
+                "border:none;border-radius:7px;padding:8px 12px;margin:1px 10px;}"
+                "QPushButton:hover{background:#F5F5F6;color:#111827;}"
+                "QPushButton:checked{background:#EEEEF0;color:#111827;font-weight:600;}"
+            )
             b.setCheckable(True)
             b.clicked.connect(lambda _=False, i=idx: self._goto(i))
             sb.addWidget(b)

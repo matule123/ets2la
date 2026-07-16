@@ -4,7 +4,7 @@ import math
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit, QComboBox,
-    QProgressBar,
+    QProgressBar, QFrame, QSizePolicy,
 )
 from PyQt6.QtGui import QPainter, QColor, QPen, QPolygonF
 from PyQt6.QtCore import Qt, QTimer, QPointF, QThread, pyqtSignal
@@ -73,8 +73,7 @@ class MapView(QWidget):
         if self._pal is None:
             self._pal = palette(self.state.get("ui_theme", "light") or "light")
         self.setStyleSheet(
-            "background-color: " + self._pal['card'] + ";"
-            " border: 1px solid " + self._pal['border'] + "; border-radius: 10px;")
+            "background-color:#151515;border:1px solid #303238;border-radius:10px;")
 
     def set_route(self, points):
         self.route_points = points or []
@@ -89,6 +88,9 @@ class MapView(QWidget):
         qp = QPainter(self)
         qp.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
+        qp.setPen(Qt.PenStyle.NoPen)
+        qp.setBrush(QColor("#151515"))
+        qp.drawRoundedRect(self.rect(), 10, 10)
 
         truck = self.state.get("truck_world_pos")
         heading = self.state.get("truck_heading", 0.0) or 0.0
@@ -119,7 +121,8 @@ class MapView(QWidget):
 
         # Route polyline.
         if len(pts) >= 2:
-            qp.setPen(QPen(QColor("#10B981"), 3))
+            qp.setPen(QPen(QColor("#1597F5"), 5, Qt.PenStyle.SolidLine,
+                           Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
             poly = QPolygonF([to_screen(p) for p in pts])
             qp.drawPolyline(poly)
             # Start (green) and end (red) markers.
@@ -151,7 +154,8 @@ class MapView(QWidget):
             return QPointF(sx, sy)
 
         # Nearby roads (grey).
-        qp.setPen(QPen(QColor("#B7BDC6"), 2))
+        qp.setPen(QPen(QColor("#8F7939"), 3, Qt.PenStyle.SolidLine,
+                       Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         for a, b in self.road_net.segments_near(truck, radius):
             qp.drawLine(to_screen(a), to_screen(b))
 
@@ -159,7 +163,8 @@ class MapView(QWidget):
         try:
             ahead = self.road_net.path_ahead(truck, heading)
             if len(ahead) >= 2:
-                qp.setPen(QPen(QColor("#2563EB"), 4))
+                qp.setPen(QPen(QColor("#1597F5"), 7, Qt.PenStyle.SolidLine,
+                               Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
                 qp.drawPolyline(QPolygonF([to_screen(p) for p in ahead]))
         except Exception:
             pass
@@ -167,7 +172,8 @@ class MapView(QWidget):
         # Recorded/loaded route on top (green).
         pts = list(self.route_points)
         if len(pts) >= 2:
-            qp.setPen(QPen(QColor("#10B981"), 3))
+            qp.setPen(QPen(QColor("#1597F5"), 6, Qt.PenStyle.SolidLine,
+                           Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
             qp.drawPolyline(QPolygonF([to_screen(p) for p in pts]))
 
         # Truck arrow at centre.
@@ -176,8 +182,8 @@ class MapView(QWidget):
         tip = QPointF(c.x() + fx * 16, c.y() - fz * 16)
         left = QPointF(c.x() - fz * 8 + fx * -7, c.y() - fx * 8 - fz * -7)
         right = QPointF(c.x() + fz * 8 + fx * -7, c.y() + fx * 8 - fz * -7)
-        qp.setBrush(QColor("#F59E0B"))
-        qp.setPen(QPen(QColor("#B45309"), 1))
+        qp.setBrush(QColor("#1597F5"))
+        qp.setPen(QPen(QColor("#E8F4FF"), 2))
         qp.drawPolygon(QPolygonF([tip, left, right]))
 
 
@@ -190,72 +196,95 @@ class MapPage(QWidget):
         from core.theme import palette
         self._pal = palette(state.get("ui_theme", "light") or "light")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(30, 30, 30, 30)
-        layout.setSpacing(15)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(10)
 
-        self.title = QLabel("🗺️ Navigation")
-        self.title.setStyleSheet("font-size: 24px; font-weight: bold; color: " + self._pal['title'] + ";")
-        layout.addWidget(self.title)
+        head = QHBoxLayout()
+        self.title = QLabel("Navigation")
+        self.title.setStyleSheet("font-size:20px;font-weight:700;color:" + self._pal['text'] + ";")
+        head.addWidget(self.title)
+        head.addStretch()
+        live = QLabel("●  LIVE MAP")
+        live.setStyleSheet("color:#16A34A;font-size:11px;font-weight:700;")
+        head.addWidget(live)
+        layout.addLayout(head)
+
+        content = QHBoxLayout()
+        content.setSpacing(12)
+        controls = QFrame()
+        controls.setObjectName("NavigationControls")
+        controls.setFixedWidth(285)
+        controls.setStyleSheet(
+            "#NavigationControls{background:#FFFFFF;border:1px solid #E5E7EB;border-radius:10px;}"
+            "#NavigationControls QLabel{color:#20242A;}"
+        )
+        ctl = QVBoxLayout(controls)
+        ctl.setContentsMargins(14, 14, 14, 14)
+        ctl.setSpacing(9)
+
+        self.status = QLabel("Idle")
+        self.status.setWordWrap(True)
+        self.status.setStyleSheet(
+            "background:#F5F6F7;color:#59616C;border-radius:7px;padding:9px;font-size:12px;")
+        ctl.addWidget(self.status)
+
+        route_cap = QLabel("ROUTES")
+        route_cap.setStyleSheet("color:#7B818A!important;font-size:10px;font-weight:700;margin-top:5px;")
+        ctl.addWidget(route_cap)
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("Route name")
+        ctl.addWidget(self.name_edit)
+        rec_row = QHBoxLayout()
+        btn_rec = QPushButton("●  Record")
+        btn_stop_rec = QPushButton("■  Save")
+        btn_rec.clicked.connect(self.start_record)
+        btn_stop_rec.clicked.connect(self.stop_record)
+        rec_row.addWidget(btn_rec)
+        rec_row.addWidget(btn_stop_rec)
+        ctl.addLayout(rec_row)
+
+        self.route_combo = QComboBox()
+        self.route_combo.setPlaceholderText("Saved routes")
+        ctl.addWidget(self.route_combo)
+        play_row = QHBoxLayout()
+        btn_load = QPushButton("▶  Navigate")
+        btn_clear = QPushButton("■  Stop")
+        btn_load.clicked.connect(self.load_route)
+        btn_clear.clicked.connect(self.stop_nav)
+        play_row.addWidget(btn_load)
+        play_row.addWidget(btn_clear)
+        ctl.addLayout(play_row)
+
+        self.map_title = QLabel("MAP DATASET")
+        self.map_title.setStyleSheet("color:#7B818A;font-size:10px;font-weight:700;margin-top:8px;")
+        ctl.addWidget(self.map_title)
+        self.map_combo = QComboBox()
+        self.map_combo.currentIndexChanged.connect(self._on_map_selected)
+        ctl.addWidget(self.map_combo)
+        self.btn_dl = QPushButton("↓  Download map data")
+        self.btn_dl.clicked.connect(self.download_map)
+        ctl.addWidget(self.btn_dl)
+        self.active_map_lbl = QLabel("Active map: —")
+        self.active_map_lbl.setStyleSheet(
+            "color:#FFFFFF!important;background:#159957;font-size:12px;font-weight:700;"
+            "border-radius:7px;padding:9px 10px;")
+        ctl.addWidget(self.active_map_lbl)
+        self.dl_bar = QProgressBar()
+        self.dl_bar.setVisible(False)
+        ctl.addWidget(self.dl_bar)
+        self.dl_status = QLabel("")
+        self.dl_status.setWordWrap(True)
+        self.dl_status.setStyleSheet("color:#7B818A!important;font-size:11px;")
+        ctl.addWidget(self.dl_status)
+        ctl.addStretch()
+        content.addWidget(controls)
 
         self.view = MapView(state)
         self.view._pal = self._pal
         self.view.apply_theme()
-        layout.addWidget(self.view)
-
-        self.status = QLabel("Idle.")
-        self.status.setStyleSheet("color: " + self._pal['muted'] + ";")
-        layout.addWidget(self.status)
-
-        # --- Record row ---
-        rec_row = QHBoxLayout()
-        self.name_edit = QLineEdit()
-        self.name_edit.setPlaceholderText("route name")
-        btn_rec = QPushButton("● Record")
-        btn_stop_rec = QPushButton("■ Stop & Save")
-        btn_rec.clicked.connect(self.start_record)
-        btn_stop_rec.clicked.connect(self.stop_record)
-        rec_row.addWidget(self.name_edit)
-        rec_row.addWidget(btn_rec)
-        rec_row.addWidget(btn_stop_rec)
-        layout.addLayout(rec_row)
-
-        # --- Replay row ---
-        play_row = QHBoxLayout()
-        self.route_combo = QComboBox()
-        btn_load = QPushButton("▶ Load & Navigate")
-        btn_clear = QPushButton("⏹ Stop Nav")
-        btn_load.clicked.connect(self.load_route)
-        btn_clear.clicked.connect(self.stop_nav)
-        play_row.addWidget(self.route_combo)
-        play_row.addWidget(btn_load)
-        play_row.addWidget(btn_clear)
-        layout.addLayout(play_row)
-
-        # --- Map data (ETS2 / ProMods / versions) ---
-        self.map_title = QLabel("Map data")
-        self.map_title.setStyleSheet("font-size: 15px; font-weight: bold; color: " + self._pal['title'] + "; margin-top: 8px;")
-        layout.addWidget(self.map_title)
-        map_row = QHBoxLayout()
-        self.map_combo = QComboBox()
-        self.map_combo.currentIndexChanged.connect(self._on_map_selected)
-        self.btn_dl = QPushButton("⬇ Download map")
-        self.btn_dl.clicked.connect(self.download_map)
-        map_row.addWidget(self.map_combo)
-        map_row.addWidget(self.btn_dl)
-        layout.addLayout(map_row)
-        self.active_map_lbl = QLabel("Aktívna mapa: —")
-        self.active_map_lbl.setStyleSheet(
-            "color:#FFFFFF; background:" + self._pal['title'] + "; font-size:14px; font-weight:700;"
-            "border-radius:8px; padding:8px 12px;")
-        layout.addWidget(self.active_map_lbl)
-        self.dl_bar = QProgressBar()
-        self.dl_bar.setVisible(False)
-        layout.addWidget(self.dl_bar)
-        self.dl_status = QLabel("")
-        self.dl_status.setStyleSheet("color: " + self._pal['muted'] + "; font-size: 12px;")
-        layout.addWidget(self.dl_status)
-
-        layout.addStretch()
+        self.view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        content.addWidget(self.view, 1)
+        layout.addLayout(content, 1)
 
         self._dl_worker = None
         self._net_worker = None
@@ -271,13 +300,13 @@ class MapPage(QWidget):
         """Re-apply palette colours when the theme switches (dark ↔ light)."""
         from core.theme import palette
         self._pal = palette(theme)
-        self.title.setStyleSheet("font-size: 24px; font-weight: bold; color: " + self._pal['title'] + ";")
+        self.title.setStyleSheet("font-size:20px;font-weight:700;color:" + self._pal['text'] + ";")
         self.status.setStyleSheet("color: " + self._pal['muted'] + ";")
-        self.map_title.setStyleSheet("font-size: 15px; font-weight: bold; color: " + self._pal['title'] + "; margin-top: 8px;")
+        self.map_title.setStyleSheet("color:#7B818A;font-size:10px;font-weight:700;margin-top:8px;")
         self.active_map_lbl.setStyleSheet(
-            "color:#FFFFFF; background:" + self._pal['title'] + "; font-size:14px; font-weight:700;"
-            "border-radius:8px; padding:8px 12px;")
-        self.dl_status.setStyleSheet("color: " + self._pal['muted'] + "; font-size: 12px;")
+            "color:#FFFFFF;background:#159957;font-size:12px;font-weight:700;"
+            "border-radius:7px;padding:9px 10px;")
+        self.dl_status.setStyleSheet("color:#7B818A;font-size:11px;")
         self.view._pal = self._pal
         self.view.apply_theme()
 

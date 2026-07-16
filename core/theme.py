@@ -53,8 +53,8 @@ QWidget {{ background-color: {c['bg']}; color: {c['text']};
     font-family: 'Segoe UI', 'Inter', sans-serif; font-size: 14px; }}
 
 /* Sidebar — ETS2LA deep panel with a faint accent glow at the top. */
-QFrame#Sidebar {{ background-color: {c['sidebar']}; border: none;
-    border-right: 1px solid {c['border']}; }}
+QFrame#Sidebar {{ background-color: #FFFFFF; border: none;
+    border-right: 1px solid #E5E7EB; }}
 QFrame#Sidebar QPushButton {{ background-color: transparent; border: none;
     border-radius: 10px; padding: 11px 14px; margin: 2px 8px; text-align: left;
     color: {c['muted']}; font-weight: 600; }}

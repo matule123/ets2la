@@ -1,6 +1,6 @@
 import time
 import math
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
 from PyQt6.QtGui import QPainter, QColor, QFont, QPen, QPolygonF
 from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
 
@@ -79,7 +79,8 @@ class _GlassIsland(QWidget):
         qp = QPainter(self)
         qp.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
-        pal = self._pal
+        pal = dict(self._pal)
+        pal.update(card="#101317", text="#F3F4F6", muted="#9CA3AF", title="#E5E7EB")
 
         # Pull live data.
         dist_m = self.state.get("distance_to_dest")
@@ -89,14 +90,15 @@ class _GlassIsland(QWidget):
         # Layered translucent rounded rects = frosted-glass look. Use the
         # palette's card colour as the base so the island matches the theme
         # (was hardcoded white — wrong in dark mode).
-        island = QRectF(w / 2 - 230, h / 2 - 70, 460, 140)
+        iw = min(390, max(250, w - 24))
+        island = QRectF(w / 2 - iw / 2, h / 2 - 50, iw, 100)
         base = QColor(pal['card'])
         for i, a in enumerate((60, 110, 235)):
             c = QColor(base.red(), base.green(), base.blue(), a)
             qp.setBrush(c)
             qp.setPen(QPen(QColor(base.red(), base.green(), base.blue(), 90), 1))
             qp.drawRoundedRect(island.adjusted(-i * 4, -i * 4, i * 4, i * 4), 34, 34)
-        accent = QColor(pal['title'])
+        accent = QColor("#374151")
         accent.setAlpha(140)
         qp.setPen(QPen(accent, 2))
         qp.setBrush(Qt.BrushStyle.NoBrush)
@@ -131,7 +133,7 @@ class _GlassIsland(QWidget):
                     Qt.AlignmentFlag.AlignLeft, "predpokladaný príchod")
 
         # Distance + remaining time (right).
-        qp.setPen(QColor(pal['title']))
+        qp.setPen(QColor("#F3F4F6"))
         qp.setFont(QFont("Segoe UI", 26, QFont.Weight.Bold))
         qp.drawText(QRectF(island.right() - 220, island.top() + 28, 190, 40),
                     Qt.AlignmentFlag.AlignRight, f"{dist_km:.1f} km")
@@ -358,35 +360,48 @@ class VisualizationPage(QWidget):
         from core.theme import palette
         self._pal = palette(state.get("ui_theme", "light") or "light")
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(30, 30, 30, 30)
-        self.title = QLabel("🛰️ Visualization")
-        self.title.setStyleSheet("font-size: 24px; font-weight: bold; color: " + self._pal['title'] + ";")
-        lay.addWidget(self.title)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(9)
+        title_row = QHBoxLayout()
+        self.title = QLabel("Visualization")
+        self.title.setStyleSheet("font-size:20px;font-weight:700;color:" + self._pal['text'] + ";")
+        title_row.addWidget(self.title)
+        title_row.addStretch()
+        self.sub = QLabel("●  LIVE TELEMETRY")
+        self.sub.setStyleSheet("color:#16A34A;font-size:11px;font-weight:700;")
+        title_row.addWidget(self.sub)
+        lay.addLayout(title_row)
 
-        self.sub = QLabel("Ľavý HUD panel — rovnaká 3D scéna, ktorá sa vykresľuje cez hru. "
-                     "Modrá čiara = plánovaná trasa, sivé modely = okolité vozidlá, "
-                     "semafor s odpočtom.")
-        self.sub.setStyleSheet("color: " + self._pal['muted'] + "; font-size:13px;")
-        self.sub.setWordWrap(True)
-        lay.addWidget(self.sub)
+        cockpit = QFrame()
+        cockpit.setObjectName("Cockpit")
+        cockpit.setStyleSheet(
+            "#Cockpit{background:#111214;border:1px solid #303238;border-radius:11px;}"
+        )
+        cockpit_lay = QHBoxLayout(cockpit)
+        cockpit_lay.setContentsMargins(0, 0, 0, 0)
+        cockpit_lay.setSpacing(1)
+        self.cockpit_lay = cockpit_lay
 
-        # Live preview of the left-side driving HUD. Prefer the real GPU 3D
-        # renderer; fall back to the 2D QPainter preview if OpenGL is missing.
-        try:
-            from ui.driving_scene import DrivingScene
-            self.scene = DrivingScene(state)
-            if getattr(self.scene, "has_gl", False):
-                self.hud_preview = self.scene
-            else:
-                self.hud_preview = _HUDPreview(state)
-        except Exception:
-            self.hud_preview = _HUDPreview(state)
-        lay.addWidget(self.hud_preview, stretch=1)
+        # The QPainter scene is deterministic on every GPU/driver. It keeps the
+        # ETS2LA road/truck view visible even where OpenGL used to render only
+        # dots or an empty black panel.
+        self.scene = None
+        self.hud_preview = _HUDPreview(state)
+        cockpit_lay.addWidget(self.hud_preview, 5)
 
+        map_column = QFrame()
+        map_column.setStyleSheet("background:#151515;border:none;")
+        map_lay = QVBoxLayout(map_column)
+        map_lay.setContentsMargins(0, 0, 0, 0)
+        map_lay.setSpacing(0)
+        self.top_down = _TopDown(state)
+        map_lay.addWidget(self.top_down, 1)
         self.island = _GlassIsland(state)
         self.island._pal = self._pal
-        lay.addWidget(self.island)
-        lay.addStretch()
+        self.island.setMaximumHeight(145)
+        map_lay.addWidget(self.island)
+        cockpit_lay.addWidget(map_column, 6)
+        lay.addWidget(cockpit, 1)
         self.timer = QTimer()
         # OpenGL widget updates itself internally; the 2D fallback needs update().
         if isinstance(self.hud_preview, _HUDPreview):
@@ -395,6 +410,7 @@ class VisualizationPage(QWidget):
         # swap it for the 2D QPainter preview so the page is never empty.
         self.timer.timeout.connect(self._check_gl_fallback)
         self.timer.timeout.connect(self.island.update)
+        self.timer.timeout.connect(self.top_down.update)
         self.timer.start(120)
 
     def _check_gl_fallback(self):
@@ -403,16 +419,11 @@ class VisualizationPage(QWidget):
         scene = getattr(self, "scene", None)
         if (scene is not None and not isinstance(self.hud_preview, _HUDPreview)
                 and getattr(scene, "_gl_broken", False)):
-            try:
-                self.layout().replaceWidget(self.hud_preview, self.hud_preview)
-            except Exception:
-                pass
             self.hud_preview.setParent(None)
             self.hud_preview.deleteLater()
             self.hud_preview = _HUDPreview(self.state)
             self.hud_preview._pal = self._pal
-            self.layout().insertWidget(self.layout().indexOf(self.island),
-                                       self.hud_preview, stretch=1)
+            self.cockpit_lay.insertWidget(0, self.hud_preview, 5)
             self.timer.timeout.connect(self.hud_preview.update)
             logging.info("Visualization: GL broke — switched to 2D preview.")
 
@@ -421,5 +432,5 @@ class VisualizationPage(QWidget):
         from core.theme import palette
         self._pal = palette(theme)
         self.title.setStyleSheet("font-size: 24px; font-weight: bold; color: " + self._pal['title'] + ";")
-        self.sub.setStyleSheet("color: " + self._pal['muted'] + "; font-size:13px;")
+        self.sub.setStyleSheet("color:#16A34A;font-size:11px;font-weight:700;")
         self.island._pal = self._pal
