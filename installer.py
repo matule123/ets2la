@@ -45,6 +45,7 @@ _NO_WIN = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 REPO = "matule123/ets2la"
 REPO_URL = "https://github.com/" + REPO + ".git"
 ARCHIVE_URL = "https://github.com/" + REPO + "/archive/refs/heads/main.zip"
+CODELOAD_URL = "https://codeload.github.com/" + REPO + "/zip/refs/heads/main"
 CONTENTS_API = "https://api.github.com/repos/" + REPO + "/git/trees/main?recursive=1"
 RAW_BASE = "https://raw.githubusercontent.com/" + REPO + "/main/"
 
@@ -547,8 +548,7 @@ class InstallWorker(QThread):
                     else:
                         shutil.copy2(s, d)
                         nfiles += 1
-                        if nfiles % 5 == 0 or nfiles <= 10:
-                            self.log.emit("    [{:>3}] {}".format(nfiles, rel))
+                        self.log.emit("    [{:>4}] {}".format(nfiles, rel.replace("\\", "/")))
             _copy_tree(tmp, self.install_path)
             self.log.emit("    ✓ nakopírovaných {} súborov".format(nfiles))
             shutil.rmtree(tmp, ignore_errors=True)
@@ -563,28 +563,59 @@ class InstallWorker(QThread):
         return False
 
     def _try_zip_archive(self):
-        import requests, zipfile, io, time, traceback
+        import zipfile, io, time, traceback
         try:
             t0 = time.time()
-            self.log.emit("  ▸ Stahujem zip archív z GitHubu…")
-            # stream=True so we can show progress instead of a frozen window.
-            resp = requests.get(ARCHIVE_URL, headers=_github_headers(),
-                                timeout=180, stream=True)
-            if resp.status_code != 200:
-                self.log.emit(self.t["src_err"].format(err="HTTP " + str(resp.status_code)))
-                return False
-            total = int(resp.headers.get("Content-Length") or 0)
-            downloaded = 0
-            chunks = bytearray()
-            for chunk in resp.iter_content(chunk_size=65536):
-                if chunk:
-                    chunks.extend(chunk)
-                    downloaded += len(chunk)
-                    if total > 0:
-                        pct = downloaded * 100 // total
-                        self.status.emit("Sťahujem zip… {} % ({:.1f} MB)".format(
-                            pct, downloaded / (1024 * 1024)))
-            data = bytes(chunks)
+            self.log.emit("  ▸ Pripájam sa ku GitHubu…")
+            data = None
+            errors = []
+
+            # Try both GitHub endpoints. The regular archive URL may be blocked
+            # by a redirect/proxy while codeload works directly (and vice versa).
+            for url in (CODELOAD_URL, ARCHIVE_URL):
+                self.log.emit("  [INF] Zdroj: " + url)
+                chunks = bytearray()
+                try:
+                    try:
+                        import requests
+                        resp = requests.get(url, headers=_github_headers(), timeout=180,
+                                            stream=True, allow_redirects=True)
+                        if resp.status_code != 200:
+                            raise RuntimeError("HTTP " + str(resp.status_code))
+                        total = int(resp.headers.get("Content-Length") or 0)
+                        for chunk in resp.iter_content(chunk_size=65536):
+                            if chunk:
+                                chunks.extend(chunk)
+                                pct = len(chunks) * 100 // total if total else 0
+                                self.status.emit("Sťahujem z GitHubu… {}% ({:.1f} MB)".format(
+                                    pct, len(chunks) / (1024 * 1024)))
+                    except Exception as request_error:
+                        # Standard-library fallback is bundled with every Python
+                        # and therefore also works in the one-file installer.
+                        self.log.emit("  [WRN] requests transport zlyhal, skúšam urllib: "
+                                      + str(request_error))
+                        from urllib.request import Request, urlopen
+                        req = Request(url, headers={**_github_headers(),
+                                      "User-Agent": "UltraPilot-Installer/" + APP_VERSION})
+                        with urlopen(req, timeout=180) as resp:
+                            total = int(resp.headers.get("Content-Length") or 0)
+                            while True:
+                                chunk = resp.read(65536)
+                                if not chunk:
+                                    break
+                                chunks.extend(chunk)
+                                pct = len(chunks) * 100 // total if total else 0
+                                self.status.emit("Sťahujem z GitHubu… {}% ({:.1f} MB)".format(
+                                    pct, len(chunks) / (1024 * 1024)))
+                    if len(chunks) < 1024:
+                        raise RuntimeError("GitHub vrátil prázdny alebo neúplný archív")
+                    data = bytes(chunks)
+                    break
+                except Exception as de:
+                    errors.append(url + ": " + str(de))
+                    self.log.emit("  [WRN] Endpoint zlyhal: " + str(de))
+            if data is None:
+                raise RuntimeError("; ".join(errors) or "GitHub download failed")
             dt = time.time() - t0
             mb = len(data) / (1024 * 1024)
             speed = (mb / dt) if dt > 0 else 0.0
@@ -621,6 +652,12 @@ class InstallWorker(QThread):
                     with zf.open(n) as src, open(dest_long, "wb") as out:
                         out.write(src.read())
                     extracted += 1
+                    # Explicitly log every downloaded/extracted file. This is
+                    # intentionally verbose so the user can see exactly what
+                    # the installer placed on disk.
+                    self.log.emit("    [{:>4}/{:>4}] {}".format(
+                        extracted, len(names), rel.replace("\\", "/")))
+                    self.status.emit("Rozbaľujem súbory… {}/{}".format(extracted, len(names)))
                 except Exception as fe:
                     failed.append(rel + " (" + str(fe) + ")")
             # Flatten the "<repo>-main/" wrapper if the zip was nested.
@@ -686,6 +723,7 @@ class InstallWorker(QThread):
                         f.write(rr.content)
                     total_bytes += len(rr.content)
                     count += 1
+                    self.log.emit("    [{:>4}/{:>4}] {}".format(count, total, path))
                 if i % 25 == 0 or i == total:
                     self.status.emit("Sťahujem súbory… {}/{} ({:.1f} MB)".format(
                         i, total, total_bytes / (1024 * 1024)))
