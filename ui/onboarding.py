@@ -183,13 +183,13 @@ class _LangRow(QWidget):
         self.cov.setText(str(cov) + "%")
         self.cov.setStyleSheet("font-size:12px; font-weight:600; color:" + (SUCCESS if cov >= 80 else (WARN if cov >= 40 else DANGER)))
         if info.get("bundled"):
-            self.action.setText("✓ " + _("lang_bundled"))
-            self.action.setEnabled(False)
-            self.action.setStyleSheet("QPushButton{background:#ECFDF5; color:#065F46; border:1px solid #A7F3D0; border-radius:8px; padding:6px 14px; font-size:12px; font-weight:600;} QPushButton:disabled{color:#065F46;}")
+            self.sub.setText(_("lang_bundled"))
+            self.action.setText(_("lang_select"))
+            self.action.setEnabled(True)
         elif info.get("downloaded"):
-            self.action.setText("✓ " + _("lang_downloaded"))
-            self.action.setEnabled(False)
-            self.action.setStyleSheet("QPushButton{background:#ECFDF5; color:#065F46; border:1px solid #A7F3D0; border-radius:8px; padding:6px 14px; font-size:12px; font-weight:600;} QPushButton:disabled{color:#065F46;}")
+            self.sub.setText(_("lang_downloaded"))
+            self.action.setText(_("lang_select"))
+            self.action.setEnabled(True)
         else:
             self.action.setText(_("lang_download"))
             self.action.setEnabled(True)
@@ -197,14 +197,31 @@ class _LangRow(QWidget):
     def mark_selected(self, selected):
         if selected:
             self.setStyleSheet("#Card{background:#ECFDF5; border:2px solid " + ACCENT + "; border-radius:12px;}")
+            self.action.setText(_("lang_selected"))
+            self.action.setStyleSheet("QPushButton{background:#10B981;color:#FFFFFF;border:none;border-radius:8px;padding:6px 14px;font-size:12px;font-weight:700;}")
         else:
             self.setStyleSheet("#Card{background:#FFFFFF; border:1px solid #E5E7EB; border-radius:12px;}")
+            if self.info.get("downloaded") or self.info.get("bundled"):
+                self.action.setText(_("lang_select"))
+            self.action.setStyleSheet(
+                "QPushButton{background:#F3F4F6;color:#111827;border:1px solid #E5E7EB;"
+                "border-radius:8px;padding:6px 14px;font-size:12px;font-weight:600;}"
+                "QPushButton:hover{border-color:" + ACCENT + ";color:" + ACCENT + ";}")
 
     def _on_action(self):
-        if not self.info.get("downloaded") and not self.info.get("bundled"):
-            win = self.window()
-            if isinstance(win, OnboardingWizard):
+        win = self.window()
+        if isinstance(win, OnboardingWizard):
+            if self.info.get("downloaded") or self.info.get("bundled"):
+                win.select_language(self.code)
+            else:
                 win.download_language(self.code, self)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._on_action()
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
 
 # ----------------------------------------------------------------- translation shortcut

@@ -132,6 +132,7 @@ def download(key: str, progress_cb=None) -> bool:
     out_dir = dataset_dir(key)
     zip_path = out_dir + ".zip"
     os.makedirs(cache_dir(), exist_ok=True)
+    last_logged = {"phase": None, "download": -1, "extract": -1}
 
     def report(frac, text):
         if progress_cb:
@@ -139,6 +140,22 @@ def download(key: str, progress_cb=None) -> bool:
                 progress_cb(frac, text)
             except Exception:
                 pass
+        # Mirror meaningful progress into the main ETS2LA-style runtime log.
+        # Throttle byte/chunk updates to 10% steps so the log is informative
+        # without producing hundreds of nearly identical records.
+        if text.startswith("Sťahujem mapu"):
+            bucket = min(10, int(max(0.0, frac - 0.03) / 0.067))
+            if bucket != last_logged["download"]:
+                last_logged["download"] = bucket
+                logging.info("Mapa [%s]: %s", key, text)
+        elif text.startswith("Rozbaľujem mapu"):
+            bucket = min(10, int(max(0.0, frac - 0.75) / 0.019))
+            if bucket != last_logged["extract"]:
+                last_logged["extract"] = bucket
+                logging.info("Mapa [%s]: %s", key, text)
+        elif text != last_logged["phase"]:
+            last_logged["phase"] = text
+            logging.info("Mapa [%s]: %s", key, text)
 
     try:
         report(0.0, f"Pripájam sa k serveru… ({key})")

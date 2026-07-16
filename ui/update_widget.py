@@ -232,7 +232,11 @@ class UpdateCheckerWidget(QWidget):
     def _version_text(self):
         t = "v" + self._version
         if self._commit:
-            t += "  ·  " + self._commit
+            # The badge contains only the short SHA; never append build counts,
+            # line numbers or other metadata from an older commit file.
+            from core.update_check import _display_commit
+            commit = _display_commit(self._commit)
+            t += "  ·  " + (commit or "build")
         return t
 
     def check(self):

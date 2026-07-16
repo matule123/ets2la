@@ -23,6 +23,7 @@ import logging
 import os
 import subprocess
 import sys
+import re
 
 VERSION = "0.4.1"
 REPO = "matule123/ets2la"
@@ -40,11 +41,18 @@ def current_version() -> str:
     return VERSION
 
 
+def _display_commit(value: str) -> str:
+    """Return exactly one 7-character SHA for the version badge."""
+    value = (value or "").strip()
+    match = re.search(r"(?i)(?<![0-9a-f])[0-9a-f]{7,40}(?![0-9a-f])", value)
+    return match.group(0)[:7].lower() if match else ""
+
+
 def git_commit() -> str:
     """Short build commit, including frozen installs without a .git folder."""
     env_commit = (os.environ.get("ULTRAPILOT_COMMIT") or "").strip()
     if env_commit:
-        return env_commit[:10]
+        return _display_commit(env_commit) or "build"
     # A real checkout is authoritative; an old external marker from a previous
     # ZIP update must never override the current HEAD after git pull.
     if os.path.isdir(os.path.join(_app_dir(), ".git")):
@@ -53,7 +61,7 @@ def git_commit() -> str:
                 ["git", "-C", _app_dir(), "rev-parse", "--short", "HEAD"],
                 capture_output=True, text=True, timeout=8)
             if out.returncode == 0:
-                return out.stdout.strip()
+                return _display_commit(out.stdout) or "build"
         except Exception:
             pass
     for name in ("commit.txt", "BUILD_COMMIT"):
@@ -61,7 +69,7 @@ def git_commit() -> str:
             with open(os.path.join(_app_dir(), name), "r", encoding="utf-8") as f:
                 value = f.read().strip()
             if value:
-                return value[:10]
+                return _display_commit(value) or "build"
         except Exception:
             pass
     # A frozen build must still show an explicit revision instead of silently
