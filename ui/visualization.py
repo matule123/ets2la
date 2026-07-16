@@ -357,6 +357,30 @@ class _HUDPreview(QWidget):
         qp.setBrush(QColor(top)); qp.drawPolygon(QPolygonF([blt, brt, frt, flt]))
 
 
+from core.hud import UltraPilotHUD
+
+
+class _ETS2LAHUDPreview(UltraPilotHUD):
+    """Embedded preview backed by the exact same renderer as the game HUD."""
+
+    def init_ui(self):
+        self.setMinimumSize(430, 500)
+        self._shown = True
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+        self.timer.start(80)
+
+    def _tick(self):
+        self._blink = not self._blink
+        self._t += 0.08
+        self.update()
+
+    def _do_paint(self, event):
+        # The overlay has a fixed desktop size; the in-app card is responsive.
+        self.W, self.H = self.width(), self.height()
+        super()._do_paint(event)
+
+
 class VisualizationPage(QWidget):
     """Visualization tab: left HUD preview + glass island with ETA/distance."""
 
@@ -388,11 +412,10 @@ class VisualizationPage(QWidget):
         cockpit_lay.setSpacing(1)
         self.cockpit_lay = cockpit_lay
 
-        # The QPainter scene is deterministic on every GPU/driver. It keeps the
-        # ETS2LA road/truck view visible even where OpenGL used to render only
-        # dots or an empty black panel.
+        # Use the exact overlay renderer here too.  Previously this page used a
+        # separate simplified copy, so the preview never matched the real HUD.
         self.scene = None
-        self.hud_preview = _HUDPreview(state)
+        self.hud_preview = _ETS2LAHUDPreview(state)
         cockpit_lay.addWidget(self.hud_preview, 5)
 
         map_column = QFrame()

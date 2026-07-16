@@ -120,6 +120,24 @@ class _SDKInstallWorker(QThread):
             self.done.emit(False, self.game_path, "failed:" + str(e))
 
 
+class _SDKMaintenanceWorker(QThread):
+    done = pyqtSignal(bool, str, str, str)
+    def __init__(self, game_path, version, action):
+        super().__init__()
+        self.game_path, self.version, self.action = game_path, version, action
+    def run(self):
+        try:
+            from core.sdk import sdk_downloader
+            if self.action == "repair":
+                ok, msg = sdk_downloader.repair(self.game_path, self.version)
+            else:
+                ok, msg = sdk_downloader.uninstall(self.game_path)
+            self.done.emit(ok, self.game_path, msg, self.action)
+        except Exception as e:
+            logging.error("onboarding sdk %s: %s", self.action, e)
+            self.done.emit(False, self.game_path, "failed:" + str(e), self.action)
+
+
 # ----------------------------------------------------------------- card widgets
 class _LangRow(QWidget):
     """One selectable language row in the language step."""
@@ -632,16 +650,26 @@ class OnboardingWizard(QWidget):
         self._set_game_status_label(status_lbl, status_key)
         lay.addLayout(left)
         lay.addStretch()
+        actions = QHBoxLayout()
+        actions.setSpacing(7)
         btn = QPushButton()
         btn.setObjectName("action")
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._set_game_button(btn, status_key, game)
-        btn.clicked.connect(lambda _, g=game, c=card: self._install_sdk(g, c))
-        lay.addWidget(btn)
+        btn.clicked.connect(lambda _, g=game, c=card: self._primary_sdk_action(g, c))
+        actions.addWidget(btn)
+        uninstall_btn = QPushButton(_("sdk_uninstall"))
+        uninstall_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        uninstall_btn.clicked.connect(lambda _, g=game, c=card: self._uninstall_sdk(g, c))
+        uninstall_btn.setStyleSheet("QPushButton{background:#FFF; color:#DC2626; border:1px solid #FCA5A5; border-radius:8px; padding:6px 12px; font-size:12px; font-weight:600;} QPushButton:hover{background:#FEF2F2; border-color:#EF4444;} QPushButton:disabled{color:#9CA3AF; border-color:#E5E7EB;}")
+        actions.addWidget(uninstall_btn)
+        lay.addLayout(actions)
         # Keep references for status updates.
         card._status_key = status_key
         card._status_lbl = status_lbl
         card._btn = btn
+        card._uninstall_btn = uninstall_btn
+        self._refresh_game_status(card, game, status_key)
         return card
 
     def _set_game_status_label(self, lbl, status_key):
@@ -660,9 +688,9 @@ class OnboardingWizard(QWidget):
         from core.i18n import t as _t
         st = self._sdk_status.get(status_key, "missing")
         if st == "installed":
-            btn.setText("✓")
-            btn.setEnabled(False)
-            btn.setStyleSheet("QPushButton{background:#ECFDF5; color:#065F46; border:1px solid #A7F3D0; border-radius:8px; padding:6px 14px; font-size:12px; font-weight:600;} QPushButton:disabled{color:#065F46;}")
+            btn.setText(_("sdk_repair"))
+            btn.setEnabled(True)
+            btn.setStyleSheet("QPushButton{background:#ECFDF5; color:#065F46; border:1px solid #6EE7B7; border-radius:8px; padding:6px 14px; font-size:12px; font-weight:600;} QPushButton:hover{background:#D1FAE5; border-color:#10B981;}")
         elif st == "unsupported":
             btn.setText(_t(_lang_code, "common", "skip"))
             btn.setEnabled(False)
@@ -676,6 +704,14 @@ class OnboardingWizard(QWidget):
         if hasattr(card, "_status_lbl"):
             self._set_game_status_label(card._status_lbl, status_key)
             self._set_game_button(card._btn, status_key, game)
+            card._uninstall_btn.setVisible(self._sdk_status.get(status_key) == "installed")
+
+    def _primary_sdk_action(self, game, card):
+        status_key = "path:" + game["path"]
+        if self._sdk_status.get(status_key) == "installed":
+            self._repair_sdk(game, card)
+        else:
+            self._install_sdk(game, card)
 
     def _install_sdk(self, game, card):
         status_key = "path:" + game["path"]
@@ -698,6 +734,43 @@ class OnboardingWizard(QWidget):
         self._refresh_game_status(card, game, status_key)
         if not ok and not msg.startswith("unsupported"):
             QMessageBox.warning(self, "UltraPilot", _("sdk_install_fail", err=msg))
+
+    def _repair_sdk(self, game, card):
+        card._btn.setEnabled(False)
+        card._uninstall_btn.setEnabled(False)
+        card._btn.setText(_("sdk_repairing"))
+        w = _SDKMaintenanceWorker(game["path"], game["version"], "repair")
+        w.done.connect(lambda ok, gp, msg, action: self._on_sdk_maintained(ok, gp, msg, action, card, game))
+        self._sdk_workers.append(w)
+        w.start()
+
+    def _uninstall_sdk(self, game, card):
+        answer = QMessageBox.question(
+            self, "UltraPilot", _("sdk_uninstall_confirm"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        card._btn.setEnabled(False)
+        card._uninstall_btn.setEnabled(False)
+        card._uninstall_btn.setText(_("sdk_uninstalling"))
+        w = _SDKMaintenanceWorker(game["path"], game["version"], "uninstall")
+        w.done.connect(lambda ok, gp, msg, action: self._on_sdk_maintained(ok, gp, msg, action, card, game))
+        self._sdk_workers.append(w)
+        w.start()
+
+    def _on_sdk_maintained(self, ok, game_path, msg, action, card, game):
+        from core.sdk import sdk_downloader
+        status_key = "path:" + game_path
+        installed = sdk_downloader.is_sdk_installed(game_path)
+        self._sdk_status[status_key] = "installed" if installed else "missing"
+        card._uninstall_btn.setText(_("sdk_uninstall"))
+        card._uninstall_btn.setEnabled(True)
+        self._refresh_game_status(card, game, status_key)
+        if not ok:
+            key = "sdk_repair_fail" if action == "repair" else "sdk_uninstall_fail"
+            QMessageBox.warning(self, "UltraPilot", _(key, err=msg))
 
     # --------------------------------------------------------------- map step
     def load_maps(self):

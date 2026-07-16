@@ -79,7 +79,7 @@ def _dll_source_dir() -> str:
         return os.path.join(app_dir(), "assets")
 
 
-def _ensure_dlls_local(version: str, dest_dir: str, log=None) -> bool:
+def _ensure_dlls_local(version: str, dest_dir: str, log=None, force: bool = False) -> bool:
     """Get the SDK DLLs for ``version`` into ``dest_dir`` (no game install).
 
     Returns True if all required DLLs are present in ``dest_dir`` afterwards.
@@ -93,7 +93,7 @@ def _ensure_dlls_local(version: str, dest_dir: str, log=None) -> bool:
         for name in SDK_FILES:
             s = os.path.join(src_dir, name)
             d = os.path.join(dest_dir, name)
-            if os.path.exists(d):
+            if os.path.exists(d) and not force:
                 continue
             if os.path.exists(s):
                 try:
@@ -114,7 +114,7 @@ def _ensure_dlls_local(version: str, dest_dir: str, log=None) -> bool:
     ok = True
     for name in SDK_FILES:
         d = os.path.join(dest_dir, name)
-        if os.path.exists(d):
+        if os.path.exists(d) and not force:
             continue
         url = urls.get(name)
         if not url:
@@ -142,7 +142,8 @@ def is_sdk_installed(game_path: str) -> bool:
     return all(os.path.exists(os.path.join(plugins_dir, n)) for n in SDK_FILES)
 
 
-def ensure_installed(game_path: str, version: str, log=None, progress_cb=None) -> tuple:
+def ensure_installed(game_path: str, version: str, log=None, progress_cb=None,
+                     force: bool = False) -> tuple:
     """Make sure the SDK DLLs are installed into ``game_path`` for ``version``.
 
     Returns ``(ok: bool, message: str)`` where ``message`` is a short status:
@@ -153,7 +154,7 @@ def ensure_installed(game_path: str, version: str, log=None, progress_cb=None) -
         return False, "failed:no_game_path"
 
     # Already there? Nothing to do.
-    if is_sdk_installed(game_path):
+    if is_sdk_installed(game_path) and not force:
         return True, "already"
 
     if not is_supported(version):
@@ -169,7 +170,7 @@ def ensure_installed(game_path: str, version: str, log=None, progress_cb=None) -
 
     if progress_cb:
         progress_cb(0.2)
-    if not _ensure_dlls_local(version, plugins_dir, log=log):
+    if not _ensure_dlls_local(version, plugins_dir, log=log, force=force):
         return False, "failed:dll_missing"
     if progress_cb:
         progress_cb(1.0)
@@ -183,3 +184,25 @@ def ensure_installed(game_path: str, version: str, log=None, progress_cb=None) -
             pass
 
     return is_sdk_installed(game_path), "installed" if is_sdk_installed(game_path) else "failed:verify"
+
+
+def repair(game_path: str, version: str, log=None, progress_cb=None) -> tuple:
+    """Replace installed SDK DLLs with clean bundled copies."""
+    return ensure_installed(game_path, version, log=log,
+                            progress_cb=progress_cb, force=True)
+
+
+def uninstall(game_path: str) -> tuple:
+    """Remove UltraPilot/SCS SDK DLLs from the game's plugins directory."""
+    if not game_path or not os.path.isdir(game_path):
+        return False, "failed:no_game_path"
+    plugins_dir = os.path.join(game_path, "bin", "win_x64", "plugins")
+    try:
+        for name in SDK_FILES + ("ets2la_plugin.dll",):
+            path = os.path.join(plugins_dir, name)
+            if os.path.exists(path):
+                os.remove(path)
+    except Exception as e:
+        logging.error("sdk_downloader: cannot uninstall SDK from %s: %s", plugins_dir, e)
+        return False, "failed:" + str(e)
+    return not is_sdk_installed(game_path), "uninstalled"

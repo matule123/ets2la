@@ -145,7 +145,10 @@ class UltraPilotHUD(QWidget):
         # 1) Panel background: a dark rounded card (the left HUD from the photo).
         panel = QRectF(0, 0, self.W, self.H)
         qp.setPen(Qt.PenStyle.NoPen)
-        qp.setBrush(QColor(10, 13, 18, 205))
+        # Nearly opaque like ETS2LA's visualization panel.  The former 205
+        # alpha mixed with bright windows/desktops and produced the large grey
+        # block visible in the old HUD.
+        qp.setBrush(QColor(8, 10, 13, 247))
         qp.drawRoundedRect(panel, 16, 16)
         # Subtle accent border tinted by the current driving state.
         accent = QColor(_STATE_COLORS.get(d["state"], "#10B981"))
@@ -258,6 +261,26 @@ class UltraPilotHUD(QWidget):
         qp.drawRect(QRectF(view.left(), horizon_y, view.width(), view.bottom() - horizon_y))
 
         pos, h = d["pos"], d["heading"]
+        # Keep the HUD useful before the game starts sending telemetry.  The
+        # old fallback was an empty, straight trapezoid; use a representative
+        # ETS2LA-style curved motorway and low-poly traffic instead.
+        demo = not pos
+        if demo:
+            pos, h = (0.0, 0.0), 0.0
+            d = dict(d)
+            centre = []
+            for ahead in range(2, 151, 5):
+                # Gentle S-curve: straight near the truck, increasingly curved
+                # in the distance so perspective remains readable.
+                lateral = 7.5 * math.sin((ahead - 18) / 42.0) - 2.2
+                centre.append((lateral, -float(ahead)))
+            d["nav_path"] = centre
+            d["lanes"] = 3
+            d["traffic"] = [
+                {"id": 1, "x": -4.2, "z": -39.0, "type": "car", "width": 1.9, "length": 4.5},
+                {"id": 2, "x": 3.0, "z": -62.0, "type": "truck", "width": 2.5, "length": 12.5},
+                {"id": 3, "x": -1.0, "z": -88.0, "type": "car", "width": 1.9, "length": 4.7},
+            ]
 
         def to_truck(wx, wz):
             dx, dz = wx - pos[0], wz - pos[1]

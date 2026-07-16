@@ -1102,7 +1102,7 @@ class InstallerWindow(QWidget):
     Steps live in a QStackedWidget; the hero header + step rail stay fixed.
     Switching pages applies a short fade so the transition feels smooth."""
 
-    def __init__(self, lang="sk", theme="dark"):
+    def __init__(self, lang="sk", theme="light"):
         super().__init__()
         self.setObjectName("Window")
         self.lang = lang
@@ -1413,7 +1413,7 @@ class InstallerWindow(QWidget):
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setStyleSheet(
-            "QTextEdit{background:#0A0A0A;color:#E5E7EB;border:1px solid #2F3338;"
+            "QTextEdit{background:#FFFFFF;color:#1F2937;border:1px solid #D5DAE1;"
             "border-radius:8px;padding:10px;font-family:'Cascadia Mono','Consolas';font-size:12px;}"
         )
         # Cap the buffer so a long install (lots of pip output) can't grow the
@@ -1722,7 +1722,7 @@ class InstallerWindow(QWidget):
             ts=ts)
         if sym:
             mark = '<span style="color:{c}; font-weight:700;">{s}</span> '.format(c=color, s=_esc(sym))
-            body = '<span style="color:#E5E7EB;">{r}</span>'.format(r=_esc(rest))
+            body = '<span style="color:#1F2937;">{r}</span>'.format(r=_esc(rest))
         else:
             mark = ""
             mark = '<span style="color:#22C55E;font-weight:700;">[INF]</span> '
