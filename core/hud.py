@@ -495,18 +495,16 @@ class UltraPilotHUD(QWidget):
             qp.setBrush(QColor(61, 67, 76, 255))
             for (_, sa, sb, sah, sbh, skind, slanes, _divided, _dash,
                  _pillar, _rail) in nearby:
-                # Prefab lane trajectories are navigation curves inside an
-                # already existing road, not additional roads. Rendering each
-                # one as asphalt created the separated parallel strips and
-                # black drop-outs shown in the screenshot.
-                if skind == "lane":
-                    continue
                 sda, sdl = sb[0] - sa[0], sb[1] - sa[1]
                 slength = math.hypot(sda, sdl)
                 if slength < .15:
                     continue
                 sna, snl = -sdl / slength, sda / slength
-                shalf = max(1, min(6, slanes)) * 3.6 / 2.0 + .98
+                # Adjacent prefab lane centre curves are about one lane apart.
+                # A 2.15 m half-width makes their underlays overlap into one
+                # solid junction surface and closes holes between road objects.
+                shalf = (2.15 if skind == "lane" else
+                         max(1, min(6, slanes)) * 3.6 / 2.0 + .98)
                 surface_edges = []
                 for side in (-1.0, 1.0):
                     sea = self._project(sa[0] + sna * shalf * side,

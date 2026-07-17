@@ -579,10 +579,10 @@ class RoadNetwork:
                             ranked.append((distance2, a, b, "road",
                                            max(1, lanes), divided, dash_on,
                                            pillar, rail_post))
-        # Prefab lanes already have exact horizontal curves. Use the nearest
-        # connected-node elevation; their short length makes this a good visual
-        # approximation while keeping bridges separated from ground roads.
-        for a, b in self.prefab_segments_near(pos, radius, limit*2):
+        # Prefab curves fill the otherwise missing geometry between ordinary
+        # road objects at junctions. The HUD renders them only as an unmarked
+        # asphalt underlay, never as independent outlined lanes.
+        for a, b in self.prefab_segments_near(pos, radius, limit * 2):
             uid_a = self._nearest_node(a, max_ring=1)
             uid_b = self._nearest_node(b, max_ring=1)
             ah = self.node_alt.get(uid_a, 0.0)
@@ -590,7 +590,7 @@ class RoadNetwork:
             distance2 = min((a[0]-px)**2+(a[1]-pz)**2,
                             (b[0]-px)**2+(b[1]-pz)**2)
             ranked.append((distance2, (a[0], a[1], ah),
-                           (b[0], b[1], bh), "lane", 1, False, True,
+                           (b[0], b[1], bh), "lane", 1, False, False,
                            False, False))
         ranked.sort(key=lambda item: item[0])
         return [(a, b, kind, lanes, divided, dash_on, pillar, rail_post)
