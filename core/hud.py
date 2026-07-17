@@ -473,7 +473,11 @@ class UltraPilotHUD(QWidget):
                 da, dl = b[0] - a[0], b[1] - a[1]
                 seg_len = math.hypot(da, dl)
                 if seg_len > 0.15:
-                    overlap = min(0.7, seg_len * 0.22)
+                    # Curved roads arrive as many independent short chords.
+                    # A small overlap left wedge-shaped holes between chords;
+                    # extend almost half a chord at each end so adjacent
+                    # asphalt polygons always form one continuous ribbon.
+                    overlap = min(1.8, seg_len * 0.46)
                     ua, ul = da / seg_len, dl / seg_len
                     a = (a[0] - ua * overlap, a[1] - ul * overlap)
                     b = (b[0] + ua * overlap, b[1] + ul * overlap)
@@ -502,7 +506,7 @@ class UltraPilotHUD(QWidget):
                         # Prefab data describes real lane trajectories through
                         # ramps and junctions. Render each as an opaque asphalt
                         # strip; outlines alone caused the thin wire roads.
-                        lane_half = 1.75
+                        lane_half = 1.92
                         lane_edges = []
                         for side in (-1.0, 1.0):
                             ea = self._project(a[0] + na * lane_half * side,
@@ -531,7 +535,7 @@ class UltraPilotHUD(QWidget):
                     # Trust this map segment, never a global telemetry lane
                     # count from a nearby toll/plaza branch.
                     road_lanes = max(1, min(6, segment_lanes))
-                    half = road_lanes * 3.6 / 2.0 + 0.8
+                    half = road_lanes * 3.6 / 2.0 + 0.98
                     edges = []
                     for side in (-1.0, 1.0):
                         ea = self._project(a[0] + na * half * side,
@@ -576,7 +580,7 @@ class UltraPilotHUD(QWidget):
                             edges[0][0], edges[0][1],
                             edges[1][1], edges[1][0],
                         ]))
-                    edge_pen = QPen(QColor(195, 201, 210, 205), 2.35,
+                    edge_pen = QPen(QColor(195, 201, 210, 225), 3.0,
                                     Qt.PenStyle.SolidLine,
                                     Qt.PenCapStyle.RoundCap,
                                     Qt.PenJoinStyle.RoundJoin)
