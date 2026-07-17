@@ -290,7 +290,20 @@ class Plugin(BasePlugin):
             return []
         from core.navigation.road_network import _uid
         normalized_uids = [_uid(uid) for uid in uids]
-        all_valid = [uid for uid in normalized_uids if uid in self.road_net.nodes]
+        meta = self.sdk.get("game_route_meta", []) or []
+        valid_entries = []
+        for item_index, uid in enumerate(normalized_uids):
+            if uid not in self.road_net.nodes:
+                continue
+            distance = 0.0
+            if item_index < len(meta) and isinstance(meta[item_index], dict):
+                try:
+                    distance = float(meta[item_index].get("distance", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    distance = 0.0
+            valid_entries.append((uid, distance))
+        all_valid = [entry[0] for entry in valid_entries]
+        valid_distances = [entry[1] for entry in valid_entries]
         # Missing IDs must split the route. Compressing them out connected the
         # preceding and following roads with a fake, kilometres-long chord.
         runs, current = [], []
@@ -341,7 +354,6 @@ class Plugin(BasePlugin):
         orientation_signature = (len(uids), int(uids[0]), int(uids[-1]))
         if orientation_signature != self._route_orientation_signature:
             self._route_orientation_signature = orientation_signature
-            meta = self.sdk.get("game_route_meta", []) or []
             distances = [float(item.get("distance", 0.0) or 0.0)
                          for item in meta if isinstance(item, dict)]
             if len(distances) >= 2 and abs(distances[0] - distances[-1]) > 1.0:
@@ -351,8 +363,37 @@ class Plugin(BasePlugin):
         if self._route_reversed:
             matched.reverse()
             valid_uids.reverse()
+            valid_distances.reverse()
             route = Route(matched)
             idx = route.tracking_index(pos, heading)
+        # Route metadata distances remain tied to their SDK nodes even while
+        # the buffer itself updates only in sparse steps. Use the live SCS GPS
+        # distance to select our progress along that ordered list. This avoids
+        # snapping to a geometrically nearby occurrence near the destination
+        # on loops/parallel roads (the source of 0.6 km vs 11 km routes).
+        try:
+            game_distance = float(self.sdk.get("game_route_distance", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            game_distance = 0.0
+        usable_distance_indices = [
+            item_index for item_index, distance in enumerate(valid_distances)
+            if distance > 0.0]
+        if game_distance > 100.0 and len(usable_distance_indices) >= 2:
+            metadata_idx = min(
+                usable_distance_indices,
+                key=lambda item_index: abs(valid_distances[item_index]
+                                           - game_distance))
+            metadata_error = abs(valid_distances[metadata_idx] - game_distance)
+            metadata_span = max(valid_distances) - min(valid_distances)
+            if (metadata_span > 500.0
+                    and metadata_error <= max(5000.0, game_distance * .35)):
+                if metadata_idx != idx:
+                    logging.info(
+                        "Navigation: GPS distance selected route node %d instead of geometric node %d "
+                        "(SDK %.1f km, game %.1f km).",
+                        metadata_idx, idx, valid_distances[metadata_idx] / 1000.0,
+                        game_distance / 1000.0)
+                idx = metadata_idx
         # GPS UIDs are intentionally sparse. The truck will commonly be
         # between the nearest UID and its predecessor; starting exactly at
         # ``idx`` then made the resolved geometry begin tens of metres ahead
