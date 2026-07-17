@@ -8,7 +8,10 @@ import time
 
 class ETS2LARouteReader:
     SIZE = 96_000
-    ITEM = struct.Struct("=qff")  # node uid, world x, world z
+    # This is NOT world geometry. ETS2LA exports the navigation node UID plus
+    # remaining distance and time. Geometry must be resolved through the active
+    # map dataset; treating the floats as X/Z was the source of bogus routes.
+    ITEM = struct.Struct("=qff")  # node uid, distance (m), time (s)
 
     def __init__(self):
         self._mm = None
@@ -35,10 +38,14 @@ class ETS2LARouteReader:
         try:
             raw = self._mm[:self.SIZE]
             points = []
-            for uid, x, z in self.ITEM.iter_unpack(raw):
+            for uid, distance, route_time in self.ITEM.iter_unpack(raw):
                 if uid == 0:
                     break
-                points.append((float(x), float(z)))
+                points.append({
+                    "uid": int(uid),
+                    "distance": float(distance),
+                    "time": float(route_time),
+                })
             self._cached = points
             return points
         except Exception as e:

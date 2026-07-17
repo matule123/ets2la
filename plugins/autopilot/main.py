@@ -101,6 +101,8 @@ class Plugin(BasePlugin):
         # Real traffic available? If so, down-weight the noisy vision signal.
         traffic = self.sdk.shared_state.get("traffic", []) or []
         have_real_traffic = len(traffic) > 0
+        navigation_unreliable = bool(
+            self.sdk.shared_state.get("navigation_unreliable", False))
 
         # 2. Safety states — these still brake hard, but through the ramp so
         #    the truck doesn't lock up and spin.
@@ -136,6 +138,10 @@ class Plugin(BasePlugin):
             vision_brake = 0.0
         requested_brake = max(collision_brake, traffic_brake, light_brake,
                               aux_brake, vision_brake)
+        if navigation_unreliable:
+            # A GPS route with a mismatched map must never fall through to
+            # camera lane detection at an intersection. Stop predictably.
+            requested_brake = max(requested_brake, 0.70)
 
         if system_state == "AVOID_OBSTACLE":
             requested_brake = max(requested_brake,
@@ -204,7 +210,9 @@ class Plugin(BasePlugin):
         engage = min(1.0, self._engage_blend + dt / 1.2)
         self._engage_blend = engage if active else 0.0
 
-        if nav_active:
+        if navigation_unreliable:
+            self._last_steering = self._ramp_steering(0.0, dt)
+        elif nav_active:
             # nav_steering is already a finished pure-pursuit + CTE value from
             # the Route/map plugin. Apply a SHORT rate-limit only — the old
             # 0.35/0.65 exponential lag was a second integrator that caused the

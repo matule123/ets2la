@@ -397,21 +397,8 @@ class UltraPilotHUD(QWidget):
                     qp.drawPolyline(QPolygonF(pts))
                     qp.setPen(QPen(QColor("#3B82F6"), 4))
                     qp.drawPolyline(QPolygonF(pts))
-            else:
-                # No route: a straight filled ribbon ahead so the road is visible.
-                left = [self._project(a, -HALF, view) for a in range(2, 90, 6)]
-                right = [self._project(a, HALF, view) for a in range(2, 90, 6)]
-                ribbon = [p for p in left if p] + [p for p in reversed(right) if p]
-                if len(ribbon) >= 3:
-                    qp.setPen(Qt.PenStyle.NoPen); qp.setBrush(QColor(36, 40, 46, 220))
-                    qp.drawPolygon(QPolygonF(ribbon))
-                for lat, dash in ((-HALF, False), (HALF, False), (0.0, True)):
-                    pts = [self._project(a, lat, view) for a in range(2, 90, 6)]
-                    pts = [p for p in pts if p is not None]
-                    if len(pts) >= 2:
-                        st = Qt.PenStyle.DashLine if dash else Qt.PenStyle.SolidLine
-                        qp.setPen(QPen(QColor(240, 240, 245, 190), 2, st))
-                        qp.drawPolyline(QPolygonF(pts))
+            # With no GPS route we intentionally draw no invented straight
+            # ribbon. Only real nearby map segments remain visible.
 
             # Surrounding vehicles as solid 3D models (far → near for overlap).
             vehs = []

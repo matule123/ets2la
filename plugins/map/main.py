@@ -231,6 +231,46 @@ class Plugin(BasePlugin):
             self.sdk.set("road_lanes", lanes)
             logging.info("Road type: %s (%d lanes) -> speed cap %d km/h", rtype, lanes, cap)
 
+    def _resolved_game_route(self, pos, heading):
+        """Resolve the in-game GPS node UIDs through the active map dataset."""
+        uids = self.sdk.get("game_route_node_uids", []) or []
+        if len(uids) < 2 or self.road_net is None or not self.road_net.loaded:
+            return []
+        points = [self.road_net.nodes.get(int(uid)) for uid in uids]
+        matched = [tuple(p) for p in points if p is not None]
+        match_ratio = len(matched) / max(1, len(uids))
+        self.sdk.set("game_route_match", match_ratio)
+        if len(matched) < 2 or match_ratio < 0.55:
+            self.sdk.set("navigation_unreliable", True)
+            self.sdk.set(
+                "map_status",
+                "Vybraná mapa nezodpovedá trase v hre. Vyber správny ETS2/ATS dataset.")
+            self.sdk.set("game_route_points", [])
+            return []
+        self.sdk.set("navigation_unreliable", False)
+
+        # Route buffers can be ordered either way. At the closest node choose
+        # the direction whose next segment agrees with the truck heading.
+        route = Route(matched)
+        idx = route.closest_index(pos)
+        fx, fz = -math.sin(heading), -math.cos(heading)
+
+        def direction_score(target_index):
+            if not (0 <= target_index < len(matched)):
+                return -float("inf")
+            dx = matched[target_index][0] - matched[idx][0]
+            dz = matched[target_index][1] - matched[idx][1]
+            length = math.hypot(dx, dz) or 1.0
+            return (dx * fx + dz * fz) / length
+
+        if direction_score(idx - 1) > direction_score(idx + 1):
+            matched.reverse()
+            route = Route(matched)
+            idx = route.closest_index(pos)
+        remaining = matched[idx:]
+        self.sdk.set("game_route_points", [list(p) for p in remaining])
+        return remaining
+
     def _ensure_map_path(self, pos, heading):
         """Compute and publish the road-ahead polyline from the downloaded map.
 
@@ -240,7 +280,7 @@ class Plugin(BasePlugin):
         # Prefer the actual route selected in ETS2's world map, exported by the
         # ETS2LA route buffer. This is the planned route, not merely the nearest
         # road segment in front of the truck.
-        game_route = self.sdk.get("game_route_points", []) or []
+        game_route = self._resolved_game_route(pos, heading)
         if len(game_route) >= 2:
             route = Route([tuple(p) for p in game_route])
             idx = route.closest_index(pos)
@@ -267,7 +307,7 @@ class Plugin(BasePlugin):
         if not self.sdk.get("navigation_recalculating", False):
             return
         elapsed = time.monotonic() - self._recalc_started
-        points = self.sdk.get("game_route_points", []) or []
+        points = self.sdk.get("game_route_node_uids", []) or []
         if elapsed < 0.25:
             self.sdk.set("navigation_progress", 0.25)
             self.sdk.set("navigation_status", "Kontrolujem cieľ a mapové dáta…")

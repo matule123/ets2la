@@ -159,20 +159,17 @@ class MapView(QWidget):
             return QPointF(sx, sy)
 
         # Nearby roads (grey).
-        qp.setPen(QPen(QColor("#8F7939"), 3, Qt.PenStyle.SolidLine,
+        qp.setPen(QPen(QColor("#555B63"), 2, Qt.PenStyle.SolidLine,
                        Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         for a, b in self.road_net.segments_near(truck, radius):
             qp.drawLine(to_screen(a), to_screen(b))
 
-        # Road ahead from the map graph (blue) — stage-3 path generation.
-        try:
-            ahead = self.road_net.path_ahead(truck, heading)
-            if len(ahead) >= 2:
-                qp.setPen(QPen(QColor("#1597F5"), 7, Qt.PenStyle.SolidLine,
-                               Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-                qp.drawPolyline(QPolygonF([to_screen(p) for p in ahead]))
-        except Exception:
-            pass
+        # Blue is reserved for the route selected in the game's GPS.
+        ahead = self.state.get("game_route_points", []) or []
+        if len(ahead) >= 2:
+            qp.setPen(QPen(QColor("#1597F5"), 6, Qt.PenStyle.SolidLine,
+                           Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            qp.drawPolyline(QPolygonF([to_screen(p) for p in ahead]))
 
         # Recorded/loaded route on top (green).
         pts = list(self.route_points)
@@ -506,24 +503,12 @@ class MapPage(QWidget):
             if current in routes:
                 self.route_combo.setCurrentText(current)
 
-        # Publish the road ahead so the autopilot can steer by map (no recording).
-        net = self.view.road_net
-        truck = self.state.get("truck_world_pos")
-        if net is not None and net.loaded and truck:
-            try:
-                path = net.path_ahead(truck, self.state.get("truck_heading", 0.0) or 0.0)
-                self.state.set("map_path", [list(p) for p in path] if len(path) >= 2 else [])
-            except Exception:
-                self.state.set("map_path", [])
-
         if self.state.get("nav_active"):
             dist = self.state.get("distance_to_dest")
             if dist is not None:
                 self.status.setText(f"Navigating — {float(dist) / 1000:.2f} km to destination.")
             else:
-                # Map-based driving (no recorded route) — show a clear status so
-                # the user knows the autopilot is steering by the map.
-                self.status.setText("Map steering active — following the road ahead.")
+                self.status.setText("GPS navigation active — following the route selected in game.")
         else:
             # Surface the map-loading status the engine publishes (loading /
             # ready / error) so the user is never left guessing why nav is off.

@@ -235,8 +235,8 @@ class Route:
             bx, bz = self.points[j + 1]
             sdx, sdz = bx - ax, bz - az
             sl = math.hypot(sdx, sdz) or 1.0
-            # right-of-travel offset vector
-            ox, oz = (sdz / sl) * lane_offset_m, (-sdx / sl) * lane_offset_m
+            # right-of-travel offset vector in ETS2's X/Z plane
+            ox, oz = (-sdz / sl) * lane_offset_m, (sdx / sl) * lane_offset_m
             tx += ox
             tz += oz
 
@@ -247,7 +247,7 @@ class Route:
         # Signed heading error: +angle means the target is to the right.
         # Standard 2-D cross(target, forward): positive means target is on the
         # truck's right in ETS2's x/z coordinate system.
-        cross = fz * dx - fx * dz
+        cross = fx * dz - fz * dx
         dot = fx * dx + fz * dz
         heading_error = math.atan2(cross, dot)
 
@@ -258,7 +258,7 @@ class Route:
         # to full-lock — that's the „truck yanks hard left the moment autopilot
         # engages" bug. Capping it keeps the steering reasonable while still
         # pulling back toward the lane.
-        cte = self.cross_track_error(idx, pos) - lane_offset_m
+        cte = self.cross_track_error(idx, pos) + lane_offset_m
         cte = max(-5.0, min(5.0, cte))
 
         # --- Stanley lateral-control law (Fáza 3a) -------------------------
@@ -269,9 +269,7 @@ class Route:
         # old pure-gain sum produced in S-bends. The speed_gain schedule scales
         # the whole command down with speed (gentle inputs at 90 km/h).
         v = max(abs(speed_ms), 0.0)
-        # cross_track_error is negative when a +z route lies to our right, so
-        # negate it to match the controller convention: positive = right.
-        cte_steer = math.atan((-K_CTE * cte) / (K_SOFT + v))
+        cte_steer = math.atan((K_CTE * cte) / (K_SOFT + v))
         steer = K_HEADING * heading_error + cte_steer
         # Clamp the *angle* before the speed gain — without this a 90° heading
         # error + maxed CTE produced steer values > 2.0, which then became ±1.0

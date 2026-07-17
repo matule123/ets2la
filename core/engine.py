@@ -470,13 +470,19 @@ class UltraPilotEngine:
                     route_distance > 0 and prev_distance is not None and prev_distance > 0
                     and abs(route_distance - prev_distance) > 1000.0)
                 first_route = bool(route_distance > 0 and prev_distance in (None, 0))
-                planned_points = self.ets2la_route.read()
+                planned_items = self.ets2la_route.read()
+                planned_uids = [int(item["uid"]) for item in planned_items
+                                if isinstance(item, dict) and item.get("uid")]
                 route_signature = None
-                if len(planned_points) >= 2:
-                    end = planned_points[-1]
-                    route_signature = (len(planned_points), round(end[0], -1), round(end[1], -1))
-                    self.shared_state.set("game_route_points",
-                                          [list(p) for p in planned_points])
+                if len(planned_uids) >= 2:
+                    route_signature = (len(planned_uids), planned_uids[-1])
+                    if route_signature != self._last_route_signature:
+                        self.shared_state.set("game_route_points", [])
+                    self.shared_state.set("game_route_node_uids", planned_uids)
+                    self.shared_state.set("game_route_meta", planned_items)
+                else:
+                    self.shared_state.set("game_route_node_uids", [])
+                    self.shared_state.set("game_route_points", [])
                 planned_route_changed = bool(
                     route_signature and route_signature != self._last_route_signature)
                 if destination_changed or route_changed or first_route or planned_route_changed:

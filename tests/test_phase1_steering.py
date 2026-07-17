@@ -224,8 +224,9 @@ def run_heading_and_steering_signs():
         assert math.isclose(got, want, abs_tol=1e-9), (got, want)
 
     heading = heading_towards(0, 1)
-    right = Route([(5, 0), (5, 100)])
-    left = Route([(-5, 0), (-5, 100)])
+    # Facing +Z, physical right is -X in ETS2's left-handed X/Z plane.
+    right = Route([(-5, 0), (-5, 100)])
+    left = Route([(5, 0), (5, 100)])
     assert right.steering((0, 0), heading, 10.0) > 0.0
     assert left.steering((0, 0), heading, 10.0) < 0.0
     print("  OK: SCS turns convert to radians and steering signs are symmetric.")
