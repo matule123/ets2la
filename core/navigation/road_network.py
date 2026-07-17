@@ -19,6 +19,7 @@ import json
 import math
 import logging
 import heapq
+import time
 
 CACHE_VERSION = 5  # exact road curves + elevation-aware HUD geometry
 
@@ -575,13 +576,23 @@ class RoadNetwork:
         ranked.sort(key=lambda item: item[0])
         return [(a, b) for _, a, b in ranked[:limit]]
 
-    def refine_route(self, uids):
+    def refine_route(self, uids, progress=None):
         """Replace prefab entrance chords in a GPS UID route with nav curves."""
+        self._last_refine_complete = True
+        deadline = time.monotonic() + 25.0
         uids = [_uid(value) for value in uids]
         if not uids:
             return []
         result = [self.nodes[uids[0]]] if uids[0] in self.nodes else []
-        for first, second in zip(uids, uids[1:]):
+        pairs = list(zip(uids, uids[1:]))
+        for pair_index, (first, second) in enumerate(pairs, 1):
+            if time.monotonic() >= deadline:
+                self._last_refine_complete = False
+                logging.warning("road_network: GPS route refinement timed out at %d/%d sections",
+                                pair_index, len(pairs))
+                break
+            if progress:
+                progress(pair_index, len(pairs), 0)
             target = self.nodes.get(second)
             pair = (min(first, second), max(first, second))
             detailed = None
@@ -613,10 +624,12 @@ class RoadNetwork:
             if detailed:
                 gap = math.dist(result[-1], detailed[0]) if result else 0.0
                 if gap > 12.0:
+                    self._last_refine_complete = False
                     break
                 result.extend(detailed[1:] if gap < 1.0 else detailed)
                 if target is not None:
                     if math.dist(result[-1], target) > 12.0:
+                        self._last_refine_complete = False
                         break
                     result.append(target)
             elif ((first, second) in self._road_length
@@ -628,6 +641,7 @@ class RoadNetwork:
                         points.reverse()
                     gap = math.dist(result[-1], points[0]) if result else 0.0
                     if gap > 12.0:
+                        self._last_refine_complete = False
                         break
                     result.extend(points[1:] if gap < 1.0 else points)
             elif target is not None:
@@ -636,8 +650,13 @@ class RoadNetwork:
                 # graph instead of appending a kilometre-long straight chord.
                 gap = math.dist(result[-1], target) if result else 0.0
                 if gap > 350.0:
-                    bridge = self._route_bridge(first, second)
+                    bridge = self._route_bridge(
+                        first, second,
+                        progress=(lambda expanded, pi=pair_index:
+                                  progress(pi, len(pairs), expanded))
+                        if progress else None)
                     if len(bridge) < 2:
+                        self._last_refine_complete = False
                         logging.warning(
                             "road_network: cannot connect sparse GPS nodes %s -> %s (%.0f m)",
                             first, second, gap)
@@ -658,7 +677,7 @@ class RoadNetwork:
                     result.append(target)
         return result
 
-    def _route_bridge(self, start, goal, max_expanded=12000):
+    def _route_bridge(self, start, goal, max_expanded=12000, progress=None):
         """A* bridge between two sparse SDK GPS nodes on the loaded graph."""
         if start == goal:
             return [start]
@@ -688,6 +707,8 @@ class RoadNetwork:
                 cache[key] = path
                 return path
             expanded += 1
+            if progress and expanded % 250 == 0:
+                progress(expanded)
             neighbours = set(self.adj.get(current, ()))
             neighbours.update(self.fwd.get(current, ()))
             neighbours.update(self.bwd.get(current, ()))

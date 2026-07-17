@@ -58,7 +58,9 @@ def plugin_worker(plugin_class: Type[BasePlugin], plugin_name: str,
                 try:
                     plugin.on_tick(delta_time)
                 except Exception as e:
-                    logging.error(f"[plugin:{plugin_name}] on_tick error: {e}")
+                    # Include the failing source line. A message-only exception
+                    # made route failures look like a frozen progress indicator.
+                    logging.exception(f"[plugin:{plugin_name}] on_tick error: {e}")
 
             time.sleep(tick_dt)
 

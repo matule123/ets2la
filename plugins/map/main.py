@@ -311,7 +311,21 @@ class Plugin(BasePlugin):
             route = Route(matched)
             idx = route.tracking_index(pos, heading)
         remaining_uids = valid_uids[idx:]
-        remaining = self.road_net.refine_route(remaining_uids)
+        def route_progress(done, total, expanded):
+            fraction = done / max(1, total)
+            self.sdk.set("navigation_progress", 0.72 + 0.24 * fraction)
+            detail = (f" · kontrolujem {expanded} uzlov"
+                      if expanded else "")
+            self.sdk.set(
+                "navigation_status",
+                f"Spájam cestný úsek {done}/{total}{detail}")
+
+        remaining = self.road_net.refine_route(
+            remaining_uids, progress=route_progress)
+        if not getattr(self.road_net, "_last_refine_complete", True):
+            self.sdk.set("game_route_resolved_points", len(remaining))
+            self.sdk.set("game_route_points", [])
+            return []
         if len(remaining) < 2:
             remaining = matched[idx:]
         # Final safety net for both rendering and steering: never publish a
