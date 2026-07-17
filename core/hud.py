@@ -304,14 +304,6 @@ class UltraPilotHUD(QWidget):
         # Higher chase camera and a higher horizon give the ETS2LA-like
         # top-down perspective: junction shapes remain legible instead of
         # collapsing into a dense horizontal bundle in the distance.
-        # Orbit around the ego tractor so the model can be inspected from the
-        # side/front without changing any navigation geometry.
-        pivot = 12.0
-        if abs(self._view_yaw) > 1e-5:
-            ca, sa = math.cos(self._view_yaw), math.sin(self._view_yaw)
-            rel = ahead - pivot
-            ahead, lateral = (pivot + rel * ca + lateral * sa,
-                              -rel * sa + lateral * ca)
         H = 13.0          # camera height above road
         cam_back = 20.0   # camera behind the truck
         f = view.height() * 0.92
@@ -460,6 +452,7 @@ class UltraPilotHUD(QWidget):
             # Lower decks first, higher/nearer decks last so opaque road
             # polygons correctly hide roads passing underneath.
             nearby.sort(key=lambda item: ((item[3] + item[4]) * .5, -item[0]))
+            drawn_pillars = []
             for (_, a, b, ah, bh, kind, segment_lanes, divided, dash_on,
                  pillar, rail_post) in nearby:
                 da, dl = b[0] - a[0], b[1] - a[1]
@@ -521,9 +514,13 @@ class UltraPilotHUD(QWidget):
                     # separation unmistakable and hides geometry below it.
                     deck_height = (ah + bh) * .5
                     if len(edges) == 2 and deck_height > 2.0:
-                        if pillar:
-                            mid_a, mid_l = ((a[0] + b[0]) * .5,
-                                            (a[1] + b[1]) * .5)
+                        mid_a, mid_l = ((a[0] + b[0]) * .5,
+                                        (a[1] + b[1]) * .5)
+                        pillar_clear = all(
+                            math.hypot(mid_a - old_a, mid_l - old_l) >= 22.0
+                            for old_a, old_l in drawn_pillars)
+                        if pillar and pillar_clear and deck_height > 3.2:
+                            drawn_pillars.append((mid_a, mid_l))
                             ua, ul = da / length, dl / length
                             for side in (-1.0, 1.0):
                                 centre = (mid_a + na * half * .62 * side,
@@ -707,41 +704,53 @@ class UltraPilotHUD(QWidget):
         self._draw_low_poly_ego(qp, view, d.get("trailer_articulation", 0.0), True)
 
     def _draw_low_poly_ego(self, qp, view, articulation=0.0, attached=True):
-        """Minimal grey tractor silhouette with an actually hinged trailer."""
-        grey, top, dark = "#858A90", "#B8BCC1", "#24272C"
-        hw = 1.28
-        # One uninterrupted tractor body with a simple raised cab. No lamps,
-        # glass, grille or separate decorative chassis pieces.
-        self._box3d(qp, 9.7, 15.8, hw, 0, .24, 1.28, view, (grey, top))
-        self._wedge3d(qp, 12.0, 15.72, hw, 0, 1.20, 2.92, view,
-                      grey, top, top_hw=.84, top_near=.20, top_far=.14)
-        # Wheels are inset into the body silhouette rather than protruding.
-        for axle in (10.35, 11.25, 14.95):
-            for side in (-1, 1):
-                self._draw_round_wheel(qp, view, axle,
-                                       side * (hw - .04), 0.0, .38)
-
-        if not attached:
-            return
-        angle = max(-math.radians(48), min(math.radians(48), float(articulation)))
-        hinge = (10.85, 0.0)
-        length = 10.2
-        tail = (hinge[0] - math.cos(angle) * length,
-                hinge[1] + math.sin(angle) * length)
-        ua, ul = ((hinge[0] - tail[0]) / length,
-                  (hinge[1] - tail[1]) / length)
-        # One plain grey trailer prism, rotated around the fifth wheel.
-        self._oriented_box3d(qp, tail, hinge, 1.30, .45, 3.58, view,
-                             ("#8D9298", "#C3C6CA"))
-        # Trailer wheels rotate and translate with the trailer body.
+        """Recognisable tractor/semitrailer; only this model orbits in the HUD."""
+        grey, light = "#858B92", "#BEC2C7"
+        angle = self._view_yaw
+        ua, ul = math.cos(angle), -math.sin(angle)
         pa, pl = -ul, ua
-        for along in (1.15, 2.15, 8.7):
-            ca, cl = tail[0] + ua * along, tail[1] + ul * along
+        centre = (12.2, 0.0)
+
+        def along(distance):
+            return (centre[0] + ua * distance, centre[1] + ul * distance)
+
+        tractor_rear, tractor_front = along(-3.0), along(3.2)
+        hinge = along(-2.15)
+
+        # Trailer first (behind tractor), articulated around the fifth wheel.
+        if attached:
+            trailer_angle = angle - max(-math.radians(48),
+                                        min(math.radians(48), float(articulation)))
+            tua, tul = math.cos(trailer_angle), -math.sin(trailer_angle)
+            tpa, tpl = -tul, tua
+            trailer_length = 11.2
+            tail = (hinge[0] - tua * trailer_length,
+                    hinge[1] - tul * trailer_length)
+            trailer_front = (hinge[0] - tua * .25, hinge[1] - tul * .25)
+            self._oriented_box3d(qp, tail, trailer_front, 1.30, .48, 3.62,
+                                 view, ("#91969C", "#C7CACD"))
+            # Three closely spaced trailer axles at the rear, as on a semi.
+            for axle in (1.35, 2.35, 3.35):
+                ca, cl = tail[0] + tua * axle, tail[1] + tul * axle
+                for side in (-1, 1):
+                    self._draw_round_wheel(
+                        qp, view, ca + tpa * side * 1.18,
+                        cl + tpl * side * 1.18, 0.0, .39)
+
+        # Long low tractor body, then a tall cab only at the front.
+        self._oriented_box3d(qp, tractor_rear, tractor_front, 1.27,
+                             .25, 1.30, view, (grey, light))
+        cab_rear = along(.05)
+        self._oriented_box3d(qp, cab_rear, tractor_front, 1.24,
+                             1.18, 3.08, view, (grey, "#C5C8CC"))
+
+        # Two driven rear axles and one steering axle, inset in the body.
+        for axle in (-2.15, -1.15, 2.55):
+            ca, cl = along(axle)
             for side in (-1, 1):
-                wc = (ca + pa * side * 1.22, cl + pl * side * 1.22)
-                rear = (wc[0] - ua * .30, wc[1] - ul * .30)
-                front = (wc[0] + ua * .30, wc[1] + ul * .30)
-                self._draw_round_wheel(qp, view, wc[0], wc[1], 0.0, .38)
+                self._draw_round_wheel(qp, view,
+                                       ca + pa * side * 1.16,
+                                       cl + pl * side * 1.16, 0.0, .40)
 
     def _draw_round_wheel(self, qp, view, ahead, lateral, ground=0.0, radius=.36):
         """Perspective-scaled round wheel with a grey inset hub."""
