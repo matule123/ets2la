@@ -95,18 +95,18 @@ class AROverlay(QWidget):
         closest_distance = math.dist(tuple(pos), world[closest])
         # A route that cannot be localized at the truck must not be projected:
         # it creates the horizontal screen-wide stroke seen in the old overlay.
-        if closest_distance > 25.0:
+        if closest_distance > 12.0:
             return
         world = world[closest:]
         # Connect the ribbon to the truck only when the first valid GPS point
         # is genuinely nearby. A stale/different map node must never produce a
         # screen-wide line.
-        if world and math.dist(tuple(pos), world[0]) <= 30.0:
+        if world and math.dist(tuple(pos), world[0]) <= 8.0:
             world.insert(0, tuple(pos))
         dense = []
         for a, b in zip(world, world[1:]):
             distance = math.hypot(b[0] - a[0], b[1] - a[1])
-            if distance > 45.0:
+            if distance > 40.0:
                 break
             samples = max(1, min(24, int(distance / 3.0)))
             for index in range(samples):
@@ -125,7 +125,7 @@ class AROverlay(QWidget):
             # The near-camera projection is numerically explosive and was the
             # source of screen-wide blue diagonals. Only render a plausible,
             # forward road corridor and let the line begin a few metres ahead.
-            corridor = max(7.0, 5.0 + ahead * 0.24)
+            corridor = max(5.0, 3.8 + ahead * 0.16)
             p = (self._project(ahead, lateral)
                  if 7.0 < ahead < 145.0 and abs(lateral) < corridor else None)
             if p:
@@ -134,7 +134,7 @@ class AROverlay(QWidget):
                     p = None
             if p:
                 if (pts and math.hypot(p.x() - pts[-1].x(),
-                                      p.y() - pts[-1].y()) > self.width() * 0.18):
+                                      p.y() - pts[-1].y()) > self.width() * 0.08):
                     if len(pts) >= 2:
                         strips.append(pts)
                     pts = []

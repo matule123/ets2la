@@ -393,6 +393,7 @@ class UltraPilotHUD(QWidget):
                           if len(segment[1]) > 2 else 0.0)
                     kind = segment[2] if len(segment) > 2 else "road"
                     segment_lanes = int(segment[3]) if len(segment) > 3 else 2
+                    divided = bool(segment[4]) if len(segment) > 4 else False
                 except (TypeError, ValueError, IndexError):
                     continue
                 clipped = clip_road(a, b)
@@ -402,9 +403,9 @@ class UltraPilotHUD(QWidget):
                 clipped_ah = ah + (bh-ah)*t0
                 clipped_bh = ah + (bh-ah)*t1
                 nearby.append((max(a[0], b[0]), a, b, clipped_ah, clipped_bh,
-                               kind, segment_lanes))
+                               kind, segment_lanes, divided))
             nearby.sort(reverse=True, key=lambda item: item[0])
-            for _, a, b, ah, bh, kind, segment_lanes in nearby:
+            for _, a, b, ah, bh, kind, segment_lanes, divided in nearby:
                 da, dl = b[0] - a[0], b[1] - a[1]
                 length = math.hypot(da, dl)
                 if length < 0.15:
@@ -484,6 +485,12 @@ class UltraPilotHUD(QWidget):
                     if not offsets:
                         offsets = [0.0]
                     for offset in offsets:
+                        if divided and abs(offset) < 0.25:
+                            qp.setPen(QPen(QColor(244, 246, 248, 235), 3.0,
+                                           Qt.PenStyle.SolidLine,
+                                           Qt.PenCapStyle.RoundCap))
+                        else:
+                            qp.setPen(marking)
                         ma = self._project(a[0] + na * offset,
                                            a[1] + nl * offset, view, ah)
                         mb = self._project(b[0] + na * offset,
@@ -501,15 +508,17 @@ class UltraPilotHUD(QWidget):
                 closest = min(range(len(transformed)),
                               key=lambda i: math.hypot(*transformed[i]))
                 candidate = transformed[closest:]
-                if candidate and math.hypot(*candidate[0]) <= 30.0:
+                if candidate and math.hypot(*candidate[0]) <= 8.0:
                     local_path.append((0.0, 0.0))
+                elif not candidate or math.hypot(*candidate[0]) > 12.0:
+                    candidate = []
                 for point in candidate:
                     if point[0] < -2.0:
                         continue
                     if local_path:
                         gap = math.hypot(point[0] - local_path[-1][0],
                                          point[1] - local_path[-1][1])
-                        if gap > 45.0:
+                        if gap > 40.0:
                             break
                         if gap < 1.0:
                             continue

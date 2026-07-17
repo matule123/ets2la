@@ -118,7 +118,7 @@ class RoadNetwork:
         self._seg_uids = []      # [(start_uid, end_uid), ...]  parallel to segments
         self._grid = {}          # (cx,cz) -> [segment_index, ...]  (legacy, endpoint-based)
         self._seg_grid = {}      # (cx,cz) -> [segment_index, ...]  (both endpoints)
-        self.road_looks = {}     # token -> {"type": str, "lanes": int}  (road classification)
+        self.road_looks = {}     # token -> type, lane counts and direction split
         self._road_look_token = {}  # node_uid -> roadLookToken (nearest road's type)
         self._road_length = {}   # directed endpoint pair -> spline tangent length
         self._prefab_desc = {}   # token -> compact detailed prefab description
@@ -565,7 +565,13 @@ class RoadNetwork:
                         distance2 = min((a[0]-px)**2+(a[1]-pz)**2,
                                         (b[0]-px)**2+(b[1]-pz)**2)
                         if distance2 <= radius*radius:
-                            ranked.append((distance2, a, b, "road", max(1, lanes)))
+                            look = self.road_looks.get(token) or {}
+                            divided = bool((look.get("lanes_left", 0)
+                                            and look.get("lanes_right", 0))
+                                           or (lanes >= 4 and look.get("type")
+                                               in ("motorway", "expressway")))
+                            ranked.append((distance2, a, b, "road",
+                                           max(1, lanes), divided))
         # Prefab lanes already have exact horizontal curves. Use the nearest
         # connected-node elevation; their short length makes this a good visual
         # approximation while keeping bridges separated from ground roads.
@@ -576,9 +582,11 @@ class RoadNetwork:
             bh = self.node_alt.get(uid_b, ah)
             distance2 = min((a[0]-px)**2+(a[1]-pz)**2,
                             (b[0]-px)**2+(b[1]-pz)**2)
-            ranked.append((distance2, (a[0], a[1], ah), (b[0], b[1], bh), "lane", 1))
+            ranked.append((distance2, (a[0], a[1], ah),
+                           (b[0], b[1], bh), "lane", 1, False))
         ranked.sort(key=lambda item: item[0])
-        return [(a, b, kind, lanes) for _, a, b, kind, lanes in ranked[:limit]]
+        return [(a, b, kind, lanes, divided)
+                for _, a, b, kind, lanes, divided in ranked[:limit]]
 
     def refine_route(self, uids, progress=None):
         """Replace prefab entrance chords in a GPS UID route with nav curves."""
@@ -702,39 +710,57 @@ class RoadNetwork:
             return []
 
         gx, gz = self.nodes[goal]
-        queue = [(math.dist(self.nodes[start], self.nodes[goal]), 0.0, start)]
-        cost = {start: 0.0}
-        previous = {}
-        expanded = 0
-        while queue and expanded < max_expanded:
-            _score, current_cost, current = heapq.heappop(queue)
-            if current_cost != cost.get(current):
-                continue
-            if current == goal:
-                path = [goal]
-                while path[-1] != start:
-                    path.append(previous[path[-1]])
-                path.reverse()
+
+        def directed_search(graph):
+            queue = [(math.dist(self.nodes[start], self.nodes[goal]), 0.0, start)]
+            cost, previous, expanded = {start: 0.0}, {}, 0
+            while queue and expanded < max_expanded:
+                _score, current_cost, current = heapq.heappop(queue)
+                if current_cost != cost.get(current):
+                    continue
+                if current == goal:
+                    path = [goal]
+                    while path[-1] != start:
+                        path.append(previous[path[-1]])
+                    path.reverse()
+                    return path
+                expanded += 1
+                if progress and expanded % 250 == 0:
+                    progress(expanded)
+                cx, cz = self.nodes[current]
+                for neighbour in graph.get(current, ()):
+                    point = self.nodes.get(neighbour)
+                    if point is None:
+                        continue
+                    new_cost = current_cost + math.hypot(point[0] - cx,
+                                                         point[1] - cz)
+                    if new_cost >= cost.get(neighbour, float("inf")):
+                        continue
+                    cost[neighbour], previous[neighbour] = new_cost, current
+                    heuristic = math.hypot(point[0] - gx, point[1] - gz)
+                    heapq.heappush(queue, (new_cost + heuristic,
+                                           new_cost, neighbour))
+            return []
+
+        # Never mix forward and reverse edges in one A* search. That allowed
+        # illegal U-turns and shortcuts across roundabout islands/medians.
+        forward = directed_search(self.fwd)
+        backward = directed_search(self.bwd)
+        if forward and backward and forward != backward:
+            logging.warning("road_network: ambiguous directed bridge %s -> %s", start, goal)
+            cache[key] = []
+            return []
+        path = forward or backward
+        if path:
+            cache[key] = path
+            return path
+        # Older datasets may only contain undirected road adjacency. It is safe
+        # as a fallback only when no directed graph exists at either endpoint.
+        if not self.fwd.get(start) and not self.bwd.get(start):
+            path = directed_search(self.adj)
+            if path:
                 cache[key] = path
                 return path
-            expanded += 1
-            if progress and expanded % 250 == 0:
-                progress(expanded)
-            neighbours = set(self.adj.get(current, ()))
-            neighbours.update(self.fwd.get(current, ()))
-            neighbours.update(self.bwd.get(current, ()))
-            cx, cz = self.nodes[current]
-            for neighbour in neighbours:
-                point = self.nodes.get(neighbour)
-                if point is None:
-                    continue
-                new_cost = current_cost + math.hypot(point[0] - cx, point[1] - cz)
-                if new_cost >= cost.get(neighbour, float("inf")):
-                    continue
-                cost[neighbour] = new_cost
-                previous[neighbour] = current
-                heuristic = math.hypot(point[0] - gx, point[1] - gz)
-                heapq.heappush(queue, (new_cost + heuristic, new_cost, neighbour))
         cache[key] = []
         return []
 
@@ -769,7 +795,10 @@ class RoadNetwork:
                     rtype = "local"
                 else:
                     rtype = "local" if lanes <= 2 else "expressway"
-                self.road_looks[tok] = {"type": rtype, "lanes": max(1, lanes)}
+                self.road_looks[tok] = {
+                    "type": rtype, "lanes": max(1, lanes),
+                    "lanes_left": len(lanes_l), "lanes_right": len(lanes_r),
+                }
             logging.info("road_network: %d road-looks classified.", len(self.road_looks))
         except Exception as e:
             logging.debug("road_network: road-looks load failed (%s).", e)
@@ -852,7 +881,8 @@ class RoadNetwork:
     def visual_segments_near(self, pos, radius: float = 800.0, limit: int = 12000):
         """Curved roads and true prefab geometry for the live map."""
         return [((a[0], a[1]), (b[0], b[1]))
-                for a, b, _kind, _lanes in self.hud_segments_3d_near(pos, radius, limit)]
+                for a, b, _kind, _lanes, _divided
+                in self.hud_segments_3d_near(pos, radius, limit)]
 
     def hud_segments_near(self, pos, radius: float = 170.0, limit: int = 320):
         """Return bounded nearby road geometry for the perspective HUD."""

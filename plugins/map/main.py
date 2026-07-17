@@ -68,6 +68,29 @@ class Plugin(BasePlugin):
             names = []
         self.sdk.set("nav_routes", names)
 
+    @staticmethod
+    def _driving_line(points, offset):
+        """Return the visible lane-centre line used by the controller.
+
+        HUD and AR must show the same right-of-centre target that steering
+        follows, not the raw road centre through a median.
+        """
+        points = [tuple(p[:2]) for p in points]
+        if len(points) < 2 or abs(offset) < 0.05:
+            return points
+        shifted = []
+        for index, point in enumerate(points):
+            a = points[max(0, index - 1)]
+            b = points[min(len(points) - 1, index + 1)]
+            dx, dz = b[0] - a[0], b[1] - a[1]
+            length = math.hypot(dx, dz)
+            if length < 0.1:
+                shifted.append(point)
+            else:
+                shifted.append((point[0] - dz / length * offset,
+                                point[1] + dx / length * offset))
+        return shifted
+
     def _handle_command(self, pos):
         cmd = self.sdk.get("nav_cmd")
         if not cmd:
@@ -194,15 +217,13 @@ class Plugin(BasePlugin):
         that when present (it's the coherent combined plan). Fallbacks, in order:
         a manual ``lane_offset_m`` override, then the 2.7 m right-lane default.
         This keeps the map plugin a geometry follower, not a strategist."""
-        # The ETS2LA GPS route is built from prefab navigation *lane* curves,
-        # not a road centreline. Applying another 3.5 m lane shift makes the
-        # controller drive beside that curve and oscillate on straight roads.
-        if len(self.sdk.get("game_route_node_uids", []) or []) >= 2:
-            return 0.0
         drv = self.sdk.get("drive_lane_offset", None)
         if drv is not None:
             try:
-                return float(drv)
+                # The map graph is commonly the centre line of the whole road.
+                # Keep the truck in the right-hand lane, but never accept a
+                # large transient lane-change offset while following GPS.
+                return max(-2.2, min(2.2, float(drv)))
             except (TypeError, ValueError):
                 pass
         v = self.sdk.get("lane_offset_m", None)
@@ -211,7 +232,9 @@ class Plugin(BasePlugin):
                 return float(v)
             except (TypeError, ValueError):
                 pass
-        return 2.7
+        # 1.8 m is one half-lane: enough to stay out of the centre/median while
+        # remaining safe on narrow roads and exact prefab lane curves.
+        return 1.8
 
     def _publish_road_type(self, pos):
         """Classify the road under the truck and publish a speed cap.
@@ -371,24 +394,54 @@ class Plugin(BasePlugin):
                 break
             continuous.append(point)
         remaining = continuous
-        # SDK route nodes are sparse and may begin tens of metres ahead. Join
-        # the detailed route to the truck along the currently occupied road so
-        # HUD/AR never start with a floating segment or a straight screen chord.
-        if remaining and math.dist(pos, remaining[0]) > 6.0:
-            approach = self.road_net.path_ahead(pos, heading, length=220.0,
-                                                max_steps=120)
-            if len(approach) >= 2:
-                best = None
-                for ai, ap in enumerate(approach):
-                    for ri, rp in enumerate(remaining[:80]):
-                        distance = math.dist(ap, rp)
-                        if best is None or distance < best[0]:
-                            best = (distance, ai, ri)
-                if best and best[0] <= 25.0:
-                    _distance, ai, ri = best
-                    remaining = approach[:ai + 1] + remaining[ri:]
-            if math.dist(pos, remaining[0]) <= 25.0:
-                remaining.insert(0, tuple(pos))
+        # Localise the truck on an ACTUAL route segment. The former path_ahead
+        # join selected an arbitrary nearby branch and then drew/steered across
+        # medians and roundabout centres. A route farther than one road width,
+        # pointing backwards, or containing a long chord is unsafe and is not
+        # published at all.
+        fx, fz = -math.sin(heading), -math.cos(heading)
+        best = None
+        for ri, (a, b) in enumerate(zip(remaining, remaining[1:])):
+            vx, vz = b[0] - a[0], b[1] - a[1]
+            length2 = vx * vx + vz * vz
+            if length2 < 0.04:
+                continue
+            t = max(0.0, min(1.0,
+                    ((pos[0] - a[0]) * vx + (pos[1] - a[1]) * vz) / length2))
+            q = (a[0] + vx * t, a[1] + vz * t)
+            distance = math.dist(pos, q)
+            alignment = (vx * fx + vz * fz) / math.sqrt(length2)
+            # Strongly reject the opposite carriageway/roundabout arm.
+            if alignment < -0.15:
+                continue
+            score = distance + max(0.0, 0.35 - alignment) * 8.0
+            if best is None or score < best[0]:
+                best = (score, distance, ri, q, alignment)
+        if best is None or best[1] > 12.0:
+            distance = best[1] if best else float("inf")
+            reason = ("GPS trasa nie je na ceste pri kamione"
+                      if not math.isfinite(distance)
+                      else f"GPS trasa je {distance:.1f} m od kamiona")
+            self.sdk.set("navigation_failure_reason", reason)
+            self.sdk.set("game_route_points", [])
+            self.sdk.set("nav_path", [])
+            self.sdk.set("nav_active", False)
+            self.sdk.set("navigation_unreliable", True)
+            logging.error("Navigation rejected for safety: %s.", reason)
+            return []
+        _score, _distance, ri, projected, _alignment = best
+        remaining = [projected] + remaining[ri + 1:]
+        for a, b in zip(remaining, remaining[1:]):
+            if math.dist(a, b) > 40.0:
+                reason = f"nespojity usek GPS trasy {math.dist(a, b):.1f} m"
+                self.sdk.set("navigation_failure_reason", reason)
+                self.sdk.set("game_route_points", [])
+                self.sdk.set("nav_path", [])
+                self.sdk.set("nav_active", False)
+                self.sdk.set("navigation_unreliable", True)
+                logging.error("Navigation rejected for safety: %s.", reason)
+                return []
+        self.sdk.set("navigation_unreliable", False)
         self.sdk.set("game_route_resolved_points", len(remaining))
         self.sdk.set("game_route_points", [list(p) for p in remaining])
         return remaining
@@ -594,8 +647,8 @@ class Plugin(BasePlugin):
                 roads = self.road_net.hud_segments_3d_near(
                     pos, altitude=altitude)
                 self.sdk.set("map_road_segments",
-                             [[list(a), list(b), kind, lanes]
-                              for a, b, kind, lanes in roads])
+                             [[list(a), list(b), kind, lanes, divided]
+                              for a, b, kind, lanes, divided in roads])
             except Exception as e:
                 logging.debug("HUD road geometry error: %s", e)
 
@@ -660,7 +713,9 @@ class Plugin(BasePlugin):
 
             # Publish the upcoming path points so the HUD can draw "where to go".
             idx = self.active_route.closest_index(pos)
-            self.sdk.set("nav_path", [list(p) for p in self.active_route.points[idx:idx + 25]])
+            visible = self._driving_line(self.active_route.points[idx:idx + 25],
+                                         self._lane_offset())
+            self.sdk.set("nav_path", [list(p) for p in visible])
         else:
             # No recorded route: drive by the downloaded MAP. This is automatic
             # map-based driving — no recording needed.
@@ -685,7 +740,8 @@ class Plugin(BasePlugin):
                 else:
                     self.sdk.set("nav_steering", float(steer))
                     self.sdk.set("nav_active", True)
-                    self.sdk.set("nav_path", [list(p) for p in map_path[:25]])
+                    visible = self._driving_line(map_path[:25], self._lane_offset())
+                    self.sdk.set("nav_path", [list(p) for p in visible])
                 # Curvature radius (m) of the road ahead — lets the autopilot
                 # anticipate bends (brake before, not during).
                 self.sdk.set("path_curvature_radius",

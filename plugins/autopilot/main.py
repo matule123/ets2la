@@ -5,8 +5,8 @@ from sdk.base_plugin import BasePlugin
 
 
 # --- Tuning (kept here, mirrored into settings under "autopilot" section) -----
-STEER_RATE_LIMIT = 0.10      # max steering change per second (smooth, no jerk)
-STEER_FOLLOW_BLEND = 0.55    # how much of nav/vision steering to apply per tick
+STEER_RATE_LIMIT = 0.075     # max steering change per second (smooth, no jerk)
+STEER_FOLLOW_BLEND = 0.38    # suppress single-frame route/vision target jumps
                              # (low = smooth/laggy, high = snappy/jittery)
 VISION_DEADZONE = 0.03       # ignore vision lane offset noise below this
 BRAKE_RAMP_UP = 2.5          # brake can rise this fast per second (anti-jerk)
