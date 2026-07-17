@@ -28,6 +28,10 @@ _VEH_OBJ = _VEH + _TRL * 3         # vehicle + 3 trailers = 46 values
 _TRAFFIC_FMT = "=" + _VEH_OBJ * 40
 _TRAFFIC_SIZE = 6960
 
+_PARKED = "ffffffffffhb"         # pose + dimensions + id + trailer flag
+_PARKED_FMT = "=" + _PARKED * 40
+_PARKED_SIZE = 1720
+
 _SEM = "fffhhffffifii"             # one semaphore (13 values)
 _SEM_FMT = "=" + _SEM * 40
 _SEM_SIZE = 1920
@@ -36,10 +40,12 @@ _SEM_SIZE = 1920
 ST_OFF, ST_Y2R, ST_RED, ST_Y2G, ST_GREEN, ST_SLEEP = 0, 1, 2, 4, 8, 32
 
 
-def _yaw(x, y, z, w):
-    """Yaw (heading) around the vertical axis from a quaternion."""
+def _yaw(q0, q1, q2, q3):
+    """Yaw from ETS2LA's quaternion memory order (w, y, x, z)."""
     try:
-        return math.atan2(2.0 * (w * y + x * z), 1.0 - 2.0 * (y * y + z * z))
+        w, x, y, z = q0, q2, q1, q3
+        return math.atan2(2.0 * (y * z + w * x),
+                          w * w - x * x - y * y + z * z)
     except Exception:
         return 0.0
 
@@ -59,6 +65,7 @@ class ETS2LAData:
 
     def __init__(self):
         self._traffic_buf = None
+        self._parked_buf = None
         self._sem_buf = None
         self._retry = 0
 
@@ -70,6 +77,12 @@ class ETS2LAData:
                 self._traffic_buf = mmap.mmap(0, _TRAFFIC_SIZE, r"Local\ETS2LATraffic")
         except Exception:
             self._traffic_buf = None
+        try:
+            if self._parked_buf is None:
+                self._parked_buf = mmap.mmap(
+                    0, _PARKED_SIZE, r"Local\ETS2LAParkedVehicles")
+        except Exception:
+            self._parked_buf = None
         try:
             if self._sem_buf is None:
                 self._sem_buf = mmap.mmap(0, _SEM_SIZE, r"Local\ETS2LASemaphore")
@@ -109,6 +122,30 @@ class ETS2LAData:
                 "length": length or 4.5, "width": width or 2.0,
                 "speed": speed, "type": _veh_type(length or 4.5), "id": vid,
             })
+        # The companion buffer contains stationary/parked traffic. Without it,
+        # cars stopped around junctions disappear from the visualization.
+        if self._parked_buf is not None:
+            try:
+                parked = struct.unpack(_PARKED_FMT, self._parked_buf[:_PARKED_SIZE])
+                seen_ids = {vehicle["id"] for vehicle in out}
+                for i in range(40):
+                    b = i * 12
+                    px, py, pz = parked[b], parked[b + 1], parked[b + 2]
+                    q0, q1, q2, q3 = parked[b + 3:b + 7]
+                    width, height, length = parked[b + 7:b + 10]
+                    vid = parked[b + 10]
+                    if ((px == 0 and pz == 0) or vid in seen_ids
+                            or not any((q0, q1, q2, q3))):
+                        continue
+                    out.append({
+                        "x": px, "z": pz, "yaw": _yaw(q0, q1, q2, q3),
+                        "length": length or 4.5, "width": width or 2.0,
+                        "speed": 0.0, "type": _veh_type(length or 4.5),
+                        "id": vid, "parked": True,
+                    })
+                    seen_ids.add(vid)
+            except Exception:
+                self._parked_buf = None
         return out
 
     def read_traffic_lights(self) -> list:

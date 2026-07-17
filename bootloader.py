@@ -217,7 +217,7 @@ def main():
                 logging.info("UI closed — exiting UltraPilot.")
                 shutdown()
                 break
-            for name in [n for n in ("Engine", "HUD") if n in processes]:
+            for name in [n for n in ("Engine", "HUD", "AR") if n in processes]:
                 p = processes[name]
                 if not p.is_alive():
                     logging.warning(f"Process {name} crashed (code {p.exitcode}) — restarting.")

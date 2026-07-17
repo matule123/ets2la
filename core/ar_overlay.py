@@ -11,6 +11,7 @@ The overlay is click-through, so it never blocks the game.
 
 import sys
 import math
+import time
 from PyQt6.QtWidgets import QApplication, QWidget
 from PyQt6.QtGui import QPainter, QColor, QPen, QPolygonF
 from PyQt6.QtCore import Qt, QTimer, QPointF
@@ -20,6 +21,8 @@ class AROverlay(QWidget):
     def __init__(self, shared_state):
         super().__init__()
         self.state = shared_state
+        self._last_path = []
+        self._last_path_at = 0.0
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
@@ -59,12 +62,21 @@ class AROverlay(QWidget):
         return QPointF(sx, sy)
 
     def paintEvent(self, event):
-        if not self.state.get("ar_enabled", True):
+        if (not self.state.get("ar_enabled", True)
+                or not self.state.get("game_in_truck", False)):
             return
         pos = self.state.get("truck_world_pos")
-        # Draw the active navigation path; fall back to the map-computed road
-        # ahead so the line shows during map-based driving (no recorded route).
-        path = self.state.get("nav_path", []) or self.state.get("map_path", []) or []
+        # Use the same real GPS path as the HUD. Keep the last valid path through
+        # short shared-memory refresh gaps so the AR ribbon cannot flicker out.
+        path = (self.state.get("nav_path", [])
+                or self.state.get("game_route_points", [])
+                or self.state.get("map_path", []) or [])
+        now = time.monotonic()
+        if len(path) >= 2:
+            self._last_path = [tuple(point[:2]) for point in path]
+            self._last_path_at = now
+        elif self._last_path and now - self._last_path_at < 4.0:
+            path = self._last_path
         if not pos or len(path) < 2:
             return
         h = self.state.get("truck_heading", 0.0) or 0.0
@@ -73,19 +85,39 @@ class AROverlay(QWidget):
         qp = QPainter(self)
         qp.setRenderHint(QPainter.RenderHint.Antialiasing)
 
+        # Densify sparse GPS nodes before projection. This keeps the ribbon on
+        # the road and prevents long diagonal chords across curved junctions.
+        world = [tuple(pos)]
+        world.extend(tuple(point[:2]) for point in path)
+        dense = []
+        for a, b in zip(world, world[1:]):
+            distance = math.hypot(b[0] - a[0], b[1] - a[1])
+            samples = max(1, min(24, int(distance / 3.0)))
+            for index in range(samples):
+                t = index / samples
+                dense.append((a[0] + (b[0] - a[0]) * t,
+                              a[1] + (b[1] - a[1]) * t))
+        dense.append(world[-1])
+
         pts = []
-        for px, pz in path:
+        for px, pz in dense:
             dx, dz = px - tx, pz - tz
             ahead = dx * (-math.sin(h)) + dz * (-math.cos(h))
             lateral = dx * math.cos(h) - dz * math.sin(h)
-            p = self._project(ahead, lateral)
+            p = self._project(ahead, lateral) if 1.0 < ahead < 220.0 else None
             if p:
                 pts.append(p)
         if len(pts) >= 2:
             # Glow + core line, like ETS2LA's painted route.
-            qp.setPen(QPen(QColor(59, 130, 246, 90), 16))
+            glow = QPen(QColor(45, 142, 255, 90), 18,
+                       Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                       Qt.PenJoinStyle.RoundJoin)
+            qp.setPen(glow)
             qp.drawPolyline(QPolygonF(pts))
-            qp.setPen(QPen(QColor(59, 130, 246, 230), 6))
+            core = QPen(QColor(45, 142, 255, 235), 7,
+                       Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                       Qt.PenJoinStyle.RoundJoin)
+            qp.setPen(core)
             qp.drawPolyline(QPolygonF(pts))
 
 

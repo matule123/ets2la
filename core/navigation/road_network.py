@@ -377,11 +377,53 @@ class RoadNetwork:
                         out.append((a, b))
         return out
 
+    def visual_segments_near(self, pos, radius: float = 800.0, limit: int = 12000):
+        """Road geometry plus short navigation-graph links around prefabs.
+
+        ``roads.json`` ends at prefab boundaries, which made roundabouts and
+        junctions look like disconnected floating strips.  ``graph.json`` has
+        the missing node-to-node links.  Short graph links are safe to render
+        as connector geometry and make both the live map and HUD continuous.
+        """
+        roads = list(self.segments_near(pos, radius))
+        if not self.fwd or not pos or len(roads) >= limit:
+            return roads[:limit]
+        px, pz = pos
+        cx0, cz0 = self._cell(px, pz)
+        rings = int(radius // self.GRID) + 1
+        r2 = (radius + 180.0) ** 2
+        seen_edges = set()
+        connectors = []
+        for dx in range(-rings, rings + 1):
+            for dz in range(-rings, rings + 1):
+                for uid in self._ngrid.get((cx0 + dx, cz0 + dz), ()):
+                    a = self.nodes.get(uid)
+                    if a is None or (a[0] - px) ** 2 + (a[1] - pz) ** 2 > r2:
+                        continue
+                    neighbours = list(self.fwd.get(uid, ()))
+                    neighbours.extend(self.bwd.get(uid, ()))
+                    for other in neighbours:
+                        edge = (uid, other) if str(uid) < str(other) else (other, uid)
+                        if edge in seen_edges:
+                            continue
+                        seen_edges.add(edge)
+                        b = self.nodes.get(other)
+                        if b is None:
+                            continue
+                        length = math.hypot(b[0] - a[0], b[1] - a[1])
+                        # Long graph edges are coarse navigation shortcuts, not
+                        # drawable prefab geometry. Short ones close real gaps.
+                        if 0.35 <= length <= 150.0:
+                            connectors.append((a, b))
+                            if len(roads) + len(connectors) >= limit:
+                                return roads + connectors
+        return roads + connectors
+
     def hud_segments_near(self, pos, radius: float = 170.0, limit: int = 320):
         """Return bounded nearby road geometry for the perspective HUD."""
         px, pz = pos
         ranked = []
-        for a, b in self.segments_near(pos, radius):
+        for a, b in self.visual_segments_near(pos, radius, limit=max(limit * 3, 960)):
             ax, az = a
             bx, bz = b
             dx, dz = bx - ax, bz - az

@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QProgressBar, QFrame, QSizePolicy,
 )
 from PyQt6.QtGui import QPainter, QColor, QPen, QPolygonF
-from PyQt6.QtCore import Qt, QTimer, QPointF, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QPointF, QPoint, QThread, pyqtSignal
 from core.paths import app_dir
 
 ROUTES_DIR = os.path.join(app_dir(), "routes")
@@ -69,8 +69,46 @@ class MapView(QWidget):
         self.route_points = []   # [(x, z), ...] drawn route (loaded for display)
         self.road_net = None     # RoadNetwork (when a map is downloaded + loaded)
         self._pal = None         # set by the page (or a default below)
+        self.zoom_radius = 900.0
+        self.pan_world = [0.0, 0.0]
+        self._drag_at = None
         self.setMinimumHeight(300)
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
         self.apply_theme()
+
+    def reset_view(self):
+        self.zoom_radius = 900.0
+        self.pan_world[:] = [0.0, 0.0]
+        self.update()
+
+    def wheelEvent(self, event):
+        # Wheel up zooms in, wheel down zooms out to a broad regional view.
+        factor = 0.78 if event.angleDelta().y() > 0 else 1.28
+        self.zoom_radius = max(90.0, min(30000.0, self.zoom_radius * factor))
+        self.update()
+        event.accept()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_at = event.position()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_at is None or not (event.buttons() & Qt.MouseButton.LeftButton):
+            return
+        delta = event.position() - self._drag_at
+        scale = max(1e-6, (min(self.width(), self.height()) - 20) / (2 * self.zoom_radius))
+        self.pan_world[0] -= delta.x() / scale
+        self.pan_world[1] -= delta.y() / scale
+        self._drag_at = event.position()
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        self._drag_at = None
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+
+    def mouseDoubleClickEvent(self, event):
+        self.reset_view()
 
     def apply_theme(self):
         """Apply the palette background/border. Called on init + theme switch."""
@@ -148,10 +186,11 @@ class MapView(QWidget):
             qp.drawPolygon(QPolygonF([tip, left, right]))
 
     def _paint_map(self, qp, w, h, truck, heading):
-        """Truck-centered road-network view (fixed zoom, ~radius metres around)."""
-        radius = 700.0                     # metres shown around the truck
+        """Continuous road-network view with wheel zoom and mouse panning."""
+        radius = self.zoom_radius
         scale = (min(w, h) - 20) / (2 * radius)
-        cx, cz = truck
+        cx = truck[0] + self.pan_world[0]
+        cz = truck[1] + self.pan_world[1]
 
         def to_screen(p):
             sx = w / 2 + (p[0] - cx) * scale
@@ -161,7 +200,8 @@ class MapView(QWidget):
         # Nearby roads (grey).
         qp.setPen(QPen(QColor("#555B63"), 2, Qt.PenStyle.SolidLine,
                        Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        for a, b in self.road_net.segments_near(truck, radius):
+        centre = (cx, cz)
+        for a, b in self.road_net.visual_segments_near(centre, radius * 1.45):
             qp.drawLine(to_screen(a), to_screen(b))
 
         # Blue is reserved for the route selected in the game's GPS.
@@ -187,6 +227,10 @@ class MapView(QWidget):
         qp.setBrush(QColor("#1597F5"))
         qp.setPen(QPen(QColor("#E8F4FF"), 2))
         qp.drawPolygon(QPolygonF([tip, left, right]))
+
+        # Small unobtrusive interaction hint; no extra toolbar is needed.
+        qp.setPen(QColor(185, 190, 198, 155))
+        qp.drawText(14, h - 12, "koliesko: zoom  •  potiahnuť: posun  •  dvojklik: kamión")
 
 
 class MapPage(QWidget):
@@ -446,6 +490,7 @@ class MapPage(QWidget):
         self._update_map_actions()
         if net is not None:
             self.view.road_net = net
+            self.view.reset_view()
             self.dl_status.setText(f"✓ Map loaded ({len(net.segments)} road segments). "
                                    "Roads around the truck are shown above.")
             self.view.update()

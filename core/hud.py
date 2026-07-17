@@ -365,13 +365,21 @@ class UltraPilotHUD(QWidget):
                     self._project(a[0] - na * half, a[1] - nl * half, view),
                 ]
                 if all(corners):
-                    qp.setPen(QPen(QColor(91, 97, 105, 185), 1.2))
-                    qp.setBrush(QColor(29, 33, 38, 238))
+                    # Filled overlapping geometry with no per-segment outline.
+                    # Graph connectors close prefab/junction gaps underneath.
+                    qp.setPen(Qt.PenStyle.NoPen)
+                    qp.setBrush(QColor(31, 35, 41, 248))
                     qp.drawPolygon(QPolygonF(corners))
 
             path = d["nav_path"]
             local_path = [(0.0, 0.0)]
-            local_path.extend(to_truck(px, pz) for px, pz in path)
+            for px, pz in path:
+                point = to_truck(px, pz)
+                if (point[0] < -2.0
+                        or math.hypot(point[0] - local_path[-1][0],
+                                      point[1] - local_path[-1][1]) < 1.0):
+                    continue
+                local_path.append(point)
             dense = []
             for start, end in zip(local_path, local_path[1:]):
                 distance = math.hypot(end[0] - start[0], end[1] - start[1])
@@ -462,27 +470,31 @@ class UltraPilotHUD(QWidget):
         self._draw_low_poly_ego(qp, view)
 
     def _draw_low_poly_ego(self, qp, view):
-        """Clean neutral-grey ETS2LA-style tractor and box trailer."""
-        hw = 1.22
-        tr_n, tr_f = 2.4, 11.5
-        cab_n, cab_f = 11.2, 15.6
-        self._box3d(qp, tr_n - .25, cab_f + .15, hw + .12, 0, 0, .42, view,
-                    ("#30343A", "#454A51"))
-        self._box3d(qp, tr_n, tr_f, hw, 0, .42, 3.35, view,
-                    ("#969BA2", "#C3C6CA"))
-        self._box3d(qp, cab_n, cab_f, hw, 0, .42, 1.25, view,
-                    ("#858A91", "#A8ACB2"))
-        self._wedge3d(qp, cab_n, cab_f, hw, 0, 1.25, 2.82, view,
-                      "#858A91", "#BFC3C8", top_hw=.88,
-                      top_near=.38, top_far=.12)
-        self._wedge3d(qp, cab_n + .48, cab_f + .01, hw * .9, 0, 1.58, 2.66, view,
-                      "#4B5057", "#686D74", top_hw=.82,
-                      top_near=.24, top_far=.10)
-        for axle in (tr_n + 1.0, tr_f - 1.0, cab_n + .65, cab_f - .55):
+        """Clean articulated ETS2LA-style tractor: one solid trailer and cab."""
+        hw = 1.30
+        tr_n, tr_f = 1.8, 11.0
+        cab_n, cab_f = 10.8, 15.9
+        # Wheels and narrow chassis are behind the body, so no slabs protrude
+        # from the back of the model.
+        for axle in (tr_n + 1.0, tr_f - 1.0, cab_n + .72, cab_f - .58):
             for side in (-1, 1):
                 self._box3d(qp, axle - .30, axle + .30, .18,
                             side * (hw + .13), 0, .72, view,
-                            ("#24272C", "#454A50"))
+                            ("#17191D", "#353940"))
+        self._box3d(qp, tr_n, cab_f, hw * .58, 0, .18, .52, view,
+                    ("#30343A", "#454A51"))
+        # Single uninterrupted silver trailer volume.
+        self._box3d(qp, tr_n, tr_f, hw, 0, .42, 3.55, view,
+                    ("#92979E", "#D1D4D8"))
+        # Tractor body and sloped cab roof/windshield.
+        self._box3d(qp, cab_n, cab_f, hw, 0, .42, 1.28, view,
+                    ("#7F848B", "#AEB2B7"))
+        self._wedge3d(qp, cab_n, cab_f, hw, 0, 1.22, 2.92, view,
+                      "#858A91", "#C5C9CD", top_hw=.86,
+                      top_near=.34, top_far=.16)
+        self._wedge3d(qp, cab_n + .50, cab_f + .01, hw * .90, 0, 1.62, 2.73, view,
+                      "#353A40", "#596068", top_hw=.82,
+                      top_near=.24, top_far=.12)
         self._draw_lights(qp, view, cab_n, cab_f, hw, 0, 2.65)
 
     def _draw_low_poly_vehicle(self, qp, view, ahead, lateral, vehicle):

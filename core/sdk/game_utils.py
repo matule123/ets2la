@@ -112,7 +112,10 @@ def install_game_dlls(assets_dir: str, names=None) -> list:
     import shutil
 
     if names is None:
-        names = ["scs-telemetry.dll", "scs_sdk_controller.dll"]
+        # ets2la_plugin.dll publishes the surrounding-traffic, parked-vehicle,
+        # semaphore and GPS-route shared-memory buffers.  Installing only the
+        # generic telemetry DLL leaves those buffers permanently full of zeroes.
+        names = ["scs-telemetry.dll", "scs_sdk_controller.dll", "ets2la_plugin.dll"]
 
     installed = []
     for game_path in find_scs_games():

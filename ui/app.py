@@ -15,58 +15,33 @@ from ui.map_page import MapPage
 
 
 class MacTitleBar(QFrame):
-    """Compact draggable title bar with Apple-style window controls."""
+    """Three small window controls embedded in the top-right corner."""
 
     def __init__(self, window, palette):
         super().__init__()
         self.window = window
-        self._drag_offset = None
-        self.setFixedHeight(38)
+        self.setFixedSize(66, 26)
         self.setObjectName("MacTitleBar")
-        self.setStyleSheet(
-            "#MacTitleBar{background:" + palette['surface'] + ";"
-            "border:none;border-bottom:1px solid " + palette['border'] + ";}")
+        self.setStyleSheet("#MacTitleBar{background:transparent;border:none;}")
         row = QHBoxLayout(self)
-        row.setContentsMargins(13, 0, 13, 0)
-        row.setSpacing(8)
+        row.setContentsMargins(5, 5, 5, 5)
+        row.setSpacing(5)
         for color, tip, action in (
-                ("#FF5F57", "Zavrieť", window.close),
+                ("#28C840", "Maximalizovať", self._toggle_maximize),
                 ("#FEBC2E", "Minimalizovať", window.showMinimized),
-                ("#28C840", "Maximalizovať", self._toggle_maximize)):
+                ("#FF5F57", "Zavrieť", window.close)):
             dot = QPushButton("")
             dot.setToolTip(tip)
-            dot.setFixedSize(14, 14)
+            dot.setFixedSize(10, 10)
             dot.setStyleSheet(
                 f"QPushButton{{background:{color};border:1px solid rgba(0,0,0,0.18);"
-                "border-radius:7px;padding:0;margin:0;}"
-                "QPushButton:hover{border:2px solid rgba(0,0,0,0.32);}")
+                "border-radius:5px;padding:0;margin:0;}"
+                "QPushButton:hover{border:1px solid rgba(0,0,0,0.55);}")
             dot.clicked.connect(action)
             row.addWidget(dot)
-        row.addSpacing(6)
-        title = QLabel("UltraPilot")
-        title.setStyleSheet("font-size:12px;font-weight:700;color:" + palette['muted'] + ";border:none;")
-        row.addWidget(title)
-        row.addStretch()
 
     def _toggle_maximize(self):
         self.window.showNormal() if self.window.isMaximized() else self.window.showMaximized()
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_offset = event.globalPosition().toPoint() - self.window.frameGeometry().topLeft()
-
-    def mouseMoveEvent(self, event):
-        if self._drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
-            if self.window.isMaximized():
-                self.window.showNormal()
-            self.window.move(event.globalPosition().toPoint() - self._drag_offset)
-
-    def mouseReleaseEvent(self, event):
-        self._drag_offset = None
-
-    def mouseDoubleClickEvent(self, event):
-        self._toggle_maximize()
-
 
 class Page(QWidget):
     def __init__(self, state):
@@ -388,13 +363,16 @@ class UltraPilotApp(QMainWindow):
         root_layout = QVBoxLayout(central)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
-        self.title_bar = MacTitleBar(self, self._pal)
-        root_layout.addWidget(self.title_bar)
         content = QWidget()
         main_layout = QHBoxLayout(content)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
         root_layout.addWidget(content, 1)
+        # No title strip or title text: the dots float directly in the corner.
+        self.title_bar = MacTitleBar(self, self._pal)
+        self.title_bar.setParent(central)
+        self.title_bar.move(central.width() - self.title_bar.width() - 6, 4)
+        self.title_bar.raise_()
 
         self.sidebar = QFrame()
         self.sidebar.setObjectName("Sidebar")
@@ -613,6 +591,13 @@ class UltraPilotApp(QMainWindow):
             label = "Visualization" if key == "visualization" else t(code, "app", key)
             button.setText(label)
         self._render_start_btn()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "title_bar"):
+            self.title_bar.move(self.centralWidget().width()
+                                - self.title_bar.width() - 6, 4)
+            self.title_bar.raise_()
 
     def showEvent(self, event):
         """The main window is up — let the HUD process know it can appear now."""
