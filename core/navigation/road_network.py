@@ -761,7 +761,20 @@ class RoadNetwork:
                                           math.dist(result[-1], points[0]) < 1.0
                                           else points)
                         else:
-                            result.append(self.nodes[bridge_b])
+                            # The directed graph can contain a valid edge even
+                            # when the decorative road-curve record is absent.
+                            # Densify that authoritative edge so downstream
+                            # continuity checks do not see one 67 m chord.
+                            target_point = self.nodes[bridge_b]
+                            source_point = result[-1]
+                            edge_length = math.dist(source_point, target_point)
+                            steps = max(1, int(math.ceil(edge_length / 8.0)))
+                            for step in range(1, steps + 1):
+                                fraction = step / steps
+                                result.append((
+                                    source_point[0] + (target_point[0] - source_point[0]) * fraction,
+                                    source_point[1] + (target_point[1] - source_point[1]) * fraction,
+                                ))
                 else:
                     result.append(target)
         return result
@@ -836,6 +849,20 @@ class RoadNetwork:
             return cache[key]
         if start not in self.nodes or goal not in self.nodes:
             return []
+
+        # An explicit directed edge is authoritative. Some extracted graph
+        # nodes also expose a long path in the opposite-direction table; the
+        # old ambiguity check then rejected even this exact 67 m connection.
+        # Route order already tells us start -> goal, so never replace a direct
+        # edge with (or reject it because of) an unrelated reverse detour.
+        if goal in self.fwd.get(start, ()):
+            path = [start, goal]
+            cache[key] = path
+            return path
+        if goal in self.bwd.get(start, ()) and not self.fwd.get(start):
+            path = [start, goal]
+            cache[key] = path
+            return path
 
         gx, gz = self.nodes[goal]
 
