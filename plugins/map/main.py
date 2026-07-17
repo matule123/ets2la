@@ -39,6 +39,7 @@ class Plugin(BasePlugin):
         self._net_attempted = False  # tried to load the road network this run?
         self._net_loading = False    # background load in progress (don't re-enter)
         self._diag_t = 0.0           # throttle for localization diagnostics
+        self._roads_t = 0.0          # throttle nearby-road HUD publishing
         self._last_recalc_request = None
         self._recalc_started = 0.0
         os.makedirs(ROUTES_DIR, exist_ok=True)
@@ -248,19 +249,10 @@ class Plugin(BasePlugin):
             self.sdk.set("distance_to_dest", route.distance_to_end(pos))
             return remaining[:60]
 
-        # Prefer the engine-side network (works regardless of which UI page is open).
-        if self.road_net is not None and self.road_net.loaded:
-            try:
-                path = self.road_net.path_ahead(pos, heading)
-            except Exception:
-                path = []
-            if len(path) >= 2:
-                self.sdk.set("map_path", [list(p) for p in path])
-                return [list(p) for p in path[:25]]
-            self.sdk.set("map_path", [])
-            return []
-        # Fallback: reuse a path the UI process may have published.
-        return self.sdk.get("map_path", []) or []
+        # Do not invent a route from whichever road edge happens to be ahead.
+        # Steering is allowed only from the in-game GPS (or a recorded route).
+        self.sdk.set("map_path", [])
+        return []
 
     def _update_recalculation(self, pos, heading):
         request = self.sdk.get("nav_recalc_request")
@@ -281,16 +273,11 @@ class Plugin(BasePlugin):
             self.sdk.set("navigation_status", "Kontrolujem cieľ a mapové dáta…")
             return
         if len(points) < 2:
-            if elapsed > 3.0:
+            if elapsed > 6.0:
                 fallback = []
-                if self.road_net is not None and self.road_net.loaded:
-                    try:
-                        fallback = self.road_net.path_ahead(pos, heading)
-                    except Exception:
-                        fallback = []
                 self.sdk.set("nav_path", [list(p) for p in fallback[:60]])
-                self.sdk.set("navigation_progress", 1.0)
-                self.sdk.set("navigation_status", "Trasa obnovená podľa mapových dát")
+                self.sdk.set("navigation_progress", 0.0)
+                self.sdk.set("navigation_status", "Herné GPS neposkytlo naplánovanú trasu")
                 self.sdk.set("navigation_recalculating", False)
                 return
             self.sdk.set("navigation_progress", 0.42)
@@ -326,6 +313,17 @@ class Plugin(BasePlugin):
         # time we have a position. Cheap no-op once attempted.
         self._load_road_net()
 
+        # Display-only local road geometry. It is deliberately separate from
+        # nav_path and therefore cannot influence autopilot steering.
+        self._roads_t += delta_time
+        if self._roads_t >= 0.35 and self.road_net is not None and self.road_net.loaded:
+            self._roads_t = 0.0
+            try:
+                roads = self.road_net.hud_segments_near(pos)
+                self.sdk.set("map_road_segments", [[list(a), list(b)] for a, b in roads])
+            except Exception as e:
+                logging.debug("HUD road geometry error: %s", e)
+
         # Localization diagnostics: every ~2 s, log where the truck is and where
         # the map thinks the nearest road is. If the distance is huge (hundreds
         # of metres), the chosen map dataset doesn't match the game/mod and the
@@ -345,7 +343,7 @@ class Plugin(BasePlugin):
                     else:
                         qx, qz = ax, az
                     dist = math.hypot(pos[0] - qx, pos[1] - qz)
-                    logging.info(
+                    logging.debug(
                         "map: truck=(%.0f, %.0f) nearest_seg=(%.0f, %.0f) dist=%.1fm "
                         "heading=%.3f rad (%.0f°)",
                         pos[0], pos[1], qx, qz, dist, heading, math.degrees(heading))

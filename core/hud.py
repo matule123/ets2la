@@ -117,6 +117,7 @@ class UltraPilotHUD(QWidget):
             "light": s.get("traffic_light"),
             # The route to draw: active navigation, else the map road ahead.
             "nav_path": (s.get("nav_path", []) or s.get("map_path", []) or []),
+            "road_segments": s.get("map_road_segments", []) or [],
             "limit_ms": truck.get("speedLimit", 0.0) or 0.0,
             # Rear-view camera: shown when a turn signal is active (left/right)
             # OR when the dedicated rear_cam flag is set. Gives a glance behind
@@ -294,6 +295,39 @@ class UltraPilotHUD(QWidget):
             return ahead, lateral
 
         if pos:
+            # Draw the full nearby road network first; the selected GPS route
+            # is then overlaid in blue and remains visually unambiguous.
+            nearby = []
+            for segment in d.get("road_segments", []):
+                try:
+                    a = to_truck(float(segment[0][0]), float(segment[0][1]))
+                    b = to_truck(float(segment[1][0]), float(segment[1][1]))
+                except (TypeError, ValueError, IndexError):
+                    continue
+                if max(a[0], b[0]) < 0.5 or min(a[0], b[0]) > 150:
+                    continue
+                if min(abs(a[1]), abs(b[1])) > 70:
+                    continue
+                nearby.append((max(a[0], b[0]), a, b))
+            nearby.sort(reverse=True, key=lambda item: item[0])
+            for _, a, b in nearby:
+                da, dl = b[0] - a[0], b[1] - a[1]
+                length = math.hypot(da, dl)
+                if length < 0.15:
+                    continue
+                na, nl = -dl / length, da / length
+                half = 3.7
+                corners = [
+                    self._project(a[0] + na * half, a[1] + nl * half, view),
+                    self._project(b[0] + na * half, b[1] + nl * half, view),
+                    self._project(b[0] - na * half, b[1] - nl * half, view),
+                    self._project(a[0] - na * half, a[1] - nl * half, view),
+                ]
+                if all(corners):
+                    qp.setPen(QPen(QColor(91, 97, 105, 185), 1.2))
+                    qp.setBrush(QColor(29, 33, 38, 238))
+                    qp.drawPolygon(QPolygonF(corners))
+
             path = d["nav_path"]
             raw = [pt for pt in (to_truck(px, pz) for px, pz in path)
                    if 0.5 <= pt[0] <= 140.0]

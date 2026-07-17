@@ -20,6 +20,11 @@ _ACTIVITY = (
     "starting", "started", "ready", "map", "dataset", "road network",
     "plugin", "connected", "install", "repair", "update", "error", "failed",
 )
+_TECHNICAL_LOG_MARKERS = (
+    "map: truck=", "nearest_seg=", "truckposition", "truck position",
+    "truck_world_pos", "coordinatex", "coordinatez", "heading=",
+    "system transitioning", "follow_lane", "follow lane", "cruise ->",
+)
 
 
 class DynamicIsland(QWidget):
@@ -120,6 +125,7 @@ class DynamicIsland(QWidget):
             message = item["msg"]
             low = message.lower()
             if (message.startswith("Logging to ") or "OpenGL_accelerate" in message
+                    or any(marker in low for marker in _TECHNICAL_LOG_MARKERS)
                     or not any(word in low for word in _ACTIVITY)):
                 continue
             self.show_record(message, item["level"], item["time"], item["src"])

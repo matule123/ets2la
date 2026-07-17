@@ -364,7 +364,10 @@ class RoadNetwork:
         r2 = radius * radius
         for dx in cells:
             for dz in cells:
-                for idx in self._grid.get((cx0 + dx, cz0 + dz), ()):
+                cell = (cx0 + dx, cz0 + dz)
+                indices = list(self._seg_grid.get(cell, ()))
+                indices.extend(self._grid.get(cell, ()))
+                for idx in indices:
                     if idx in seen:
                         continue
                     seen.add(idx)
@@ -373,6 +376,24 @@ class RoadNetwork:
                        (b[0] - px) ** 2 + (b[1] - pz) ** 2 <= r2:
                         out.append((a, b))
         return out
+
+    def hud_segments_near(self, pos, radius: float = 170.0, limit: int = 320):
+        """Return bounded nearby road geometry for the perspective HUD."""
+        px, pz = pos
+        ranked = []
+        for a, b in self.segments_near(pos, radius):
+            ax, az = a
+            bx, bz = b
+            dx, dz = bx - ax, bz - az
+            length2 = dx * dx + dz * dz
+            t = 0.0 if length2 < 1e-9 else max(
+                0.0, min(1.0, ((px - ax) * dx + (pz - az) * dz) / length2))
+            qx, qz = ax + t * dx, az + t * dz
+            distance2 = (px - qx) ** 2 + (pz - qz) ** 2
+            if distance2 <= radius * radius:
+                ranked.append((distance2, a, b))
+        ranked.sort(key=lambda item: item[0])
+        return [(a, b) for _, a, b in ranked[:limit]]
 
     def nearest_segment(self, pos):
         """Nearest road segment to ``pos`` (for localization). Returns seg or None."""
