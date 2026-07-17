@@ -420,22 +420,28 @@ class Plugin(BasePlugin):
                 for endpoint in self.road_net._seg_uids[seg_index]:
                     if endpoint not in start_candidates:
                         start_candidates.append(endpoint)
+            # Never search for the geometrically closest one among several
+            # future GPS UIDs.  On loops, roundabouts and parallel motorway
+            # carriageways a UID close to the truck can actually be many
+            # kilometres farther along the route.  Selecting it used to cut a
+            # 15 km game route down to about 0.8 km.  ``route_start`` was
+            # already selected from the SDK remaining-distance metadata, so
+            # only join to that authoritative route position.
+            target_index = route_start
+            target_uid = valid_uids[target_index]
             for candidate_start in start_candidates:
-                for target_index in range(
-                        route_start, min(len(valid_uids), route_start + 7)):
-                    bridge = self.road_net._route_bridge(
-                        candidate_start, valid_uids[target_index],
-                        max_expanded=24000)
-                    if not bridge:
-                        continue
-                    bridge_length = sum(
-                        math.dist(self.road_net.nodes[a], self.road_net.nodes[b])
-                        for a, b in zip(bridge, bridge[1:]))
-                    approach = math.dist(
-                        snap_point, self.road_net.nodes[candidate_start])
-                    total_length = approach + bridge_length
-                    if best_join is None or total_length < best_join[0]:
-                        best_join = (total_length, target_index, bridge)
+                bridge = self.road_net._route_bridge(
+                    candidate_start, target_uid, max_expanded=24000)
+                if not bridge:
+                    continue
+                bridge_length = sum(
+                    math.dist(self.road_net.nodes[a], self.road_net.nodes[b])
+                    for a, b in zip(bridge, bridge[1:]))
+                approach = math.dist(
+                    snap_point, self.road_net.nodes[candidate_start])
+                total_length = approach + bridge_length
+                if best_join is None or total_length < best_join[0]:
+                    best_join = (total_length, target_index, bridge)
             if best_join is not None:
                 _join_length, target_index, bridge = best_join
                 remaining_uids = bridge + valid_uids[target_index + 1:]
