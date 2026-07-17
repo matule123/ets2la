@@ -87,11 +87,22 @@ class AROverlay(QWidget):
 
         # Densify sparse GPS nodes before projection. This keeps the ribbon on
         # the road and prevents long diagonal chords across curved junctions.
-        world = [tuple(pos)]
-        world.extend(tuple(point[:2]) for point in path)
+        world = [tuple(point[:2]) for point in path]
+        if not world:
+            return
+        closest = min(range(len(world)),
+                      key=lambda i: math.dist(tuple(pos), world[i]))
+        world = world[closest:]
+        # Connect the ribbon to the truck only when the first valid GPS point
+        # is genuinely nearby. A stale/different map node must never produce a
+        # screen-wide line.
+        if world and math.dist(tuple(pos), world[0]) <= 30.0:
+            world.insert(0, tuple(pos))
         dense = []
         for a, b in zip(world, world[1:]):
             distance = math.hypot(b[0] - a[0], b[1] - a[1])
+            if distance > 45.0:
+                break
             samples = max(1, min(24, int(distance / 3.0)))
             for index in range(samples):
                 t = index / samples
@@ -99,6 +110,7 @@ class AROverlay(QWidget):
                               a[1] + (b[1] - a[1]) * t))
         dense.append(world[-1])
 
+        strips = []
         pts = []
         for px, pz in dense:
             dx, dz = px - tx, pz - tz
@@ -106,8 +118,18 @@ class AROverlay(QWidget):
             lateral = dx * math.cos(h) - dz * math.sin(h)
             p = self._project(ahead, lateral) if 1.0 < ahead < 220.0 else None
             if p:
+                if (pts and math.hypot(p.x() - pts[-1].x(),
+                                      p.y() - pts[-1].y()) > self.width() * 0.18):
+                    if len(pts) >= 2:
+                        strips.append(pts)
+                    pts = []
                 pts.append(p)
+            elif len(pts) >= 2:
+                strips.append(pts)
+                pts = []
         if len(pts) >= 2:
+            strips.append(pts)
+        for pts in strips:
             # Glow + core line, like ETS2LA's painted route.
             glow = QPen(QColor(45, 142, 255, 90), 18,
                        Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,

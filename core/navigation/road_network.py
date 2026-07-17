@@ -425,6 +425,52 @@ class RoadNetwork:
             result.extend(zip(points, points[1:]))
         return result
 
+    def _connected_prefab_points(self, instance, curve_indices, start_point):
+        """Join a prefab route's lane curves without drawing chords between them.
+
+        Curve indices are not guaranteed to be stored in spatial order and an
+        individual curve can point either way.  Concatenating them verbatim was
+        the source of the enormous blue zig-zags visible over the game.
+        """
+        desc = self._prefab_desc.get(instance[0])
+        if not desc:
+            return []
+        pieces = []
+        for index in curve_indices:
+            if 0 <= index < len(desc[1]):
+                points = self._transform_prefab_points(
+                    instance, self._hermite_curve(desc[1][index]))
+                if len(points) >= 2:
+                    pieces.append(points)
+        if not pieces:
+            return []
+
+        result = []
+        cursor = tuple(start_point)
+        # Greedily take the curve endpoint nearest to the preceding endpoint.
+        # Real prefab lane pieces touch, so a generous 12 m guard still rejects
+        # accidental connections to another arm of a large junction.
+        while pieces:
+            best_index = best_reverse = None
+            best_distance = float("inf")
+            for index, points in enumerate(pieces):
+                for reverse, endpoint in ((False, points[0]), (True, points[-1])):
+                    distance = math.dist(cursor, endpoint)
+                    if distance < best_distance:
+                        best_distance = distance
+                        best_index, best_reverse = index, reverse
+            if best_index is None or (result and best_distance > 12.0):
+                break
+            points = pieces.pop(best_index)
+            if best_reverse:
+                points.reverse()
+            if not result:
+                result.extend(points)
+            else:
+                result.extend(points[1:] if best_distance < 1.0 else points)
+            cursor = result[-1]
+        return result
+
     def prefab_segments_near(self, pos, radius=800.0, limit=10000):
         if not pos or not self._prefab_grid:
             return []
@@ -472,7 +518,6 @@ class RoadNetwork:
                                   if node[0] == "physical" and node[1] == start_item), None)
                 end_nav = next((i for i, node in enumerate(nav_nodes)
                                 if node[0] == "physical" and node[1] == end_item), None)
-                reverse = False
                 indices = None
                 if start_nav is not None and end_nav is not None:
                     indices = next((conn[1] for conn in nav_nodes[start_nav][2]
@@ -480,16 +525,19 @@ class RoadNetwork:
                     if indices is None:
                         indices = next((conn[1] for conn in nav_nodes[end_nav][2]
                                         if conn[0] == start_nav), None)
-                        reverse = indices is not None
                 if indices:
-                    segments = self._prefab_curve_segments(instance, indices)
-                    points = [segments[0][0]] + [segment[1] for segment in segments]
-                    detailed = list(reversed(points)) if reverse else points
+                    detailed = self._connected_prefab_points(
+                        instance, indices, self.nodes[first])
                     break
             if detailed:
-                if result and math.dist(result[-1], detailed[-1]) < math.dist(result[-1], detailed[0]):
-                    detailed.reverse()
-                result.extend(detailed[1:] if result else detailed)
+                gap = math.dist(result[-1], detailed[0]) if result else 0.0
+                if gap > 12.0:
+                    break
+                result.extend(detailed[1:] if gap < 1.0 else detailed)
+                if target is not None:
+                    if math.dist(result[-1], target) > 12.0:
+                        break
+                    result.append(target)
             elif target is not None:
                 result.append(target)
         return result

@@ -373,40 +373,59 @@ class UltraPilotHUD(QWidget):
                 if length < 0.15:
                     continue
                 na, nl = -dl / length, da / length
-                half = 3.7
                 pa = self._project(a[0], a[1], view)
                 pb = self._project(b[0], b[1], view)
-                ml = self._project((a[0] + b[0]) * .5,
-                                   (a[1] + b[1]) * .5 + half, view)
-                mr = self._project((a[0] + b[0]) * .5,
-                                   (a[1] + b[1]) * .5 - half, view)
-                if pa and pb and ml and mr:
-                    # Bounded screen-space ribbon: near-plane perspective can
-                    # otherwise expand a short junction edge into a giant
-                    # triangle covering half the HUD.
-                    projected = math.hypot(ml.x() - mr.x(), ml.y() - mr.y())
-                    road_width = max(3.0, min(22.0, projected))
-                    qp.setPen(QPen(QColor(31, 35, 41, 248), road_width,
-                                   Qt.PenStyle.SolidLine,
-                                   Qt.PenCapStyle.FlatCap,
-                                   Qt.PenJoinStyle.RoundJoin))
-                    qp.drawLine(pa, pb)
+                if pa and pb:
+                    # ETS2LA-style schematic geometry: two precise road edges
+                    # and a faint centre marking. Filled rectangles for every
+                    # nav-curve segment accumulated into the black blocks seen
+                    # in the old HUD, especially at roundabouts.
+                    half = 3.5
+                    edges = []
+                    for side in (-1.0, 1.0):
+                        ea = self._project(a[0] + na * half * side,
+                                           a[1] + nl * half * side, view)
+                        eb = self._project(b[0] + na * half * side,
+                                           b[1] + nl * half * side, view)
+                        if ea and eb:
+                            edges.append((ea, eb))
+                    edge_pen = QPen(QColor(175, 181, 190, 150), 1.35,
+                                    Qt.PenStyle.SolidLine,
+                                    Qt.PenCapStyle.RoundCap,
+                                    Qt.PenJoinStyle.RoundJoin)
+                    qp.setPen(edge_pen)
+                    for ea, eb in edges:
+                        qp.drawLine(ea, eb)
                     marking = QPen(QColor(218, 222, 228, 155), 1.1,
                                    Qt.PenStyle.DashLine,
-                                   Qt.PenCapStyle.FlatCap)
+                                   Qt.PenCapStyle.RoundCap)
                     marking.setDashPattern([4, 5])
                     qp.setPen(marking)
                     qp.drawLine(pa, pb)
 
             path = d["nav_path"]
-            local_path = [(0.0, 0.0)]
-            for px, pz in path:
-                point = to_truck(px, pz)
-                if (point[0] < -2.0
-                        or math.hypot(point[0] - local_path[-1][0],
-                                      point[1] - local_path[-1][1]) < 1.0):
-                    continue
-                local_path.append(point)
+            transformed = [to_truck(px, pz) for px, pz in path]
+            # Start at the route point nearest to the truck. Never force a line
+            # from (0, 0) to a distant/stale GPS node: that created the giant
+            # horizontal/diagonal blue strokes in the screenshot.
+            local_path = []
+            if transformed:
+                closest = min(range(len(transformed)),
+                              key=lambda i: math.hypot(*transformed[i]))
+                candidate = transformed[closest:]
+                if candidate and math.hypot(*candidate[0]) <= 30.0:
+                    local_path.append((0.0, 0.0))
+                for point in candidate:
+                    if point[0] < -2.0:
+                        continue
+                    if local_path:
+                        gap = math.hypot(point[0] - local_path[-1][0],
+                                         point[1] - local_path[-1][1])
+                        if gap > 45.0:
+                            break
+                        if gap < 1.0:
+                            continue
+                    local_path.append(point)
             dense = []
             for start, end in zip(local_path, local_path[1:]):
                 distance = math.hypot(end[0] - start[0], end[1] - start[1])
@@ -428,51 +447,15 @@ class UltraPilotHUD(QWidget):
             lanes = max(1, d.get("lanes", 2))
             HALF = max(4.0, min(16.0, lanes * 3.6 / 2 + 1.5))
 
-            def offset_pt(i, off):
-                a, l = al[i]
-                prev = al[max(0, i - 1)]
-                nxt = al[min(i + 1, len(al) - 1)]
-                da, dl = nxt[0] - prev[0], nxt[1] - prev[1]
-                n = math.hypot(da, dl) or 1.0
-                return self._project(a, l + (-da / n) * off, view)
-
-            def polyline_at(off):
-                return [p for p in (offset_pt(i, off) for i in range(len(al))) if p]
-
             if len(al) >= 2:
                 # 1) Filled asphalt ribbon (left edge → right edge), curving.
-                left = polyline_at(-HALF)
-                right = polyline_at(HALF)
-                ribbon = left + list(reversed(right))
-                if len(ribbon) >= 3:
-                    qp.setPen(Qt.PenStyle.NoPen)
-                    qp.setBrush(QColor(24, 27, 31, 250))
-                    qp.drawPolygon(QPolygonF(ribbon))
-                # 2) Solid white edge lines.
-                for off in (-HALF, HALF):
-                    pts = polyline_at(off)
-                    if len(pts) >= 2:
-                        qp.setPen(QPen(QColor(240, 240, 245, 210), 2, Qt.PenStyle.SolidLine))
-                        qp.drawPolyline(QPolygonF(pts))
+                # Nearby map geometry already supplies the road boundaries.
+                # Keep the selected path as one clean blue line; a second
+                # offset polygon folded over itself on tight junctions.
                 # 3) Dashed lane dividers — one fewer line than the lane count,
                 #    placed symmetrically so a 4-lane road shows 3 dividers etc.
                 #    The dashes ANIMATE (scroll toward the truck) so the road
                 #    reads as moving, driven by the _tick animation clock.
-                if lanes >= 2:
-                    spacing = (2 * HALF) / lanes
-                    first = -HALF + spacing
-                    # Move the dashes faster the quicker we go (visual speed cue).
-                    spd = max(0.4, min(4.0, d.get("speed_kmh", 0) / 25.0))
-                    dash_off = -(self._t * spd * 6) % 12
-                    pen = QPen(QColor(225, 228, 233, 205), 2.2, Qt.PenStyle.DashLine)
-                    pen.setDashPattern([3, 3])
-                    pen.setDashOffset(dash_off)
-                    for k in range(lanes - 1):
-                        off = first + k * spacing
-                        pts = polyline_at(off)
-                        if len(pts) >= 2:
-                            qp.setPen(pen)
-                            qp.drawPolyline(QPolygonF(pts))
                 # 4) Anticipated route (blue) glow on the road.
                 # Height zero pins the route to the asphalt plane.
                 pts = [self._project(a, l, view, 0.0) for a, l in al]

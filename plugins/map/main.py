@@ -242,9 +242,26 @@ class Plugin(BasePlugin):
             return []
         from core.navigation.road_network import _uid
         normalized_uids = [_uid(uid) for uid in uids]
-        valid_uids = [uid for uid in normalized_uids if uid in self.road_net.nodes]
+        all_valid = [uid for uid in normalized_uids if uid in self.road_net.nodes]
+        # Missing IDs must split the route. Compressing them out connected the
+        # preceding and following roads with a fake, kilometres-long chord.
+        runs, current = [], []
+        for uid in normalized_uids:
+            if uid in self.road_net.nodes:
+                current.append(uid)
+            else:
+                if current:
+                    runs.append(current)
+                current = []
+        if current:
+            runs.append(current)
+        viable = [run for run in runs if len(run) >= 2]
+        valid_uids = (min(viable,
+                          key=lambda run: min(math.dist(pos, self.road_net.nodes[uid])
+                                              for uid in run))
+                      if viable else all_valid)
         matched = [tuple(self.road_net.nodes[uid]) for uid in valid_uids]
-        match_ratio = len(matched) / max(1, len(uids))
+        match_ratio = len(all_valid) / max(1, len(uids))
         self.sdk.set("game_route_match", match_ratio)
         if len(matched) < 2 or match_ratio < 0.55:
             self.sdk.set("navigation_unreliable", True)
@@ -283,6 +300,14 @@ class Plugin(BasePlugin):
         remaining = self.road_net.refine_route(remaining_uids)
         if len(remaining) < 2:
             remaining = matched[idx:]
+        # Final safety net for both rendering and steering: never publish a
+        # discontinuous route across unrelated map sectors.
+        continuous = [remaining[0]] if remaining else []
+        for point in remaining[1:]:
+            if math.dist(continuous[-1], point) > 350.0:
+                break
+            continuous.append(point)
+        remaining = continuous
         self.sdk.set("game_route_points", [list(p) for p in remaining])
         return remaining
 
