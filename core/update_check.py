@@ -100,7 +100,9 @@ def latest_release() -> str | None:
         rc = requests.get(f"https://api.github.com/repos/{REPO}/commits/main",
                           headers=headers, timeout=8)
         if rc.status_code == 200:
-            return (rc.json().get("sha", "") or "")[:10] or None
+            # Keep remote and local revisions identical in presentation and
+            # comparison: one conventional seven-character short SHA.
+            return _display_commit(rc.json().get("sha", "")) or None
         elif rc.status_code in (403, 429):
             logging.warning("update check: GitHub commits API rate-limited (HTTP %s).",
                             rc.status_code)

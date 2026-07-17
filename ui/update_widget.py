@@ -102,6 +102,8 @@ class UpdateConfirmDialog(QDialog):
 
     def __init__(self, latest_tag, parent=None):
         super().__init__(parent)
+        from core.update_check import _display_commit
+        latest_tag = _display_commit(str(latest_tag)) or str(latest_tag)
         self.setWindowTitle("Aktualizovať UltraPilot")
         self.setModal(True)
         self.setFixedSize(420, 230)
@@ -263,6 +265,8 @@ class UpdateCheckerWidget(QWidget):
             self.btn.clicked.connect(self.check)
             return
         if available and latest:
+            from core.update_check import _display_commit
+            latest = _display_commit(str(latest)) or str(latest)
             # Remember the tag/SHA so the confirm dialog can show it.
             self._latest_tag = str(latest)
             # Show the remote commit short SHA so the user knows what's coming.
