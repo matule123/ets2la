@@ -69,6 +69,8 @@ class UltraPilotHUD(QWidget):
         self._rear_cam_until = 0.0
         self._rear_cam_side = "off"
         self._rear_vehicle_smooth = {}
+        self._view_yaw = 0.0
+        self._camera_key_down = False
         self.init_ui()
 
     def init_ui(self):
@@ -94,6 +96,28 @@ class UltraPilotHUD(QWidget):
     def _tick(self):
         self._blink = not self._blink
         self._t += 0.08   # advance the animation clock (timer fires every 80 ms)
+        # Global camera controls work while ETS2 owns focus; HUD stays fully
+        # click-through. Ctrl+Left/Right rotates, Ctrl+R resets rear view.
+        try:
+            import ctypes
+            key = ctypes.windll.user32.GetAsyncKeyState
+            ctrl = bool(key(0x11) & 0x8000)
+            left = bool(key(0x25) & 0x8000)
+            right = bool(key(0x27) & 0x8000)
+            reset = bool(key(0x52) & 0x8000)
+            pressed = ctrl and (left or right or reset)
+            if pressed and not self._camera_key_down:
+                if reset:
+                    self._view_yaw = 0.0
+                elif left:
+                    self._view_yaw -= math.radians(15.0)
+                elif right:
+                    self._view_yaw += math.radians(15.0)
+                self._view_yaw = ((self._view_yaw + math.pi)
+                                  % (2 * math.pi)) - math.pi
+            self._camera_key_down = pressed
+        except Exception:
+            pass
         # Wait for the UI process to flag itself ready before we show the HUD.
         try:
             should_show = bool(self.shared_state.get("ui_ready", False)
@@ -280,6 +304,14 @@ class UltraPilotHUD(QWidget):
         # Higher chase camera and a higher horizon give the ETS2LA-like
         # top-down perspective: junction shapes remain legible instead of
         # collapsing into a dense horizontal bundle in the distance.
+        # Orbit around the ego tractor so the model can be inspected from the
+        # side/front without changing any navigation geometry.
+        pivot = 12.0
+        if abs(self._view_yaw) > 1e-5:
+            ca, sa = math.cos(self._view_yaw), math.sin(self._view_yaw)
+            rel = ahead - pivot
+            ahead, lateral = (pivot + rel * ca + lateral * sa,
+                              -rel * sa + lateral * ca)
         H = 13.0          # camera height above road
         cam_back = 20.0   # camera behind the truck
         f = view.height() * 0.92
@@ -399,6 +431,8 @@ class UltraPilotHUD(QWidget):
                     segment_lanes = int(segment[3]) if len(segment) > 3 else 2
                     divided = bool(segment[4]) if len(segment) > 4 else False
                     dash_on = bool(segment[5]) if len(segment) > 5 else True
+                    pillar = bool(segment[6]) if len(segment) > 6 else False
+                    rail_post = bool(segment[7]) if len(segment) > 7 else False
                 except (TypeError, ValueError, IndexError):
                     continue
                 clipped = clip_road(a, b)
@@ -421,11 +455,13 @@ class UltraPilotHUD(QWidget):
                     a = (a[0] - ua * overlap, a[1] - ul * overlap)
                     b = (b[0] + ua * overlap, b[1] + ul * overlap)
                 nearby.append((max(a[0], b[0]), a, b, clipped_ah, clipped_bh,
-                               kind, segment_lanes, divided, dash_on))
+                               kind, segment_lanes, divided, dash_on,
+                               pillar, rail_post))
             # Lower decks first, higher/nearer decks last so opaque road
             # polygons correctly hide roads passing underneath.
             nearby.sort(key=lambda item: ((item[3] + item[4]) * .5, -item[0]))
-            for _, a, b, ah, bh, kind, segment_lanes, divided, dash_on in nearby:
+            for (_, a, b, ah, bh, kind, segment_lanes, divided, dash_on,
+                 pillar, rail_post) in nearby:
                 da, dl = b[0] - a[0], b[1] - a[1]
                 length = math.hypot(da, dl)
                 if length < 0.15:
@@ -485,6 +521,21 @@ class UltraPilotHUD(QWidget):
                     # separation unmistakable and hides geometry below it.
                     deck_height = (ah + bh) * .5
                     if len(edges) == 2 and deck_height > 2.0:
+                        if pillar:
+                            mid_a, mid_l = ((a[0] + b[0]) * .5,
+                                            (a[1] + b[1]) * .5)
+                            ua, ul = da / length, dl / length
+                            for side in (-1.0, 1.0):
+                                centre = (mid_a + na * half * .62 * side,
+                                          mid_l + nl * half * .62 * side)
+                                rear = (centre[0] - ua * .38,
+                                        centre[1] - ul * .38)
+                                front = (centre[0] + ua * .38,
+                                         centre[1] + ul * .38)
+                                self._oriented_box3d(
+                                    qp, rear, front, .34, -.15,
+                                    deck_height - .18, view,
+                                    ("#59616B", "#858D97"))
                         qp.setPen(Qt.PenStyle.NoPen)
                         qp.setBrush(QColor(18, 21, 26, 255))
                         for side, (ea, eb) in zip((-1.0, 1.0), edges):
@@ -514,11 +565,30 @@ class UltraPilotHUD(QWidget):
                     for ea, eb in edges:
                         qp.drawLine(ea, eb)
                     if deck_height > 2.0:
-                        qp.setPen(QPen(QColor(112, 120, 132, 255), 3.2,
+                        # Continuous raised guardrails on both bridge sides.
+                        qp.setPen(QPen(QColor(160, 168, 178, 255), 2.7,
                                        Qt.PenStyle.SolidLine,
                                        Qt.PenCapStyle.RoundCap))
-                        for ea, eb in edges:
-                            qp.drawLine(ea, eb)
+                        for side in (-1.0, 1.0):
+                            rail_a = self._project(a[0] + na * half * side,
+                                                   a[1] + nl * half * side,
+                                                   view, ah + .62)
+                            rail_b = self._project(b[0] + na * half * side,
+                                                   b[1] + nl * half * side,
+                                                   view, bh + .62)
+                            if rail_a and rail_b:
+                                qp.drawLine(rail_a, rail_b)
+                            if rail_post:
+                                post_bottom = self._project(
+                                    (a[0] + b[0]) * .5 + na * half * side,
+                                    (a[1] + b[1]) * .5 + nl * half * side,
+                                    view, deck_height)
+                                post_top = self._project(
+                                    (a[0] + b[0]) * .5 + na * half * side,
+                                    (a[1] + b[1]) * .5 + nl * half * side,
+                                    view, deck_height + .62)
+                                if post_bottom and post_top:
+                                    qp.drawLine(post_bottom, post_top)
                     marking = QPen(QColor(230, 233, 238, 220), 2.4,
                                    Qt.PenStyle.SolidLine,
                                    Qt.PenCapStyle.RoundCap)
@@ -631,11 +701,10 @@ class UltraPilotHUD(QWidget):
                     vehs.append((a, l, relative_y, v))
             vehs.sort(key=lambda t: -t[0])
             for a, l, ground, v in vehs:
-                self._draw_low_poly_vehicle(qp, view, a, l, v, ground)
+                self._draw_low_poly_vehicle(qp, view, a, l, v, ground, h)
 
         # Ego truck as a 3D model at the bottom centre (cab + trailer).
-        self._draw_low_poly_ego(qp, view, d.get("trailer_articulation", 0.0),
-                                d.get("trailer_attached", False))
+        self._draw_low_poly_ego(qp, view, d.get("trailer_articulation", 0.0), True)
 
     def _draw_low_poly_ego(self, qp, view, articulation=0.0, attached=True):
         """Minimal grey tractor silhouette with an actually hinged trailer."""
@@ -649,9 +718,8 @@ class UltraPilotHUD(QWidget):
         # Wheels are inset into the body silhouette rather than protruding.
         for axle in (10.35, 11.25, 14.95):
             for side in (-1, 1):
-                self._box3d(qp, axle - .31, axle + .31, .22,
-                            side * (hw - .04), .08, .78, view,
-                            (dark, "#3B3F45"))
+                self._draw_round_wheel(qp, view, axle,
+                                       side * (hw - .04), 0.0, .38)
 
         if not attached:
             return
@@ -673,49 +741,58 @@ class UltraPilotHUD(QWidget):
                 wc = (ca + pa * side * 1.22, cl + pl * side * 1.22)
                 rear = (wc[0] - ua * .30, wc[1] - ul * .30)
                 front = (wc[0] + ua * .30, wc[1] + ul * .30)
-                self._oriented_box3d(qp, rear, front, .19, 0, .77, view,
-                                     (dark, "#3B3F45"))
+                self._draw_round_wheel(qp, view, wc[0], wc[1], 0.0, .38)
 
-    def _draw_low_poly_vehicle(self, qp, view, ahead, lateral, vehicle, ground=0.0):
-        """New grey low-poly traffic family: car, van, bus and articulated truck."""
+    def _draw_round_wheel(self, qp, view, ahead, lateral, ground=0.0, radius=.36):
+        """Perspective-scaled round wheel with a grey inset hub."""
+        centre = self._project(ahead, lateral, view, ground + radius)
+        side = self._project(ahead, lateral + radius, view, ground + radius)
+        top = self._project(ahead, lateral, view, ground + radius * 2.0)
+        if not centre or not side or not top:
+            return
+        rx = max(1.4, abs(side.x() - centre.x()))
+        ry = max(1.4, abs(top.y() - centre.y()))
+        qp.setPen(QPen(QColor("#3F454D"), 1))
+        qp.setBrush(QColor("#555C65"))
+        qp.drawEllipse(QRectF(centre.x() - rx, centre.y() - ry,
+                              rx * 2.0, ry * 2.0))
+        qp.setPen(Qt.PenStyle.NoPen)
+        qp.setBrush(QColor("#A4A9AF"))
+        qp.drawEllipse(QRectF(centre.x() - rx * .42, centre.y() - ry * .42,
+                              rx * .84, ry * .84))
+
+    def _draw_low_poly_vehicle(self, qp, view, ahead, lateral, vehicle,
+                               ground=0.0, truck_heading=0.0):
+        """Solid vehicle aligned to its real ETS2 heading (no sideways drift)."""
         kind = str(vehicle.get("type", "car")).lower()
         hw = max(.88, float(vehicle.get("width", 2.0) or 2.0) / 2)
         length = max(3.5, float(vehicle.get("length", 4.5) or 4.5))
-        n, fr = ahead - length / 2, ahead + length / 2
         height = {"car": 1.05, "van": 1.65, "bus": 2.55,
                   "truck": 2.45}.get(kind, 1.2)
-        self._box3d(qp, n - .12, fr + .12, hw + .08, lateral,
-                    ground, ground + .30, view,
-                    ("#30343A", "#454A50"))
-        if kind == "truck":
-            split = fr - min(3.5, length * .32)
-            self._box3d(qp, n, split, hw, lateral, ground + .30, ground + 3.0, view,
-                        ("#999EA5", "#C4C7CB"))
-            self._box3d(qp, split, fr, hw, lateral, ground + .30, ground + height, view,
-                        ("#858A91", "#B7BBC0"))
-            self._box3d(qp, split + .35, fr - .15, hw * .88, lateral,
-                        ground + 1.35, ground + 2.65,
-                        view, ("#4B5057", "#686D74"))
-        elif kind == "bus":
-            self._box3d(qp, n, fr, hw, lateral, ground + .30, ground + height, view,
-                        ("#8F949B", "#BEC2C7"))
-            self._box3d(qp, n + .35, fr - .35, hw * .91, lateral,
-                        ground + 1.15, ground + 2.75,
-                        view, ("#4B5057", "#686D74"))
-        else:
-            self._box3d(qp, n, fr, hw, lateral, ground + .30, ground + height, view,
-                        ("#8F949B", "#BEC2C7"))
-            cabin_h = 2.15 if kind == "van" else 1.62
-            self._wedge3d(qp, n + length * .24, fr - length * .18, hw * .82,
-                          lateral, ground + height * .82, ground + cabin_h, view,
-                          "#4B5057", "#686D74", top_hw=.72,
-                          top_near=.28, top_far=.22)
-        for axle in (n + length * .22, fr - length * .22):
+        diff = float(vehicle.get("yaw", truck_heading) or truck_heading) - truck_heading
+        ua, ul = math.cos(diff), -math.sin(diff)
+        rear = (ahead - ua * length / 2, lateral - ul * length / 2)
+        front = (ahead + ua * length / 2, lateral + ul * length / 2)
+        body = "#8A9097"
+        self._oriented_box3d(qp, rear, front, hw, ground + .26,
+                             ground + height, view, (body, "#BEC2C7"))
+        # A raised front cabin remains part of the same heading-aligned shape.
+        if kind in ("truck", "van"):
+            cab_start = .68 if kind == "truck" else .48
+            cab_rear = (rear[0] + ua * length * cab_start,
+                        rear[1] + ul * length * cab_start)
+            self._oriented_box3d(qp, cab_rear, front, hw * .94,
+                                 ground + height * .78,
+                                 ground + height + (.65 if kind == "truck" else .35),
+                                 view, (body, "#C5C8CC"))
+        pa, pl = -ul, ua
+        for ratio in (.22, .78):
+            ca = rear[0] + ua * length * ratio
+            cl = rear[1] + ul * length * ratio
             for side in (-1, 1):
-                self._box3d(qp, axle - .18, axle + .18, .12,
-                            lateral + side * (hw + .07), ground, ground + .56, view,
-                            ("#24272C", "#454A50"))
-        self._draw_lights(qp, view, n, fr, hw, lateral, height, ground)
+                self._draw_round_wheel(qp, view,
+                                       ca + pa * side * (hw - .03),
+                                       cl + pl * side * (hw - .03), ground, .34)
 
     def _wedge3d(self, qp, near, far, half_width, lateral, z0, z1, view,
                  side_color, top_color, top_hw=.8, top_near=.2, top_far=.1):
