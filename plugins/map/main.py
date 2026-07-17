@@ -352,7 +352,14 @@ class Plugin(BasePlugin):
             valid_uids.reverse()
             route = Route(matched)
             idx = route.tracking_index(pos, heading)
-        remaining_uids = valid_uids[idx:]
+        # GPS UIDs are intentionally sparse. The truck will commonly be
+        # between the nearest UID and its predecessor; starting exactly at
+        # ``idx`` then made the resolved geometry begin tens of metres ahead
+        # (for example 56 m) and the safety localisation rejected it. Keep the
+        # preceding SDK section, refine it into its real road curve, and let
+        # the segment projection below trim the result at the truck position.
+        route_start = max(0, idx - 1)
+        remaining_uids = valid_uids[route_start:]
         cache_signature = tuple(remaining_uids)
         if cache_signature == self._failed_route_signature:
             return []
