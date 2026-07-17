@@ -73,9 +73,9 @@ class UltraPilotHUD(QWidget):
                             Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.resize(self.W, self.H)
-        screen = QApplication.primaryScreen().geometry()
+        screen = QApplication.primaryScreen().availableGeometry()
         # Bottom-left of the screen (the reference HUD is on the left side).
-        self.move(24, screen.height() - self.H - 24)
+        self.move(screen.left() + 24, screen.bottom() - self.H - 23)
         # Start hidden: the HUD only appears once the main app window is up
         # (``ui_ready`` flag in shared state). This avoids the HUD flashing on
         # screen during the onboarding wizard / before the dashboard is visible.
@@ -99,7 +99,23 @@ class UltraPilotHUD(QWidget):
                 self.hide()
         except Exception:
             pass
+        # Display scaling, resolution changes or a previous mouse drag must
+        # never leave most of the HUD below/outside the desktop.
+        self._ensure_on_screen()
         self.update()
+
+    def _ensure_on_screen(self):
+        centre = self.frameGeometry().center()
+        screen = QApplication.screenAt(centre) or QApplication.primaryScreen()
+        if screen is None:
+            return
+        area = screen.availableGeometry()
+        max_x = max(area.left(), area.right() - self.width() + 1)
+        max_y = max(area.top(), area.bottom() - self.height() + 1)
+        x = min(max(self.x(), area.left()), max_x)
+        y = min(max(self.y(), area.top()), max_y)
+        if x != self.x() or y != self.y():
+            self.move(x, y)
 
     # --- Data -----------------------------------------------------------------
     def _read(self):
@@ -952,10 +968,12 @@ class UltraPilotHUD(QWidget):
         if self._drag is not None:
             delta = event.globalPosition().toPoint() - self._drag
             self.move(self.x() + delta.x(), self.y() + delta.y())
+            self._ensure_on_screen()
             self._drag = event.globalPosition().toPoint()
 
     def mouseReleaseEvent(self, event):
         self._drag = None
+        self._ensure_on_screen()
 
 
 def run_hud(shared_state):

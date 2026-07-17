@@ -601,11 +601,57 @@ class UltraPilotApp(QMainWindow):
 
     def showEvent(self, event):
         """The main window is up — let the HUD process know it can appear now."""
+        self._set_native_windows_icon()
         try:
             self.state.set("ui_ready", True)
         except Exception:
             pass
         super().showEvent(event)
+
+    def _set_native_windows_icon(self):
+        """Set WM/class icons as well as QIcon for the Windows taskbar.
+
+        The app is launched through ``py.exe`` by the installer. Some Windows
+        builds then ignore Qt's icon and retain the generic Python icon unless
+        the native HWND/class icons are explicitly replaced.
+        """
+        if os.name != "nt":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+            from core.paths import resource
+            path = resource("assets", "favicon.ico")
+            if not path or not os.path.exists(path):
+                return
+            user32 = ctypes.windll.user32
+            load = user32.LoadImageW
+            load.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR,
+                             wintypes.UINT, ctypes.c_int, ctypes.c_int,
+                             wintypes.UINT]
+            load.restype = ctypes.c_void_p
+            send = user32.SendMessageW
+            send.argtypes = [wintypes.HWND, wintypes.UINT,
+                             ctypes.c_size_t, ctypes.c_void_p]
+            set_class_icon = user32.SetClassLongPtrW
+            set_class_icon.argtypes = [wintypes.HWND, ctypes.c_int,
+                                       ctypes.c_void_p]
+            set_class_icon.restype = ctypes.c_void_p
+            IMAGE_ICON, LR_LOADFROMFILE = 1, 0x0010
+            big = load(None, path, IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
+            small = load(None, path, IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
+            hwnd = int(self.winId())
+            WM_SETICON = 0x0080
+            if big:
+                send(hwnd, WM_SETICON, 1, big)
+                set_class_icon(hwnd, -14, big)  # GCLP_HICON
+                self._native_big_icon = big
+            if small:
+                send(hwnd, WM_SETICON, 0, small)
+                set_class_icon(hwnd, -34, small)  # GCLP_HICONSM
+                self._native_small_icon = small
+        except Exception as exc:
+            logging.debug("native taskbar icon could not be set: %s", exc)
 
     def update_ui(self):
         new_language = self.state.get("ui_language_code", "sk") or "sk"

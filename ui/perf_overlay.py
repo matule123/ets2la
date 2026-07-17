@@ -198,6 +198,17 @@ class PerfOverlay(QWidget):
 
     def refresh(self):
         app_mb, app_cpu, plugins = _collect(self.state)
+        # Grow with the real plugin count so the final rows are not clipped.
+        # Keep the bottom edge anchored above the sidebar button.
+        desired = max(390, min(650, 245 + (len(plugins) + 1) * 29))
+        if desired != self.height():
+            old_bottom = self.y() + self.height()
+            self.setFixedHeight(desired)
+            screen = self.screen().availableGeometry() if self.screen() else None
+            y = old_bottom - desired
+            if screen is not None:
+                y = max(screen.top() + 8, min(y, screen.bottom() - desired - 8))
+            self.move(self.x(), y)
         self.total_lbl.setText(f"RAM\n{app_mb:.0f} MB")
         self.cpu_lbl.setText(f"CPU\n{app_cpu:.0f} %")
         # The total bar is relative to a 1 GB soft cap for a quick visual feel.
