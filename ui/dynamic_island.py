@@ -19,6 +19,7 @@ _ACTIVITY = (
     "loading", "loaded", "download", "unpack", "extract", "initializ",
     "starting", "started", "ready", "map", "dataset", "road network",
     "plugin", "connected", "install", "repair", "update", "error", "failed",
+    "route", "navigation", "gps", "calculation",
 )
 _TECHNICAL_LOG_MARKERS = (
     "map: truck=", "nearest_seg=", "truckposition", "truck position",
@@ -33,7 +34,7 @@ class DynamicIsland(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.setFixedHeight(46)
+        self.setFixedHeight(72)
         self._visible = False
         self._animation = None
         self._log_file = None
@@ -66,6 +67,8 @@ class DynamicIsland(QWidget):
         self.time_lbl = QLabel()
         self.time_lbl.setStyleSheet("color:#9CA3AF;font-size:10px;font-weight:600;border:none;")
         self.msg_lbl = QLabel()
+        self.msg_lbl.setWordWrap(True)
+        self.msg_lbl.setMinimumWidth(310)
         self.msg_lbl.setStyleSheet("color:#2EA043;font-size:12px;font-weight:700;border:none;")
         self.src_lbl = QLabel()
         self.src_lbl.setStyleSheet("color:#9CA3AF;font-size:10px;border:none;")
@@ -170,7 +173,9 @@ class DynamicIsland(QWidget):
 
     def show_record(self, msg, level, ts, src):
         color = _LEVEL_COLOR.get(level, "#8B949E")
-        short = msg if len(msg) <= 62 else msg[:59] + "..."
+        # The wider, wrapped island can show the actual diagnostic. Truncating
+        # at 62 characters previously left only "Chyba:" with no explanation.
+        short = msg if len(msg) <= 180 else msg[:177] + "..."
         self.time_lbl.setText(ts)
         self.msg_lbl.setText(short)
         self.msg_lbl.setStyleSheet(
@@ -185,7 +190,7 @@ class DynamicIsland(QWidget):
         if not parent:
             return
         self.adjustSize()
-        width = min(max(250, self.frame.sizeHint().width() + 4), min(520, parent.width() - 28))
+        width = min(max(380, self.frame.sizeHint().width() + 4), min(720, parent.width() - 28))
         self.setFixedWidth(width)
         self.move(parent.width() // 2 - width // 2, parent.height() - self.height() - 48)
 

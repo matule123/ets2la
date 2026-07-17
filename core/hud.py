@@ -364,8 +364,8 @@ class UltraPilotHUD(QWidget):
                 """Clip a truck-space segment to the visible HUD rectangle."""
                 da, dl = b[0] - a[0], b[1] - a[1]
                 t0, t1 = 0.0, 1.0
-                for p, q in ((-da, a[0] - 1.5), (da, 100.0 - a[0]),
-                             (-dl, a[1] + 30.0), (dl, 30.0 - a[1])):
+                for p, q in ((-da, a[0] - 1.5), (da, 115.0 - a[0]),
+                             (-dl, a[1] + 38.0), (dl, 38.0 - a[1])):
                     if abs(p) < 1e-9:
                         if q < 0:
                             return None
@@ -392,6 +392,7 @@ class UltraPilotHUD(QWidget):
                     bh = (float(segment[1][2]) - d["altitude"]
                           if len(segment[1]) > 2 else 0.0)
                     kind = segment[2] if len(segment) > 2 else "road"
+                    segment_lanes = int(segment[3]) if len(segment) > 3 else 2
                 except (TypeError, ValueError, IndexError):
                     continue
                 clipped = clip_road(a, b)
@@ -400,9 +401,10 @@ class UltraPilotHUD(QWidget):
                 a, b, t0, t1 = clipped
                 clipped_ah = ah + (bh-ah)*t0
                 clipped_bh = ah + (bh-ah)*t1
-                nearby.append((max(a[0], b[0]), a, b, clipped_ah, clipped_bh, kind))
+                nearby.append((max(a[0], b[0]), a, b, clipped_ah, clipped_bh,
+                               kind, segment_lanes))
             nearby.sort(reverse=True, key=lambda item: item[0])
-            for _, a, b, ah, bh, kind in nearby:
+            for _, a, b, ah, bh, kind, segment_lanes in nearby:
                 da, dl = b[0] - a[0], b[1] - a[1]
                 length = math.hypot(da, dl)
                 if length < 0.15:
@@ -415,7 +417,7 @@ class UltraPilotHUD(QWidget):
                     follows_truck_road = (
                         kind == "road" and abs(centre_lateral) < 10.0
                         and abs(da) / length > 0.68)
-                    if kind == "lane" or not follows_truck_road:
+                    if kind == "lane":
                         # Prefab data describes individual lane trajectories.
                         # Rendering every one as a full road created the dense
                         # overlapping mess at motorway junctions.
@@ -432,7 +434,8 @@ class UltraPilotHUD(QWidget):
                     # and a faint centre marking. Filled rectangles for every
                     # nav-curve segment accumulated into the black blocks seen
                     # in the old HUD, especially at roundabouts.
-                    road_lanes = max(1, int(d.get("lanes", 2)))
+                    road_lanes = (max(1, int(d.get("lanes", 2)))
+                                  if follows_truck_road else max(1, segment_lanes))
                     half = road_lanes * 3.6 / 2.0 + 0.8
                     edges = []
                     for side in (-1.0, 1.0):

@@ -48,6 +48,10 @@ class Plugin(BasePlugin):
         self._route_orientation_signature = None
         self._route_reversed = False
         self._last_route_progress_log = 0.0
+        self._last_navigation_status_log = 0.0
+        self._resolved_route_cache_signature = None
+        self._resolved_route_cache = []
+        self._failed_route_signature = None
         os.makedirs(ROUTES_DIR, exist_ok=True)
         self._publish_route_list()
 
@@ -312,7 +316,15 @@ class Plugin(BasePlugin):
             route = Route(matched)
             idx = route.tracking_index(pos, heading)
         remaining_uids = valid_uids[idx:]
+        cache_signature = tuple(remaining_uids)
+        if cache_signature == self._failed_route_signature:
+            return []
+
         def route_progress(done, total, expanded):
+            if (not self.sdk.get("navigation_recalculating", False)
+                    or self._last_recalc_request is None
+                    or self._recalc_started <= 0.0):
+                return
             fraction = done / max(1, total)
             self.sdk.set("navigation_progress", 0.72 + 0.24 * fraction)
             detail = (f" · kontrolujem {expanded} uzlov"
@@ -327,12 +339,19 @@ class Plugin(BasePlugin):
                              done, total, expanded,
                              now - self._recalc_started)
 
-        remaining = self.road_net.refine_route(
-            remaining_uids, progress=route_progress)
-        if not getattr(self.road_net, "_last_refine_complete", True):
-            self.sdk.set("game_route_resolved_points", len(remaining))
-            self.sdk.set("game_route_points", [])
-            return []
+        if cache_signature == self._resolved_route_cache_signature:
+            remaining = list(self._resolved_route_cache)
+        else:
+            remaining = self.road_net.refine_route(
+                remaining_uids, progress=route_progress)
+            if not getattr(self.road_net, "_last_refine_complete", True):
+                self.sdk.set("game_route_resolved_points", len(remaining))
+                self.sdk.set("game_route_points", [])
+                self._failed_route_signature = cache_signature
+                return []
+            self._resolved_route_cache_signature = cache_signature
+            self._resolved_route_cache = list(remaining)
+            self._failed_route_signature = None
         if len(remaining) < 2:
             remaining = matched[idx:]
         # Final safety net for both rendering and steering: never publish a
@@ -423,9 +442,12 @@ class Plugin(BasePlugin):
         def publish(stage, progress, status):
             self.sdk.set("navigation_progress", progress)
             self.sdk.set("navigation_status", status)
-            if stage != self._last_recalc_stage:
+            now = time.monotonic()
+            if (stage != self._last_recalc_stage
+                    or now - self._last_navigation_status_log >= 1.0):
                 self._last_recalc_stage = stage
-                logging.info("Navigation: %s", status)
+                self._last_navigation_status_log = now
+                logging.info("Navigation [%d%%]: %s", int(progress * 100), status)
 
         request = self.sdk.get("nav_recalc_request")
         if request and request != self._last_recalc_request:
@@ -485,6 +507,8 @@ class Plugin(BasePlugin):
                 "match %.1f%%, remaining %.2f km, elapsed %.2fs.",
                 len(points), resolved, match * 100.0, distance_km,
                 time.monotonic() - self._recalc_started)
+            logging.info("Navigation route published to HUD, live map and AR overlay (%d visible points).",
+                         len(path[:60]))
         elif elapsed > 15.0:
             resolved = int(self.sdk.get("game_route_resolved_points", 0) or 0)
             self.sdk.set("navigation_progress", 0.0)
@@ -498,6 +522,7 @@ class Plugin(BasePlugin):
                 "match %.1f%%, elapsed %.2fs.",
                 len(points), resolved, match * 100.0,
                 time.monotonic() - self._recalc_started)
+            logging.error("Navigation route was not published; HUD/live map keep navigation empty for safety.")
 
     # --- Tick -----------------------------------------------------------------
     def on_tick(self, delta_time: float):
@@ -529,7 +554,8 @@ class Plugin(BasePlugin):
                 roads = self.road_net.hud_segments_3d_near(
                     pos, altitude=altitude)
                 self.sdk.set("map_road_segments",
-                             [[list(a), list(b), kind] for a, b, kind in roads])
+                             [[list(a), list(b), kind, lanes]
+                              for a, b, kind, lanes in roads])
             except Exception as e:
                 logging.debug("HUD road geometry error: %s", e)
 

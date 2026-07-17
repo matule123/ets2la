@@ -15,9 +15,12 @@ It is added as a top-level page („Log“) in the main window's sidebar.
 """
 
 import logging
+import os
+import re
+import html
 from datetime import datetime
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QTextCharFormat, QTextCursor, QFont, QColor
 from PyQt6.QtWidgets import QVBoxLayout, QHBoxLayout, QPushButton, QLabel
 from PyQt6.QtWidgets import QTextEdit
@@ -133,15 +136,67 @@ class LogPage(Page):
             " border-radius:10px; padding:8px;}")
         self.layout.addWidget(self.view, stretch=1)
 
-        # Attach the handler once.
-        if LogPage._handler is None:
-            LogPage._handler = _BufferHandler(self.view)
-            LogPage._handler.setLevel(logging.INFO)
-            logging.getLogger().addHandler(LogPage._handler)
-        else:
-            # Re-target the existing handler at this fresh widget.
-            LogPage._handler._target = self.view
         self._auto_scroll = True
+        # All plugins run in separate processes. A logging.Handler attached to
+        # this UI process cannot see their records, so tail the shared file that
+        # every process writes instead.
+        from core.paths import app_dir
+        self._log_file = os.path.join(app_dir(), "ultrapilot.log")
+        self._log_pos = 0
+        self._discard_partial = False
+        try:
+            size = os.path.getsize(self._log_file)
+            self._log_pos = max(0, size - 96_000)
+            self._discard_partial = self._log_pos > 0
+        except OSError:
+            pass
+        self._poll_timer = QTimer(self)
+        self._poll_timer.timeout.connect(self._poll_file)
+        self._poll_timer.start(250)
+        self._poll_file()
+
+    def _poll_file(self):
+        try:
+            size = os.path.getsize(self._log_file)
+            if size < self._log_pos:
+                self._log_pos = 0
+                self._discard_partial = False
+            if size == self._log_pos:
+                return
+            with open(self._log_file, "r", encoding="utf-8", errors="replace") as stream:
+                stream.seek(self._log_pos)
+                if self._discard_partial:
+                    stream.readline()  # discard a possibly partial first line
+                    self._discard_partial = False
+                lines = stream.readlines()
+                self._log_pos = stream.tell()
+        except (OSError, ValueError):
+            return
+        pattern = re.compile(
+            r"^(?:\d{4}-\d{2}-\d{2} )?(?P<time>\d{2}:\d{2}:\d{2}),\d+\s+"
+            r"(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL)\s+(?P<src>\S+)\s+(?P<msg>.*)$")
+        cursor = self.view.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        colors = {"DEBUG": "#5B6573", "INFO": "#9AA4B2",
+                  "WARNING": "#F59E0B", "ERROR": "#EF4444",
+                  "CRITICAL": "#EF4444"}
+        for raw in lines:
+            line = raw.rstrip("\r\n")
+            match = pattern.match(line)
+            if match:
+                item = match.groupdict()
+                color = colors.get(item["level"], "#9AA4B2")
+                rendered = (
+                    f'<span style="color:#5B6573;">[{item["time"]}]</span> '
+                    f'<span style="color:{color};font-weight:700;">{item["level"]:5}</span> '
+                    f'<span style="color:#7DD3FC;">{html.escape(item["src"])}</span> '
+                    f'<span style="color:#E6E8EB;">{html.escape(item["msg"])}</span><br>')
+            else:
+                rendered = f'<span style="color:#7B8491;">{html.escape(line)}</span><br>'
+            cursor.insertHtml(rendered)
+        self.view.setTextCursor(cursor)
+        if self._auto_scroll:
+            self.view.ensureCursorVisible()
 
     def _row_wrap(self, layout):
         from PyQt6.QtWidgets import QWidget
