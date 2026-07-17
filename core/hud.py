@@ -487,6 +487,47 @@ class UltraPilotHUD(QWidget):
             # Lower decks first, higher/nearer decks last so opaque road
             # polygons correctly hide roads passing underneath.
             nearby.sort(key=lambda item: ((item[3] + item[4]) * .5, -item[0]))
+            # Surface pass in world units. Drawing perspective-scaled screen
+            # pens produced the huge pill/oval roads seen in the screenshot.
+            # Quads plus projected world-space discs seal curved chord joins
+            # without changing the physical road width.
+            qp.setPen(Qt.PenStyle.NoPen)
+            qp.setBrush(QColor(61, 67, 76, 255))
+            for (_, sa, sb, sah, sbh, skind, slanes, _divided, _dash,
+                 _pillar, _rail) in nearby:
+                sda, sdl = sb[0] - sa[0], sb[1] - sa[1]
+                slength = math.hypot(sda, sdl)
+                if slength < .15:
+                    continue
+                sna, snl = -sdl / slength, sda / slength
+                shalf = (1.92 if skind == "lane" else
+                         max(1, min(6, slanes)) * 3.6 / 2.0 + .98)
+                surface_edges = []
+                for side in (-1.0, 1.0):
+                    sea = self._project(sa[0] + sna * shalf * side,
+                                        sa[1] + snl * shalf * side, view, sah)
+                    seb = self._project(sb[0] + sna * shalf * side,
+                                        sb[1] + snl * shalf * side, view, sbh)
+                    if sea and seb:
+                        surface_edges.append((sea, seb))
+                if len(surface_edges) == 2:
+                    qp.drawPolygon(QPolygonF([
+                        surface_edges[0][0], surface_edges[0][1],
+                        surface_edges[1][1], surface_edges[1][0],
+                    ]))
+                # Correct-perspective round joint at both chord endpoints.
+                for (centre_a, centre_l), joint_h in ((sa, sah), (sb, sbh)):
+                    circle = []
+                    for step in range(12):
+                        theta = math.tau * step / 12.0
+                        point = self._project(
+                            centre_a + math.cos(theta) * shalf,
+                            centre_l + math.sin(theta) * shalf,
+                            view, joint_h)
+                        if point:
+                            circle.append(point)
+                    if len(circle) >= 3:
+                        qp.drawPolygon(QPolygonF(circle))
             drawn_pillars = []
             for (_, a, b, ah, bh, kind, segment_lanes, divided, dash_on,
                  pillar, rail_post) in nearby:
@@ -517,19 +558,7 @@ class UltraPilotHUD(QWidget):
                             if ea and eb:
                                 lane_edges.append((ea, eb))
                         if len(lane_edges) == 2:
-                            # Round-capped centre underlay seals joins between
-                            # independently sampled prefab lane chords.
-                            lane_width_px = max(
-                                3.0,
-                                (math.hypot(lane_edges[0][0].x() - lane_edges[1][0].x(),
-                                            lane_edges[0][0].y() - lane_edges[1][0].y())
-                                 + math.hypot(lane_edges[0][1].x() - lane_edges[1][1].x(),
-                                              lane_edges[0][1].y() - lane_edges[1][1].y())) * .5)
-                            qp.setPen(QPen(QColor(61, 67, 76, 255), lane_width_px,
-                                           Qt.PenStyle.SolidLine,
-                                           Qt.PenCapStyle.RoundCap,
-                                           Qt.PenJoinStyle.RoundJoin))
-                            qp.drawLine(pa, pb)
+                            pass
                         continue
                     # ETS2LA-style schematic geometry: two precise road edges
                     # and a faint centre marking. Filled rectangles for every
@@ -577,26 +606,7 @@ class UltraPilotHUD(QWidget):
                     # roundabouts readable. Short sampled quads overlap cleanly
                     # at junctions without the former long polygon spikes.
                     if len(edges) == 2:
-                        # Continuous round-capped asphalt underlay hides the
-                        # wedge-shaped cracks left by changing normals at
-                        # curved segment boundaries.
-                        road_width_px = max(
-                            4.0,
-                            (math.hypot(edges[0][0].x() - edges[1][0].x(),
-                                        edges[0][0].y() - edges[1][0].y())
-                             + math.hypot(edges[0][1].x() - edges[1][1].x(),
-                                          edges[0][1].y() - edges[1][1].y())) * .5)
-                        qp.setPen(QPen(QColor(61, 67, 76, 255), road_width_px,
-                                       Qt.PenStyle.SolidLine,
-                                       Qt.PenCapStyle.RoundCap,
-                                       Qt.PenJoinStyle.RoundJoin))
-                        qp.drawLine(pa, pb)
-                        qp.setPen(Qt.PenStyle.NoPen)
-                        qp.setBrush(QColor(61, 67, 76, 255))
-                        qp.drawPolygon(QPolygonF([
-                            edges[0][0], edges[0][1],
-                            edges[1][1], edges[1][0],
-                        ]))
+                        pass
                     edge_pen = QPen(QColor(195, 201, 210, 225), 3.0,
                                     Qt.PenStyle.SolidLine,
                                     Qt.PenCapStyle.RoundCap,
