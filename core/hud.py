@@ -308,7 +308,7 @@ class UltraPilotHUD(QWidget):
         # controls must rotate roads, bridges, traffic and the rig together;
         # rotating only the truck made it appear detached from its lane.
         if abs(self._view_yaw) > 1e-6:
-            pivot_a, pivot_l = 12.2, self._ego_road_lateral
+            pivot_a, pivot_l = 12.2, 0.0
             da, dl = ahead - pivot_a, lateral - pivot_l
             cosine, sine = math.cos(self._view_yaw), math.sin(self._view_yaw)
             ahead = pivot_a + da * cosine - dl * sine
@@ -722,11 +722,10 @@ class UltraPilotHUD(QWidget):
             for a, l, ground, v in vehs:
                 self._draw_low_poly_vehicle(qp, view, a, l, v, ground, h)
 
-        # Smoothly lock the model onto the nearest real road ribbon.
-        if pos and ego_road_lateral is not None:
-            target_lateral = max(-8.0, min(8.0, ego_road_lateral))
-            self._ego_road_lateral = (self._ego_road_lateral * .72
-                                      + target_lateral * .28)
+        # Truck-space lateral zero is the real telemetry position of the
+        # vehicle. Moving the model to a road centreline incorrectly shifted a
+        # truck in the right lane into the middle of the whole carriageway.
+        self._ego_road_lateral = 0.0
         # Ego truck as a 3D model at the bottom centre (cab + trailer).
         self._draw_low_poly_ego(qp, view, d.get("trailer_articulation", 0.0),
                                 True, self._ego_road_lateral)
@@ -810,6 +809,14 @@ class UltraPilotHUD(QWidget):
         dark, side, roof = map(QColor, colors)
         # No wireframe seams: ETS2LA models read as solid shaded silhouettes.
         qp.setPen(Qt.PenStyle.NoPen)
+        # Paint an opaque convex backing before individual shaded faces.
+        # QPainter has no depth buffer; without this backing, face-order
+        # changes in a rear/side view exposed wheels and road markings through
+        # the body even though every face colour itself was opaque.
+        hull = self._convex_hull([point for ring in rings for point in ring])
+        if len(hull) >= 3:
+            qp.setBrush(dark)
+            qp.drawPolygon(QPolygonF(hull))
         # Closed end caps.
         qp.setBrush(dark)
         qp.drawPolygon(QPolygonF([rings[0][0], rings[0][1],
@@ -831,6 +838,29 @@ class UltraPilotHUD(QWidget):
             qp.setBrush(dark.darker(120))
             qp.drawPolygon(QPolygonF([first[0], second[0],
                                       second[1], first[1]]))
+
+    @staticmethod
+    def _convex_hull(points):
+        """Screen-space hull used as an opaque backing for low-poly meshes."""
+        unique = sorted({(round(p.x(), 4), round(p.y(), 4)) for p in points})
+        if len(unique) <= 2:
+            return [QPointF(x, y) for x, y in unique]
+
+        def cross(origin, a, b):
+            return ((a[0] - origin[0]) * (b[1] - origin[1])
+                    - (a[1] - origin[1]) * (b[0] - origin[0]))
+
+        lower = []
+        for point in unique:
+            while len(lower) >= 2 and cross(lower[-2], lower[-1], point) <= 0:
+                lower.pop()
+            lower.append(point)
+        upper = []
+        for point in reversed(unique):
+            while len(upper) >= 2 and cross(upper[-2], upper[-1], point) <= 0:
+                upper.pop()
+            upper.append(point)
+        return [QPointF(x, y) for x, y in lower[:-1] + upper[:-1]]
 
     def _draw_round_wheel(self, qp, view, ahead, lateral, ground=0.0, radius=.36):
         """Perspective-scaled round wheel with a grey inset hub."""
