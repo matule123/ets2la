@@ -399,7 +399,10 @@ class UltraPilotHUD(QWidget):
         target_road_shift = max(-2.8, min(2.8,
             -float(d.get("vision_lane_offset", 0.0) or 0.0) * 8.0))
         shift_error = target_road_shift - self._road_scene_shift
-        if abs(shift_error) >= 0.16:
+        # A stopped truck has no meaningful optical-flow update. Freeze the
+        # established lane alignment so detector noise cannot make the road
+        # (and therefore the apparently stationary model) sway side to side.
+        if d.get("speed_kmh", 0.0) >= 1.5 and abs(shift_error) >= 0.16:
             self._road_scene_shift += max(-0.055, min(0.055, shift_error))
         road_scene_shift = self._road_scene_shift
 

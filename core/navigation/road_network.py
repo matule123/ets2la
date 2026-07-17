@@ -737,6 +737,12 @@ class RoadNetwork:
                                   progress(pi, len(pairs), expanded))
                         if progress else None)
                     if len(bridge) < 2:
+                        bridge = self._route_bridge_nearby(
+                            first, second, max_offset=38.0,
+                            progress=(lambda expanded, pi=pair_index:
+                                      progress(pi, len(pairs), expanded))
+                            if progress else None)
+                    if len(bridge) < 2:
                         self._last_refine_complete = False
                         self._last_refine_error = (
                             f"cestný graf nespojil uzly {first} → {second}, medzera {gap:.0f} m")
@@ -758,6 +764,64 @@ class RoadNetwork:
                             result.append(self.nodes[bridge_b])
                 else:
                     result.append(target)
+        return result
+
+    def _route_bridge_nearby(self, start, goal, max_offset=38.0,
+                             progress=None):
+        """Bridge sparse SDK nodes through compatible nearby graph nodes.
+
+        Map versions occasionally rename/remove one endpoint while the road
+        around it remains connected.  A direct chord creates shortcuts; this
+        bounded fallback instead relocates each endpoint by at most one road
+        segment and still requires a real directed graph path between them.
+        """
+        if start not in self.nodes or goal not in self.nodes:
+            return []
+
+        def candidates(uid):
+            px, pz = self.nodes[uid]
+            cx, cz = self._cell(px, pz)
+            rings = max(1, int(math.ceil(max_offset / self.GRID)))
+            found = [(0.0, uid)]
+            seen = {uid}
+            for dx in range(-rings, rings + 1):
+                for dz in range(-rings, rings + 1):
+                    for other in self._ngrid.get((cx + dx, cz + dz), ()):
+                        if other in seen:
+                            continue
+                        distance = math.dist((px, pz), self.nodes[other])
+                        if distance <= max_offset:
+                            seen.add(other)
+                            found.append((distance, other))
+            found.sort()
+            return found[:5]
+
+        best = None
+        for start_gap, candidate_start in candidates(start):
+            for goal_gap, candidate_goal in candidates(goal):
+                if candidate_start == start and candidate_goal == goal:
+                    continue
+                path = self._route_bridge(candidate_start, candidate_goal,
+                                          max_expanded=6000,
+                                          progress=progress)
+                if len(path) < 2:
+                    continue
+                graph_length = sum(
+                    math.dist(self.nodes[a], self.nodes[b])
+                    for a, b in zip(path, path[1:]))
+                score = start_gap + graph_length + goal_gap
+                if best is None or score < best[0]:
+                    best = (score, candidate_start, candidate_goal, path)
+        if best is None:
+            return []
+        score, candidate_start, candidate_goal, path = best
+        result = ([start] if candidate_start != start else []) + path
+        if candidate_goal != goal:
+            result.append(goal)
+        logging.info(
+            "road_network: recovered sparse GPS gap %s -> %s via nearby graph "
+            "nodes %s -> %s (%.1f m).",
+            start, goal, candidate_start, candidate_goal, score)
         return result
 
     def _route_bridge(self, start, goal, max_expanded=12000, progress=None):
@@ -825,7 +889,8 @@ class RoadNetwork:
             if path:
                 cache[key] = path
                 return path
-        cache[key] = []
+        # Do not cache a failed limited search: a later recovery pass may use a
+        # larger expansion budget after the map graph has finished loading.
         return []
 
     def _load_road_looks(self, data_dir: str):

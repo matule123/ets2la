@@ -623,7 +623,9 @@ class Plugin(BasePlugin):
                 # slew larger real movement slowly so a stationary-in-lane
                 # truck cannot oscillate across the HUD/controller path.
                 lane_error = target_lateral - self._vision_lane_m
-                if abs(lane_error) >= 0.14:
+                vehicle_speed = abs(float(
+                    self.sdk.get("truck_speed_ms", 0.0) or 0.0))
+                if vehicle_speed >= 0.4 and abs(lane_error) >= 0.14:
                     self._vision_lane_m += max(-0.025, min(0.025, lane_error))
                 desired_lateral = self._vision_lane_m
                 truck_right_x, truck_right_z = math.cos(heading), -math.sin(heading)
