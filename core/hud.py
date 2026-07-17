@@ -561,7 +561,12 @@ class UltraPilotHUD(QWidget):
                             if ea and eb:
                                 lane_edges.append((ea, eb))
                         if len(lane_edges) == 2:
-                            pass
+                            qp.setPen(Qt.PenStyle.NoPen)
+                            qp.setBrush(QColor(61, 67, 76, 255))
+                            qp.drawPolygon(QPolygonF([
+                                lane_edges[0][0], lane_edges[0][1],
+                                lane_edges[1][1], lane_edges[1][0],
+                            ]))
                         continue
                     # ETS2LA-style schematic geometry: two precise road edges
                     # and a faint centre marking. Filled rectangles for every
@@ -609,7 +614,12 @@ class UltraPilotHUD(QWidget):
                     # roundabouts readable. Short sampled quads overlap cleanly
                     # at junctions without the former long polygon spikes.
                     if len(edges) == 2:
-                        pass
+                        qp.setPen(Qt.PenStyle.NoPen)
+                        qp.setBrush(QColor(61, 67, 76, 255))
+                        qp.drawPolygon(QPolygonF([
+                            edges[0][0], edges[0][1],
+                            edges[1][1], edges[1][0],
+                        ]))
                     edge_pen = QPen(QColor(195, 201, 210, 225), 3.0,
                                     Qt.PenStyle.SolidLine,
                                     Qt.PenCapStyle.RoundCap,
@@ -642,10 +652,14 @@ class UltraPilotHUD(QWidget):
                                     view, deck_height + .62)
                                 if post_bottom and post_top:
                                     qp.drawLine(post_bottom, post_top)
+                    # ``dash_on`` already comes from fixed 7.5 m painted / 5 m
+                    # gap geometry in road_network.py. Applying another Qt
+                    # dash pattern here cut every painted dash into several
+                    # tiny nested dashes. Draw each enabled world-space piece
+                    # as one solid marking instead.
                     marking = QPen(QColor(230, 233, 238, 220), 2.2,
-                                   Qt.PenStyle.CustomDashLine,
+                                   Qt.PenStyle.SolidLine,
                                    Qt.PenCapStyle.FlatCap)
-                    marking.setDashPattern([5.5, 4.0])
                     qp.setPen(marking)
                     # Draw every divider on the road occupied by the truck.
                     # Four detected lanes therefore produce three dashed lines.
@@ -659,16 +673,7 @@ class UltraPilotHUD(QWidget):
                                            Qt.PenStyle.SolidLine,
                                            Qt.PenCapStyle.RoundCap))
                         elif dash_on:
-                            # Keep the dash cycle continuous across sampled
-                            # chords instead of restarting with a long/short
-                            # fragment at every map segment.
-                            segment_marking = QPen(marking)
-                            ua, ul = da / length, dl / length
-                            along_road = a[0] * ua + a[1] * ul
-                            segment_marking.setDashOffset(
-                                -((along_road / max(1.0, marking.widthF()))
-                                  % 9.5))
-                            qp.setPen(segment_marking)
+                            qp.setPen(marking)
                         else:
                             continue
                         ma = self._project(a[0] + na * offset,
