@@ -316,9 +316,9 @@ class UltraPilotHUD(QWidget):
         # Higher chase camera and a higher horizon give the ETS2LA-like
         # top-down perspective: junction shapes remain legible instead of
         # collapsing into a dense horizontal bundle in the distance.
-        H = 13.0          # camera height above road
-        cam_back = 20.0   # camera behind the truck
-        f = view.height() * 0.92
+        H = 18.0          # higher bird's-eye camera, like ETS2LA visualisation
+        cam_back = 38.0   # leaves visible HUD space behind the player's rig
+        f = view.height() * 0.96
         # Put the horizon directly against the top of the scene. The old 15%
         # empty band looked like a gap between the game road and HUD geometry.
         horizon = view.top() + view.height() * 0.025
@@ -516,6 +516,19 @@ class UltraPilotHUD(QWidget):
                             if ea and eb:
                                 lane_edges.append((ea, eb))
                         if len(lane_edges) == 2:
+                            # Round-capped centre underlay seals joins between
+                            # independently sampled prefab lane chords.
+                            lane_width_px = max(
+                                3.0,
+                                (math.hypot(lane_edges[0][0].x() - lane_edges[1][0].x(),
+                                            lane_edges[0][0].y() - lane_edges[1][0].y())
+                                 + math.hypot(lane_edges[0][1].x() - lane_edges[1][1].x(),
+                                              lane_edges[0][1].y() - lane_edges[1][1].y())) * .5)
+                            qp.setPen(QPen(QColor(61, 67, 76, 255), lane_width_px,
+                                           Qt.PenStyle.SolidLine,
+                                           Qt.PenCapStyle.RoundCap,
+                                           Qt.PenJoinStyle.RoundJoin))
+                            qp.drawLine(pa, pb)
                             qp.setPen(Qt.PenStyle.NoPen)
                             qp.setBrush(QColor(61, 67, 76, 255))
                             qp.drawPolygon(QPolygonF([
@@ -574,6 +587,20 @@ class UltraPilotHUD(QWidget):
                     # roundabouts readable. Short sampled quads overlap cleanly
                     # at junctions without the former long polygon spikes.
                     if len(edges) == 2:
+                        # Continuous round-capped asphalt underlay hides the
+                        # wedge-shaped cracks left by changing normals at
+                        # curved segment boundaries.
+                        road_width_px = max(
+                            4.0,
+                            (math.hypot(edges[0][0].x() - edges[1][0].x(),
+                                        edges[0][0].y() - edges[1][0].y())
+                             + math.hypot(edges[0][1].x() - edges[1][1].x(),
+                                          edges[0][1].y() - edges[1][1].y())) * .5)
+                        qp.setPen(QPen(QColor(61, 67, 76, 255), road_width_px,
+                                       Qt.PenStyle.SolidLine,
+                                       Qt.PenCapStyle.RoundCap,
+                                       Qt.PenJoinStyle.RoundJoin))
+                        qp.drawLine(pa, pb)
                         qp.setPen(Qt.PenStyle.NoPen)
                         qp.setBrush(QColor(61, 67, 76, 255))
                         qp.drawPolygon(QPolygonF([

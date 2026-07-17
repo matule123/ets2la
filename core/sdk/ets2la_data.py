@@ -90,7 +90,8 @@ class ETS2LAData:
             self._sem_buf = None
 
     def _ensure(self):
-        if self._traffic_buf is not None and self._sem_buf is not None:
+        if (self._traffic_buf is not None and self._sem_buf is not None
+                and self._parked_buf is not None):
             return
         self._retry += 1
         if self._retry % 30 == 1:   # retry roughly every ~0.5s of calls
