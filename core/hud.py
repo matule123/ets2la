@@ -391,6 +391,7 @@ class UltraPilotHUD(QWidget):
                           if len(segment[0]) > 2 else 0.0)
                     bh = (float(segment[1][2]) - d["altitude"]
                           if len(segment[1]) > 2 else 0.0)
+                    kind = segment[2] if len(segment) > 2 else "road"
                 except (TypeError, ValueError, IndexError):
                     continue
                 clipped = clip_road(a, b)
@@ -399,9 +400,9 @@ class UltraPilotHUD(QWidget):
                 a, b, t0, t1 = clipped
                 clipped_ah = ah + (bh-ah)*t0
                 clipped_bh = ah + (bh-ah)*t1
-                nearby.append((max(a[0], b[0]), a, b, clipped_ah, clipped_bh))
+                nearby.append((max(a[0], b[0]), a, b, clipped_ah, clipped_bh, kind))
             nearby.sort(reverse=True, key=lambda item: item[0])
-            for _, a, b, ah, bh in nearby:
+            for _, a, b, ah, bh, kind in nearby:
                 da, dl = b[0] - a[0], b[1] - a[1]
                 length = math.hypot(da, dl)
                 if length < 0.15:
@@ -410,11 +411,27 @@ class UltraPilotHUD(QWidget):
                 pa = self._project(a[0], a[1], view, ah)
                 pb = self._project(b[0], b[1], view, bh)
                 if pa and pb:
+                    if kind == "lane":
+                        # Prefab data describes individual lane trajectories.
+                        # Rendering every one as a full road created the dense
+                        # overlapping mess at motorway junctions.
+                        qp.setPen(QPen(QColor(44, 49, 57, 225), 4.0,
+                                       Qt.PenStyle.SolidLine,
+                                       Qt.PenCapStyle.RoundCap))
+                        qp.drawLine(pa, pb)
+                        qp.setPen(QPen(QColor(190, 196, 205, 145), 1.1,
+                                       Qt.PenStyle.DashLine,
+                                       Qt.PenCapStyle.RoundCap))
+                        qp.drawLine(pa, pb)
+                        continue
                     # ETS2LA-style schematic geometry: two precise road edges
                     # and a faint centre marking. Filled rectangles for every
                     # nav-curve segment accumulated into the black blocks seen
                     # in the old HUD, especially at roundabouts.
-                    half = 3.5
+                    near_current = min(math.hypot(*a), math.hypot(*b)) < 24.0
+                    road_lanes = max(1, int(d.get("lanes", 2))) if near_current else 2
+                    half = (road_lanes * 3.6 / 2.0 + 0.8
+                            if near_current else 4.1)
                     edges = []
                     for side in (-1.0, 1.0):
                         ea = self._project(a[0] + na * half * side,
@@ -445,7 +462,19 @@ class UltraPilotHUD(QWidget):
                                    Qt.PenCapStyle.RoundCap)
                     marking.setDashPattern([4, 5])
                     qp.setPen(marking)
-                    qp.drawLine(pa, pb)
+                    # Draw every divider on the road occupied by the truck.
+                    # Four detected lanes therefore produce three dashed lines.
+                    offsets = [(-half + (2.0 * half / road_lanes) * i)
+                               for i in range(1, road_lanes)]
+                    if not offsets:
+                        offsets = [0.0]
+                    for offset in offsets:
+                        ma = self._project(a[0] + na * offset,
+                                           a[1] + nl * offset, view, ah)
+                        mb = self._project(b[0] + na * offset,
+                                           b[1] + nl * offset, view, bh)
+                        if ma and mb:
+                            qp.drawLine(ma, mb)
 
             path = d["nav_path"]
             transformed = [to_truck(px, pz) for px, pz in path]

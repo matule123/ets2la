@@ -47,6 +47,7 @@ class Plugin(BasePlugin):
         self._auto_map_loading = False
         self._route_orientation_signature = None
         self._route_reversed = False
+        self._last_route_progress_log = 0.0
         os.makedirs(ROUTES_DIR, exist_ok=True)
         self._publish_route_list()
 
@@ -319,6 +320,12 @@ class Plugin(BasePlugin):
             self.sdk.set(
                 "navigation_status",
                 f"Spájam cestný úsek {done}/{total}{detail}")
+            now = time.monotonic()
+            if now - self._last_route_progress_log >= 1.0:
+                self._last_route_progress_log = now
+                logging.info("Navigation calculation: section %d/%d, searched nodes=%d, elapsed=%.1fs",
+                             done, total, expanded,
+                             now - self._recalc_started)
 
         remaining = self.road_net.refine_route(
             remaining_uids, progress=route_progress)
@@ -463,7 +470,7 @@ class Plugin(BasePlugin):
             return
         match = float(self.sdk.get("game_route_match", 0.0) or 0.0)
         publish("match", 0.72,
-                f"Párujem {len(points)} GPS bodov s mapou · {match * 100:.0f}%")
+                f"Párujem {len(points)} GPS bodov s mapou · zhoda {match * 100:.0f} %")
         path = self._ensure_map_path(pos, heading)
         if len(path) >= 2 and elapsed >= 0.55:
             self.sdk.set("nav_path", path[:60])
@@ -471,7 +478,13 @@ class Plugin(BasePlugin):
             self.sdk.set("navigation_status", "Trasa prepočítaná · navigácia pripravená")
             self.sdk.set("navigation_recalculating", False)
             self._last_recalc_stage = "ready"
-            logging.info("Navigation: route recalculated (%d planned points).", len(points))
+            resolved = int(self.sdk.get("game_route_resolved_points", 0) or 0)
+            distance_km = float(self.sdk.get("distance_to_dest", 0.0) or 0.0) / 1000.0
+            logging.info(
+                "Navigation calculation complete: %d GPS nodes -> %d detailed map points, "
+                "match %.1f%%, remaining %.2f km, elapsed %.2fs.",
+                len(points), resolved, match * 100.0, distance_km,
+                time.monotonic() - self._recalc_started)
         elif elapsed > 15.0:
             resolved = int(self.sdk.get("game_route_resolved_points", 0) or 0)
             self.sdk.set("navigation_progress", 0.0)
@@ -480,6 +493,11 @@ class Plugin(BasePlugin):
                 f"Trasu sa nepodarilo spojiť · {len(points)} GPS bodov, {resolved} mapových bodov")
             self.sdk.set("navigation_recalculating", False)
             self._last_recalc_stage = "failed"
+            logging.error(
+                "Navigation calculation failed: %d GPS nodes, %d resolved map points, "
+                "match %.1f%%, elapsed %.2fs.",
+                len(points), resolved, match * 100.0,
+                time.monotonic() - self._recalc_started)
 
     # --- Tick -----------------------------------------------------------------
     def on_tick(self, delta_time: float):
@@ -508,7 +526,8 @@ class Plugin(BasePlugin):
             self._roads_t = 0.0
             try:
                 roads = self.road_net.hud_segments_3d_near(pos)
-                self.sdk.set("map_road_segments", [[list(a), list(b)] for a, b in roads])
+                self.sdk.set("map_road_segments",
+                             [[list(a), list(b), kind] for a, b, kind in roads])
             except Exception as e:
                 logging.debug("HUD road geometry error: %s", e)
 

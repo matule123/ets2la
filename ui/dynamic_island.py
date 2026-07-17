@@ -162,7 +162,9 @@ class DynamicIsland(QWidget):
                 + "font-size:12px;font-weight:700;border:none;")
             self.progress.show()
             self._slide_in()
-            self._hide_timer.start(2600)
+            # Keep the outcome readable. Previously the calculation vanished
+            # before the user could see whether it succeeded or failed.
+            self._hide_timer.start(6000 if succeeded else 10000)
             return True
         return False
 

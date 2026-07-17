@@ -561,7 +561,7 @@ class RoadNetwork:
                         distance2 = min((a[0]-px)**2+(a[1]-pz)**2,
                                         (b[0]-px)**2+(b[1]-pz)**2)
                         if distance2 <= radius*radius:
-                            ranked.append((distance2, a, b))
+                            ranked.append((distance2, a, b, "road"))
         # Prefab lanes already have exact horizontal curves. Use the nearest
         # connected-node elevation; their short length makes this a good visual
         # approximation while keeping bridges separated from ground roads.
@@ -572,9 +572,9 @@ class RoadNetwork:
             bh = self.node_alt.get(uid_b, ah)
             distance2 = min((a[0]-px)**2+(a[1]-pz)**2,
                             (b[0]-px)**2+(b[1]-pz)**2)
-            ranked.append((distance2, (a[0], a[1], ah), (b[0], b[1], bh)))
+            ranked.append((distance2, (a[0], a[1], ah), (b[0], b[1], bh), "lane"))
         ranked.sort(key=lambda item: item[0])
-        return [(a, b) for _, a, b in ranked[:limit]]
+        return [(a, b, kind) for _, a, b, kind in ranked[:limit]]
 
     def refine_route(self, uids, progress=None):
         """Replace prefab entrance chords in a GPS UID route with nav curves."""
@@ -841,7 +841,7 @@ class RoadNetwork:
     def visual_segments_near(self, pos, radius: float = 800.0, limit: int = 12000):
         """Curved roads and true prefab geometry for the live map."""
         return [((a[0], a[1]), (b[0], b[1]))
-                for a, b in self.hud_segments_3d_near(pos, radius, limit)]
+                for a, b, _kind in self.hud_segments_3d_near(pos, radius, limit)]
 
     def hud_segments_near(self, pos, radius: float = 170.0, limit: int = 320):
         """Return bounded nearby road geometry for the perspective HUD."""
