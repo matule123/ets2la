@@ -404,7 +404,7 @@ class Plugin(BasePlugin):
             idx = route.tracking_index(pos, heading)
             remaining = [list(p) for p in route.points[idx:]]
             self.sdk.set("map_path", remaining)
-            self.sdk.set("distance_to_dest", route.distance_to_end(pos))
+            self.sdk.set("distance_to_dest", route.distance_to_end(pos, heading))
             return remaining[:60]
 
         # Do not invent a route from whichever road edge happens to be ahead.
@@ -563,7 +563,7 @@ class Plugin(BasePlugin):
                                                lane_offset_m=self._lane_offset())
             self.sdk.set("nav_steering", float(steer))
             self.sdk.set("nav_active", True)
-            self.sdk.set("distance_to_dest", self.active_route.distance_to_end(pos))
+            self.sdk.set("distance_to_dest", self.active_route.distance_to_end(pos, heading))
             # Publish the upcoming path curvature so the autopilot can brake
             # BEFORE a sharp bend (anticipatory) instead of reacting to its own
             # steering mid-corner. Radius in metres; large = straight.

@@ -174,13 +174,37 @@ class Route:
         # 2D cross product of segment dir and (pos - a), normalised.
         return ((pos[0] - ax) * dz - (pos[1] - az) * dx) / seg
 
-    def distance_to_end(self, pos: Point) -> float:
+    def distance_to_end(self, pos: Point, heading: float = None) -> float:
         """Path-length distance from ``pos`` (snapped to nearest waypoint) to the end."""
         if not self.points:
             return 0.0
-        idx = self.tracking_index(pos, heading)
-        total = math.hypot(self.points[idx][0] - pos[0], self.points[idx][1] - pos[1])
-        for i in range(idx, len(self.points) - 1):
+        # Heading-aware matching avoids selecting the wrong arm of a
+        # roundabout. Recorded routes without a heading retain nearest-point
+        # behaviour. The old code referenced an undefined ``heading`` variable
+        # here and crashed the whole map plugin on every calculation.
+        if len(self.points) == 1:
+            return math.dist(pos, self.points[0])
+        if heading is not None:
+            idx = self.tracking_index(pos, heading)
+        else:
+            # Find the nearest segment, not merely the nearest waypoint.
+            def segment_distance2(i):
+                ax, az = self.points[i]
+                bx, bz = self.points[i + 1]
+                dx, dz = bx - ax, bz - az
+                length2 = dx*dx + dz*dz
+                t = (0.0 if length2 < 1e-9 else
+                     _clamp(((pos[0]-ax)*dx + (pos[1]-az)*dz) / length2, 0.0, 1.0))
+                return (pos[0] - (ax+t*dx))**2 + (pos[1] - (az+t*dz))**2
+            idx = min(range(len(self.points) - 1), key=segment_distance2)
+        ax, az = self.points[idx]
+        bx, bz = self.points[idx + 1]
+        dx, dz = bx - ax, bz - az
+        length2 = dx*dx + dz*dz
+        t = (0.0 if length2 < 1e-9 else
+             _clamp(((pos[0]-ax)*dx + (pos[1]-az)*dz) / length2, 0.0, 1.0))
+        total = math.hypot(dx, dz) * (1.0 - t)
+        for i in range(idx + 1, len(self.points) - 1):
             ax, az = self.points[i]
             bx, bz = self.points[i + 1]
             total += math.hypot(bx - ax, bz - az)

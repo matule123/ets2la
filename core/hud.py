@@ -66,6 +66,9 @@ class UltraPilotHUD(QWidget):
         self._shown = False   # becomes True once the UI process signals ready
         self._last_nav_path = []
         self._last_nav_path_at = 0.0
+        self._rear_cam_until = 0.0
+        self._rear_cam_side = "off"
+        self._rear_vehicle_smooth = {}
         self.init_ui()
 
     def init_ui(self):
@@ -150,6 +153,16 @@ class UltraPilotHUD(QWidget):
             live_path = self._last_nav_path
         else:
             live_path = []
+        raw_blinker = s.get("active_blinker") or "off"
+        explicit_rear = bool(s.get("rear_cam", False))
+        if raw_blinker in ("left", "right"):
+            self._rear_cam_side = raw_blinker
+            self._rear_cam_until = now + 2.5
+        elif explicit_rear:
+            self._rear_cam_until = now + 0.5
+        rear_visible = explicit_rear or now < self._rear_cam_until
+        if not rear_visible:
+            self._rear_cam_side = "off"
         return {
             "state": state,
             "speed_kmh": abs(speed) * 3.6 if abs(speed) < 200 else abs(speed),
@@ -169,8 +182,8 @@ class UltraPilotHUD(QWidget):
             # Rear-view camera: shown when a turn signal is active (left/right)
             # OR when the dedicated rear_cam flag is set. Gives a glance behind
             # during lane changes, like a real side/rear mirror inset.
-            "blinker": (s.get("active_blinker") or "off"),
-            "rear_cam": bool(s.get("rear_cam", False)),
+            "blinker": self._rear_cam_side if rear_visible else raw_blinker,
+            "rear_cam": rear_visible,
             # Total lane count on the road under the truck (drives the road
             # width in the 3D scene — 2 lanes default when unknown).
             "lanes": int(s.get("road_lanes", 2) or 2),
@@ -923,7 +936,14 @@ class UltraPilotHUD(QWidget):
             a, l = to_truck(v["x"], v["z"])
             behind = -a                       # behind the truck = positive
             if 2 < behind < 60 and abs(l) < 16:
-                vehs.append((behind, l, v))
+                key = v.get("id", id(v))
+                old = self._rear_vehicle_smooth.get(key, (behind, l))
+                # Low-pass telemetry jitter so rear vehicles move continuously
+                # rather than jumping between SDK samples.
+                smooth = (old[0] * 0.72 + behind * 0.28,
+                          old[1] * 0.72 + l * 0.28)
+                self._rear_vehicle_smooth[key] = smooth
+                vehs.append((smooth[0], smooth[1], v))
         vehs.sort(key=lambda t: t[0])         # nearest-behind first (drawn last)
         for behind, l, v in vehs:
             self._draw_box_back(qp, cam, behind, l, v, proj_back)
