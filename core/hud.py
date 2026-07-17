@@ -216,6 +216,7 @@ class UltraPilotHUD(QWidget):
             # Total lane count on the road under the truck (drives the road
             # width in the 3D scene — 2 lanes default when unknown).
             "lanes": int(s.get("road_lanes", 2) or 2),
+            "vision_lane_offset": float(s.get("lane_offset", 0.0) or 0.0),
         }
 
     # --- Painting -------------------------------------------------------------
@@ -391,10 +392,18 @@ class UltraPilotHUD(QWidget):
                 {"id": 3, "x": -1.0, "z": -88.0, "type": "car", "width": 1.9, "length": 4.7},
             ]
 
-        def to_truck(wx, wz):
+        # Camera perception is the only source that knows the truck's position
+        # *inside* the visible lane. Align display-only road/traffic geometry
+        # with it; navigation remains in its real world coordinates below.
+        road_scene_shift = max(-2.8, min(2.8,
+            -float(d.get("vision_lane_offset", 0.0) or 0.0) * 8.0))
+
+        def to_truck(wx, wz, align_road=True):
             dx, dz = wx - pos[0], wz - pos[1]
             ahead = dx * (-math.sin(h)) + dz * (-math.cos(h))
             lateral = dx * math.cos(h) - dz * math.sin(h)
+            if align_road:
+                lateral += road_scene_shift
             return ahead, lateral
 
         if pos:
@@ -500,10 +509,11 @@ class UltraPilotHUD(QWidget):
                 if slength < .15:
                     continue
                 sna, snl = -sdl / slength, sda / slength
-                # Adjacent prefab lane centre curves are about one lane apart.
-                # A 2.15 m half-width makes their underlays overlap into one
-                # solid junction surface and closes holes between road objects.
-                shalf = (2.15 if skind == "lane" else
+                # Some datasets publish a straight carriageway as adjacent
+                # prefab lane-centre curves spaced up to ~5.5 m apart.  The old
+                # 2.15 m ribbons left long black cuts even on a straight road.
+                # Overlap the display-only underlay; markings are drawn later.
+                shalf = (3.05 if skind == "lane" else
                          max(1, min(6, slanes)) * 3.6 / 2.0 + .98)
                 surface_edges = []
                 for side in (-1.0, 1.0):
@@ -551,7 +561,7 @@ class UltraPilotHUD(QWidget):
                         # Draw one round-capped surface only. Giving every
                         # individual trajectory its own polygon and two white
                         # edges sliced the underlying road into rectangles.
-                        lane_half = 1.92
+                        lane_half = 2.92
                         lane_edges = []
                         for side in (-1.0, 1.0):
                             ea = self._project(a[0] + na * lane_half * side,
@@ -694,7 +704,7 @@ class UltraPilotHUD(QWidget):
                             qp.drawLine(ma, mb)
 
             path = d["nav_path"]
-            transformed = [to_truck(px, pz) for px, pz in path]
+            transformed = [to_truck(px, pz, align_road=False) for px, pz in path]
             # Start at the route point nearest to the truck. Never force a line
             # from (0, 0) to a distant/stale GPS node: that created the giant
             # horizontal/diagonal blue strokes in the screenshot.

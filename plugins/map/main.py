@@ -561,6 +561,36 @@ class Plugin(BasePlugin):
             return []
         _score, _distance, ri, projected, _alignment = best
         remaining = [projected] + remaining[ri + 1:]
+        # Remove a single short backtracking node from otherwise continuous
+        # GPS geometry. Prefab joins occasionally contain A->B->C where B is a
+        # duplicate/reversed connector; rejecting the complete route produced
+        # false 153-degree errors on a visually straight road.
+        cleaned = list(remaining)
+        cleaned_changed = True
+        while cleaned_changed and len(cleaned) >= 3:
+            cleaned_changed = False
+            for point_index in range(1, len(cleaned) - 1):
+                a, b, c = (cleaned[point_index - 1], cleaned[point_index],
+                           cleaned[point_index + 1])
+                ab = (b[0] - a[0], b[1] - a[1])
+                bc = (c[0] - b[0], c[1] - b[1])
+                ab_len, bc_len = math.hypot(*ab), math.hypot(*bc)
+                if ab_len < 0.2 or bc_len < 0.2:
+                    del cleaned[point_index]
+                    cleaned_changed = True
+                    break
+                cosine = max(-1.0, min(1.0,
+                    (ab[0] * bc[0] + ab[1] * bc[1]) / (ab_len * bc_len)))
+                turn = math.degrees(math.acos(cosine))
+                shortcut = math.dist(a, c)
+                if turn > 120.0 and min(ab_len, bc_len) <= 24.0 and shortcut <= 40.0:
+                    logging.info(
+                        "Navigation: removed reversed prefab connector (%.0f degrees).",
+                        turn)
+                    del cleaned[point_index]
+                    cleaned_changed = True
+                    break
+        remaining = cleaned
         # Native GPS/map nodes describe the carriageway reference line, which
         # is often the median/road centre rather than the centre of the lane
         # occupied by the truck.  Measure the truck's real lateral displacement
@@ -578,7 +608,22 @@ class Plugin(BasePlugin):
                 # More than one normal lane width means localisation selected
                 # the wrong carriageway; do not hide that with a huge shift.
                 lane_shift = max(-5.25, min(5.25, lane_shift))
+                # Vision supplies the missing within-lane position. Positive
+                # lane_offset means the lane centre is to the truck's left.
+                # Convert it to metres and blend toward that centre farther
+                # ahead, while keeping the first point exactly under the cab.
+                try:
+                    vision_offset = float(self.sdk.get("lane_offset", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    vision_offset = 0.0
+                desired_lateral = max(-2.2, min(2.2, -vision_offset * 8.0))
+                truck_right_x, truck_right_z = math.cos(heading), -math.sin(heading)
+                normal_screen_sign = (normal_x * truck_right_x
+                                      + normal_z * truck_right_z)
+                vision_shift = (desired_lateral / normal_screen_sign
+                                if abs(normal_screen_sign) > 0.35 else 0.0)
                 aligned = []
+                travelled = 0.0
                 for point_index, point in enumerate(remaining):
                     before = remaining[max(0, point_index - 1)]
                     after = remaining[min(len(remaining) - 1, point_index + 1)]
@@ -593,9 +638,13 @@ class Plugin(BasePlugin):
                     # it cuts across lanes and eventually reaches the median.
                     local_normal_x = -local_z / local_length
                     local_normal_z = local_x / local_length
+                    if point_index:
+                        travelled += math.dist(remaining[point_index - 1], point)
+                    centre_blend = min(1.0, travelled / 32.0)
+                    total_shift = lane_shift + vision_shift * centre_blend
                     aligned.append((
-                        point[0] + local_normal_x * lane_shift,
-                        point[1] + local_normal_z * lane_shift,
+                        point[0] + local_normal_x * total_shift,
+                        point[1] + local_normal_z * total_shift,
                     ))
                 remaining = aligned
                 # Remove the tiny residual created when the closest point was
