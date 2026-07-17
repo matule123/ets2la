@@ -335,9 +335,12 @@ class Plugin(BasePlugin):
             now = time.monotonic()
             if now - self._last_route_progress_log >= 1.0:
                 self._last_route_progress_log = now
-                logging.info("Navigation calculation: section %d/%d, searched nodes=%d, elapsed=%.1fs",
-                             done, total, expanded,
-                             now - self._recalc_started)
+                message = (f"Výpočet trasy: úsek {done}/{total}, "
+                           f"prehľadaných {expanded} uzlov, "
+                           f"čas {now - self._recalc_started:.1f} s")
+                logging.info(message)
+                self.sdk.set("navigation_log_event", {
+                    "seq": time.time_ns(), "level": "INFO", "message": message})
 
         if cache_signature == self._resolved_route_cache_signature:
             remaining = list(self._resolved_route_cache)
@@ -368,6 +371,24 @@ class Plugin(BasePlugin):
                 break
             continuous.append(point)
         remaining = continuous
+        # SDK route nodes are sparse and may begin tens of metres ahead. Join
+        # the detailed route to the truck along the currently occupied road so
+        # HUD/AR never start with a floating segment or a straight screen chord.
+        if remaining and math.dist(pos, remaining[0]) > 6.0:
+            approach = self.road_net.path_ahead(pos, heading, length=220.0,
+                                                max_steps=120)
+            if len(approach) >= 2:
+                best = None
+                for ai, ap in enumerate(approach):
+                    for ri, rp in enumerate(remaining[:80]):
+                        distance = math.dist(ap, rp)
+                        if best is None or distance < best[0]:
+                            best = (distance, ai, ri)
+                if best and best[0] <= 25.0:
+                    _distance, ai, ri = best
+                    remaining = approach[:ai + 1] + remaining[ri:]
+            if math.dist(pos, remaining[0]) <= 25.0:
+                remaining.insert(0, tuple(pos))
         self.sdk.set("game_route_resolved_points", len(remaining))
         self.sdk.set("game_route_points", [list(p) for p in remaining])
         return remaining
@@ -454,6 +475,9 @@ class Plugin(BasePlugin):
                 self._last_recalc_stage = stage
                 self._last_navigation_status_log = now
                 logging.info("Navigation [%d%%]: %s", int(progress * 100), status)
+                self.sdk.set("navigation_log_event", {
+                    "seq": time.time_ns(), "level": "INFO",
+                    "message": f"Navigation [{int(progress * 100)}%]: {status}"})
 
         request = self.sdk.get("nav_recalc_request")
         if request and request != self._last_recalc_request:
@@ -513,6 +537,10 @@ class Plugin(BasePlugin):
                 "match %.1f%%, remaining %.2f km, elapsed %.2fs.",
                 len(points), resolved, match * 100.0, distance_km,
                 time.monotonic() - self._recalc_started)
+            self.sdk.set("navigation_log_event", {
+                "seq": time.time_ns(), "level": "INFO",
+                "message": (f"Navigation hotová: {len(points)} GPS uzlov, "
+                            f"{resolved} mapových bodov, {distance_km:.2f} km")})
             logging.info("Navigation route published to HUD, live map and AR overlay (%d visible points).",
                          len(path[:60]))
         elif elapsed > 15.0:
@@ -530,6 +558,9 @@ class Plugin(BasePlugin):
                 "match %.1f%%, elapsed %.2fs.",
                 len(points), resolved, match * 100.0,
                 time.monotonic() - self._recalc_started)
+            self.sdk.set("navigation_log_event", {
+                "seq": time.time_ns(), "level": "ERROR",
+                "message": f"Chyba výpočtu navigácie: {reason}"})
             logging.error("Navigation route was not published: %s. HUD/live map remain empty for safety.",
                           reason)
 

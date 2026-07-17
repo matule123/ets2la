@@ -74,6 +74,7 @@ class UltraPilotEngine:
         self._last_game_destination = ""
         self._last_route_signature = None
         self._had_game_destination = False
+        self._last_navigation_log_seq = None
         # Track autopilot on/off edges so we release controls only once on disable.
         self._was_active = False
         try:
@@ -451,6 +452,16 @@ class UltraPilotEngine:
             # last so a click always wins over a coincident N-key edge.
             self._check_hotkey()
             self._process_autopilot_command()
+            # Navigation runs in a child process whose console output can be
+            # hidden by Windows. Relay its user-facing milestones through the
+            # main Engine logger so the runtime console always shows them.
+            nav_event = self.shared_state.get("navigation_log_event") or {}
+            nav_seq = nav_event.get("seq") if isinstance(nav_event, dict) else None
+            if nav_seq is not None and nav_seq != self._last_navigation_log_seq:
+                self._last_navigation_log_seq = nav_seq
+                message = str(nav_event.get("message", "Navigation update"))
+                level = str(nav_event.get("level", "INFO")).upper()
+                (logging.error if level == "ERROR" else logging.info)(message)
 
             # 1. Telemetry
             if self.telemetry.update():
