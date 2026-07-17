@@ -983,9 +983,84 @@ class UltraPilotHUD(QWidget):
         self._ensure_on_screen()
 
 
+class HUDDragHandle(QWidget):
+    """Small interactive grip for an otherwise fully click-through HUD.
+
+    Making the whole HUD draggable would capture clicks intended for ETS2's map.
+    This separate tool window is therefore the only mouse-active HUD area.
+    """
+
+    W, H = 58, 22
+
+    def __init__(self, hud):
+        super().__init__(None)
+        self.hud = hud
+        self._offset = None
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint |
+                            Qt.WindowType.WindowStaysOnTopHint |
+                            Qt.WindowType.Tool)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedSize(self.W, self.H)
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        self.setToolTip("Presunúť HUD")
+        self._sync_timer = QTimer(self)
+        self._sync_timer.timeout.connect(self._sync)
+        self._sync_timer.start(80)
+        self.hide()
+
+    def _target_position(self):
+        return QPointF(self.hud.x() + (self.hud.width() - self.W) / 2,
+                       self.hud.y() + 7).toPoint()
+
+    def _sync(self):
+        if self.hud._shown and self.hud.isVisible():
+            if self._offset is None:
+                self.move(self._target_position())
+            if not self.isVisible():
+                self.show()
+            self.raise_()
+        elif self.isVisible():
+            self.hide()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(255, 255, 255, 35), 1))
+        painter.setBrush(QColor(36, 39, 45, 225))
+        painter.drawRoundedRect(QRectF(0.5, 0.5, self.W - 1, self.H - 1), 10, 10)
+        painter.setPen(QPen(QColor(210, 214, 220, 210), 1.6))
+        for y in (8, 11, 14):
+            painter.drawLine(21, y, 37, y)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._offset = (event.globalPosition().toPoint()
+                            - self.hud.frameGeometry().topLeft())
+            self.grabMouse()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if (self._offset is not None
+                and event.buttons() & Qt.MouseButton.LeftButton):
+            self.hud.move(event.globalPosition().toPoint() - self._offset)
+            self.hud._ensure_on_screen()
+            self.move(self._target_position())
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if self._offset is not None:
+            self.releaseMouse()
+        self._offset = None
+        self.hud._ensure_on_screen()
+        self.move(self._target_position())
+        event.accept()
+
+
 def run_hud(shared_state):
     app = QApplication(sys.argv)
     hud = UltraPilotHUD(shared_state)
+    # Keep a strong reference for the life of the HUD process.
+    hud.drag_handle = HUDDragHandle(hud)
     # NOTE: do NOT call hud.show() here. The HUD starts hidden and the _tick()
     # poll waits for the ``ui_ready`` shared-state flag (set by the main UI's
     # showEvent) before showing itself. This guarantees the order

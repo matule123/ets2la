@@ -56,6 +56,13 @@ class WindowDragArea(QFrame):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            # Let Windows perform the move.  Manual QWidget.move() is unreliable
+            # for frameless windows on high-DPI/multi-monitor desktops.
+            handle = self.window.windowHandle()
+            if handle is not None and handle.startSystemMove():
+                self._offset = None
+                event.accept()
+                return
             self._offset = (event.globalPosition().toPoint()
                             - self.window.frameGeometry().topLeft())
             event.accept()
