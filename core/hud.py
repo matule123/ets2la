@@ -151,6 +151,7 @@ class UltraPilotHUD(QWidget):
             "throttle": float(s.get("ctl_throttle", 0.0) or 0.0),
             "brake": float(s.get("ctl_brake", 0.0) or 0.0),
             "pos": s.get("truck_world_pos"),
+            "altitude": float(s.get("truck_altitude", 0.0) or 0.0),
             "heading": s.get("truck_heading", 0.0) or 0.0,
             "traffic": s.get("traffic", []) or [],
             "light": s.get("traffic_light"),
@@ -356,29 +357,35 @@ class UltraPilotHUD(QWidget):
                             return None
                         t1 = min(t1, r)
                 return ((a[0] + da * t0, a[1] + dl * t0),
-                        (a[0] + da * t1, a[1] + dl * t1))
+                        (a[0] + da * t1, a[1] + dl * t1), t0, t1)
 
             nearby = []
             for segment in d.get("road_segments", []):
                 try:
                     a = to_truck(float(segment[0][0]), float(segment[0][1]))
                     b = to_truck(float(segment[1][0]), float(segment[1][1]))
+                    ah = (float(segment[0][2]) - d["altitude"]
+                          if len(segment[0]) > 2 else 0.0)
+                    bh = (float(segment[1][2]) - d["altitude"]
+                          if len(segment[1]) > 2 else 0.0)
                 except (TypeError, ValueError, IndexError):
                     continue
                 clipped = clip_road(a, b)
                 if clipped is None:
                     continue
-                a, b = clipped
-                nearby.append((max(a[0], b[0]), a, b))
+                a, b, t0, t1 = clipped
+                clipped_ah = ah + (bh-ah)*t0
+                clipped_bh = ah + (bh-ah)*t1
+                nearby.append((max(a[0], b[0]), a, b, clipped_ah, clipped_bh))
             nearby.sort(reverse=True, key=lambda item: item[0])
-            for _, a, b in nearby:
+            for _, a, b, ah, bh in nearby:
                 da, dl = b[0] - a[0], b[1] - a[1]
                 length = math.hypot(da, dl)
                 if length < 0.15:
                     continue
                 na, nl = -dl / length, da / length
-                pa = self._project(a[0], a[1], view)
-                pb = self._project(b[0], b[1], view)
+                pa = self._project(a[0], a[1], view, ah)
+                pb = self._project(b[0], b[1], view, bh)
                 if pa and pb:
                     # ETS2LA-style schematic geometry: two precise road edges
                     # and a faint centre marking. Filled rectangles for every
@@ -388,9 +395,9 @@ class UltraPilotHUD(QWidget):
                     edges = []
                     for side in (-1.0, 1.0):
                         ea = self._project(a[0] + na * half * side,
-                                           a[1] + nl * half * side, view)
+                                           a[1] + nl * half * side, view, ah)
                         eb = self._project(b[0] + na * half * side,
-                                           b[1] + nl * half * side, view)
+                                           b[1] + nl * half * side, view, bh)
                         if ea and eb:
                             edges.append((ea, eb))
                     edge_pen = QPen(QColor(175, 181, 190, 150), 1.35,

@@ -471,6 +471,27 @@ class UltraPilotEngine:
                     and abs(route_distance - prev_distance) > 80.0)
                 first_route = bool(route_distance > 0 and prev_distance in (None, 0))
                 planned_items = self.ets2la_route.read()
+                # The native buffer can briefly keep the previous destination
+                # after the player changes the waypoint. Compare its remaining
+                # distance with the authoritative ETS2 telemetry before using
+                # any UID from it (e.g. stale 11 km buffer vs new 123 km GPS).
+                buffer_distance = 0.0
+                try:
+                    buffer_distance = max(float(item.get("distance", 0.0) or 0.0)
+                                          for item in planned_items)
+                except (TypeError, ValueError):
+                    buffer_distance = 0.0
+                buffer_stale = bool(
+                    route_distance > 0 and buffer_distance > 0
+                    and abs(buffer_distance - route_distance)
+                    > max(2000.0, route_distance * 0.18))
+                self.shared_state.set("route_buffer_distance", buffer_distance)
+                self.shared_state.set("route_buffer_stale", buffer_stale)
+                if buffer_stale:
+                    logging.warning(
+                        "Navigation: ignoring stale SDK route %.1f km; game GPS is %.1f km.",
+                        buffer_distance / 1000.0, route_distance / 1000.0)
+                    planned_items = []
                 planned_uids = [int(item["uid"]) for item in planned_items
                                 if isinstance(item, dict) and item.get("uid")]
                 route_signature = None
@@ -517,6 +538,7 @@ class UltraPilotEngine:
                     "speed": truck.get("speed", 0),
                     # World pose for coordinate-based navigation (map plugin).
                     "truck_world_pos": (truck.get("x", 0.0), truck.get("z", 0.0)),
+                    "truck_altitude": float(truck.get("y", 0.0) or 0.0),
                     "truck_heading": truck.get("rotation", 0.0),
                     "truck_speed_ms": truck.get("speed", 0.0),
                     # Destination city of the current job (for the gantry sign).

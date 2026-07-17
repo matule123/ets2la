@@ -278,8 +278,10 @@ class Plugin(BasePlugin):
             return []
         self.sdk.set("navigation_unreliable", False)
 
-        # Route buffers can be ordered either way. At the closest node choose
-        # the direction whose next segment agrees with the truck heading.
+        # ETS2LA route metadata is ordered by decreasing remaining distance:
+        # first item is near the truck, last item is the destination. Prefer
+        # that authoritative order; heading-only guessing selected the wrong
+        # direction on roundabouts and parallel roads.
         route = Route(matched)
         idx = route.tracking_index(pos, heading)
         fx, fz = -math.sin(heading), -math.cos(heading)
@@ -295,7 +297,13 @@ class Plugin(BasePlugin):
         orientation_signature = (len(uids), int(uids[0]), int(uids[-1]))
         if orientation_signature != self._route_orientation_signature:
             self._route_orientation_signature = orientation_signature
-            self._route_reversed = direction_score(idx - 1) > direction_score(idx + 1)
+            meta = self.sdk.get("game_route_meta", []) or []
+            distances = [float(item.get("distance", 0.0) or 0.0)
+                         for item in meta if isinstance(item, dict)]
+            if len(distances) >= 2 and abs(distances[0] - distances[-1]) > 1.0:
+                self._route_reversed = distances[0] < distances[-1]
+            else:
+                self._route_reversed = direction_score(idx - 1) > direction_score(idx + 1)
         if self._route_reversed:
             matched.reverse()
             valid_uids.reverse()
@@ -407,7 +415,18 @@ class Plugin(BasePlugin):
             self.sdk.set("navigation_status", "Kontrolujem cieľ a mapové dáta…")
             return
         if len(points) < 2:
-            if elapsed > 6.0:
+            stale = bool(self.sdk.get("route_buffer_stale", False))
+            if stale:
+                game_km = float(self.sdk.get("game_route_distance", 0.0) or 0.0) / 1000.0
+                old_km = float(self.sdk.get("route_buffer_distance", 0.0) or 0.0) / 1000.0
+                self.sdk.set("navigation_progress", 0.36)
+                self.sdk.set(
+                    "navigation_status",
+                    f"Čakám na novú trasu z hry · stará {old_km:.0f} km, cieľ {game_km:.0f} km")
+                # Keep polling while the player closes the world map and ETS2
+                # republishes its route; never fall back to the stale UIDs.
+                return
+            if elapsed > 15.0:
                 fallback = []
                 self.sdk.set("nav_path", [list(p) for p in fallback[:60]])
                 self.sdk.set("navigation_progress", 0.0)
@@ -426,6 +445,10 @@ class Plugin(BasePlugin):
             self.sdk.set("navigation_status", "Trasa prepočítaná · navigácia pripravená")
             self.sdk.set("navigation_recalculating", False)
             logging.info("Navigation: route recalculated (%d planned points).", len(points))
+        elif elapsed > 15.0:
+            self.sdk.set("navigation_progress", 0.0)
+            self.sdk.set("navigation_status", "Trasa nezodpovedá vybranej mape · skontroluj mapové rozhranie")
+            self.sdk.set("navigation_recalculating", False)
 
     # --- Tick -----------------------------------------------------------------
     def on_tick(self, delta_time: float):
@@ -453,7 +476,7 @@ class Plugin(BasePlugin):
         if self._roads_t >= 0.35 and self.road_net is not None and self.road_net.loaded:
             self._roads_t = 0.0
             try:
-                roads = self.road_net.hud_segments_near(pos)
+                roads = self.road_net.hud_segments_3d_near(pos)
                 self.sdk.set("map_road_segments", [[list(a), list(b)] for a, b in roads])
             except Exception as e:
                 logging.debug("HUD road geometry error: %s", e)

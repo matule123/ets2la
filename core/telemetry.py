@@ -78,6 +78,7 @@ class Telemetry:
             "blinkerRight": tb.get("blinkerRightActive", False),
             "rotation": heading,                     # radians (heading)
             "x": tp.get("coordinateX", 0.0),
+            "y": tp.get("coordinateY", 0.0),
             "z": tp.get("coordinateZ", 0.0),
         }
         pos = (tp.get("coordinateX", 0.0), tp.get("coordinateZ", 0.0))

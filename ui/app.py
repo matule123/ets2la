@@ -43,6 +43,39 @@ class MacTitleBar(QFrame):
     def _toggle_maximize(self):
         self.window.showNormal() if self.window.isMaximized() else self.window.showMaximized()
 
+
+class WindowDragArea(QFrame):
+    """Invisible top strip used to move the frameless main window."""
+
+    def __init__(self, window):
+        super().__init__(window.centralWidget())
+        self.window = window
+        self._offset = None
+        self.setStyleSheet("background:transparent;border:none;")
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._offset = (event.globalPosition().toPoint()
+                            - self.window.frameGeometry().topLeft())
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if (self._offset is not None
+                and event.buttons() & Qt.MouseButton.LeftButton
+                and not self.window.isMaximized()):
+            self.window.move(event.globalPosition().toPoint() - self._offset)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self._offset = None
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.window.showNormal() if self.window.isMaximized() else self.window.showMaximized()
+            event.accept()
+
 class Page(QWidget):
     def __init__(self, state):
         super().__init__()
@@ -369,6 +402,9 @@ class UltraPilotApp(QMainWindow):
         main_layout.setSpacing(0)
         root_layout.addWidget(content, 1)
         # No title strip or title text: the dots float directly in the corner.
+        self.drag_area = WindowDragArea(self)
+        self.drag_area.setGeometry(0, 0, central.width(), 34)
+        self.drag_area.raise_()
         self.title_bar = MacTitleBar(self, self._pal)
         self.title_bar.setParent(central)
         self.title_bar.move(central.width() - self.title_bar.width() - 6, 4)
@@ -594,6 +630,9 @@ class UltraPilotApp(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if hasattr(self, "drag_area"):
+            self.drag_area.setGeometry(0, 0, self.centralWidget().width(), 34)
+            self.drag_area.raise_()
         if hasattr(self, "title_bar"):
             self.title_bar.move(self.centralWidget().width()
                                 - self.title_bar.width() - 6, 4)

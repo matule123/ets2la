@@ -19,7 +19,7 @@ import json
 import math
 import logging
 
-CACHE_VERSION = 4  # numeric UIDs + quaternion-accurate prefab curves
+CACHE_VERSION = 5  # exact road curves + elevation-aware HUD geometry
 
 
 def _uid(value):
@@ -30,6 +30,20 @@ def _uid(value):
         return 0
     number = int(str(value), 16)
     return number - (1 << 64) if number >= (1 << 63) else number
+
+
+def _forward_vector(transform):
+    """ETS2 horizontal forward vector from a node/prefab quaternion."""
+    quat = transform.get("rotationQuat") or transform.get("quaternion")
+    if isinstance(quat, (list, tuple)) and len(quat) == 4:
+        qw, qx, qy, qz = (float(value) for value in quat)
+        magnitude = math.sqrt(qw*qw + qx*qx + qy*qy + qz*qz)
+        if magnitude > 1e-9:
+            qw, qx, qy, qz = (value / magnitude for value in (qw, qx, qy, qz))
+            return (-2.0 * (qx*qz + qw*qy),
+                    2.0 * (qx*qx + qy*qy) - 1.0)
+    rotation = float(transform.get("rotation", 0.0) or 0.0)
+    return (-math.sin(rotation), -math.cos(rotation))
 
 try:
     import orjson
@@ -92,6 +106,8 @@ class RoadNetwork:
     def __init__(self):
         self.nodes = {}          # uid -> (x, z)
         self.node_rot = {}       # uid -> map yaw, needed to place prefab curves
+        self.node_alt = {}       # uid -> world elevation
+        self.node_forward = {}   # uid -> quaternion-accurate horizontal tangent
         self.adj = {}            # uid -> [connected uid, ...]  (road graph, from roads.json)
         self.fwd = {}            # uid -> [uid, ...]  forward neighbours (graph.json)
         self.bwd = {}            # uid -> [uid, ...]  backward neighbours (graph.json)
@@ -102,6 +118,7 @@ class RoadNetwork:
         self._seg_grid = {}      # (cx,cz) -> [segment_index, ...]  (both endpoints)
         self.road_looks = {}     # token -> {"type": str, "lanes": int}  (road classification)
         self._road_look_token = {}  # node_uid -> roadLookToken (nearest road's type)
+        self._road_length = {}   # directed endpoint pair -> spline tangent length
         self._prefab_desc = {}   # token -> compact detailed prefab description
         self._prefab_grid = {}   # spatial index of placed prefab instances
         self._prefab_pairs = {}  # unordered endpoint UID pair -> prefab instances
@@ -138,6 +155,8 @@ class RoadNetwork:
                 x, y = float(n["x"]), float(n["y"])
                 self.nodes[uid] = (x, y)
                 self.node_rot[uid] = float(n.get("rotation", 0.0) or 0.0)
+                self.node_alt[uid] = float(n.get("z", 0.0) or 0.0)
+                self.node_forward[uid] = _forward_vector(n)
                 self._ngrid.setdefault(self._cell(x, y), []).append(uid)
         except Exception as e:
             logging.exception("road_network: failed to load nodes: %s", e)
@@ -153,6 +172,8 @@ class RoadNetwork:
                 su, eu = _uid(r.get("startNodeUid")), _uid(r.get("endNodeUid"))
                 a, b = self.nodes.get(su), self.nodes.get(eu)
                 if a and b:
+                    self._road_length[(su, eu)] = float(
+                        r.get("length", math.dist(a, b)) or math.dist(a, b))
                     # Remember the endpoint uids alongside the geometry so that
                     # segment-snapping can recover graph nodes to walk from.
                     self._seg_uids.append((su, eu))
@@ -226,9 +247,10 @@ class RoadNetwork:
                 logging.info("road_network: cache stale — rebuilding.")
                 return False
             data = payload["data"]
-            for k in ("nodes", "node_rot", "adj", "fwd", "bwd", "_ngrid", "segments",
+            for k in ("nodes", "node_rot", "node_alt", "node_forward",
+                      "adj", "fwd", "bwd", "_ngrid", "segments",
                       "_seg_uids", "_grid", "_seg_grid", "_road_look_token",
-                      "road_looks", "_prefab_desc", "_prefab_grid",
+                      "_road_length", "road_looks", "_prefab_desc", "_prefab_grid",
                       "_prefab_pairs", "loaded"):
                 setattr(self, k, data.get(k, getattr(self, k)))
             self.loaded = bool(data.get("loaded", True))
@@ -247,10 +269,12 @@ class RoadNetwork:
                 "sig": self._source_signature(data_dir),
                 "data": {
                     "nodes": self.nodes, "node_rot": self.node_rot,
+                    "node_alt": self.node_alt, "node_forward": self.node_forward,
                     "adj": self.adj, "fwd": self.fwd,
                     "bwd": self.bwd, "_ngrid": self._ngrid, "segments": self.segments,
                     "_seg_uids": self._seg_uids, "_grid": self._grid,
                     "_seg_grid": self._seg_grid, "_road_look_token": self._road_look_token,
+                    "_road_length": self._road_length,
                     "road_looks": self.road_looks,
                     "_prefab_desc": self._prefab_desc,
                     "_prefab_grid": self._prefab_grid,
@@ -314,19 +338,7 @@ class RoadNetwork:
                 turned every tangent by roughly 90 degrees, which produced the
                 star-shaped roads at roundabouts.
                 """
-                quat = transform.get("rotationQuat") or transform.get("quaternion")
-                if isinstance(quat, (list, tuple)) and len(quat) == 4:
-                    qw, qx, qy, qz = (float(value) for value in quat)
-                    magnitude = math.sqrt(qw*qw + qx*qx + qy*qy + qz*qz)
-                    if magnitude > 1e-9:
-                        qw, qx, qy, qz = (value / magnitude
-                                          for value in (qw, qx, qy, qz))
-                        return (-2.0 * (qx*qz + qw*qy),
-                                2.0 * (qx*qx + qy*qy) - 1.0)
-                # Older datasets without quaternions use ETS2's local -Z
-                # convention rather than the usual +X mathematical heading.
-                rotation = float(transform.get("rotation", 0.0) or 0.0)
-                return (-math.sin(rotation), -math.cos(rotation))
+                return _forward_vector(transform)
 
             for raw in _loadf(desc_path):
                 curves = []
@@ -494,6 +506,74 @@ class RoadNetwork:
                                 return result
         return result
 
+    def _road_curve_3d(self, first, second, spacing=5.0):
+        """Exact-ish Hermite centreline for a normal road, including height."""
+        reverse = False
+        tangent_length = self._road_length.get((first, second))
+        if tangent_length is None:
+            tangent_length = self._road_length.get((second, first))
+            reverse = tangent_length is not None
+        if tangent_length is None or first not in self.nodes or second not in self.nodes:
+            return []
+        if reverse:
+            first, second = second, first
+        sx, sz = self.nodes[first]
+        ex, ez = self.nodes[second]
+        sh, eh = self.node_alt.get(first, 0.0), self.node_alt.get(second, 0.0)
+        sdx, sdz = self.node_forward.get(first, (0.0, 0.0))
+        edx, edz = self.node_forward.get(second, (0.0, 0.0))
+        chord = math.hypot(ex-sx, ez-sz)
+        tangent_length = max(chord * 0.45, min(float(tangent_length), chord * 2.5))
+        count = max(4, min(100, int(max(chord, tangent_length) / spacing) + 1))
+        points = []
+        for index in range(count):
+            t = index / (count - 1)
+            t2, t3 = t*t, t*t*t
+            h00, h10 = 2*t3-3*t2+1, t3-2*t2+t
+            h01, h11 = -2*t3+3*t2, t3-t2
+            x = h00*sx + h10*sdx*tangent_length + h01*ex + h11*edx*tangent_length
+            z = h00*sz + h10*sdz*tangent_length + h01*ez + h11*edz*tangent_length
+            height = sh + (eh-sh)*t
+            points.append((x, z, height))
+        if reverse:
+            points.reverse()
+        return points
+
+    def hud_segments_3d_near(self, pos, radius: float = 170.0, limit: int = 420):
+        """Curved road segments with elevation for the perspective HUD."""
+        if not self.loaded or not pos:
+            return []
+        px, pz = pos
+        cx, cz = self._cell(px, pz)
+        rings = int(radius // self.GRID) + 1
+        seen, ranked = set(), []
+        for dx in range(-rings, rings + 1):
+            for dz in range(-rings, rings + 1):
+                for index in self._seg_grid.get((cx+dx, cz+dz), ()):
+                    if index in seen:
+                        continue
+                    seen.add(index)
+                    first, second = self._seg_uids[index]
+                    curve = self._road_curve_3d(first, second)
+                    for a, b in zip(curve, curve[1:]):
+                        distance2 = min((a[0]-px)**2+(a[1]-pz)**2,
+                                        (b[0]-px)**2+(b[1]-pz)**2)
+                        if distance2 <= radius*radius:
+                            ranked.append((distance2, a, b))
+        # Prefab lanes already have exact horizontal curves. Use the nearest
+        # connected-node elevation; their short length makes this a good visual
+        # approximation while keeping bridges separated from ground roads.
+        for a, b in self.prefab_segments_near(pos, radius, limit*2):
+            uid_a = self._nearest_node(a, max_ring=1)
+            uid_b = self._nearest_node(b, max_ring=1)
+            ah = self.node_alt.get(uid_a, 0.0)
+            bh = self.node_alt.get(uid_b, ah)
+            distance2 = min((a[0]-px)**2+(a[1]-pz)**2,
+                            (b[0]-px)**2+(b[1]-pz)**2)
+            ranked.append((distance2, (a[0], a[1], ah), (b[0], b[1], bh)))
+        ranked.sort(key=lambda item: item[0])
+        return [(a, b) for _, a, b in ranked[:limit]]
+
     def refine_route(self, uids):
         """Replace prefab entrance chords in a GPS UID route with nav curves."""
         uids = [_uid(value) for value in uids]
@@ -538,6 +618,17 @@ class RoadNetwork:
                     if math.dist(result[-1], target) > 12.0:
                         break
                     result.append(target)
+            elif ((first, second) in self._road_length
+                  or (second, first) in self._road_length):
+                curve = self._road_curve_3d(first, second)
+                points = [(point[0], point[1]) for point in curve]
+                if points:
+                    if result and math.dist(result[-1], points[-1]) < math.dist(result[-1], points[0]):
+                        points.reverse()
+                    gap = math.dist(result[-1], points[0]) if result else 0.0
+                    if gap > 12.0:
+                        break
+                    result.extend(points[1:] if gap < 1.0 else points)
             elif target is not None:
                 result.append(target)
         return result
@@ -654,12 +745,9 @@ class RoadNetwork:
         return out
 
     def visual_segments_near(self, pos, radius: float = 800.0, limit: int = 12000):
-        """Normal roads plus the true curved geometry inside prefabs."""
-        roads = list(self.segments_near(pos, radius))
-        remaining = max(0, limit - len(roads))
-        if remaining:
-            roads.extend(self.prefab_segments_near(pos, radius, remaining))
-        return roads[:limit]
+        """Curved roads and true prefab geometry for the live map."""
+        return [((a[0], a[1]), (b[0], b[1]))
+                for a, b in self.hud_segments_3d_near(pos, radius, limit)]
 
     def hud_segments_near(self, pos, radius: float = 170.0, limit: int = 320):
         """Return bounded nearby road geometry for the perspective HUD."""
