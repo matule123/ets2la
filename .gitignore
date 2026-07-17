@@ -23,6 +23,7 @@ settings.json
 # Local-only / agent artifacts
 docs/
 .zcode/
+.codex/
 
 # OS / editor
 .DS_Store
