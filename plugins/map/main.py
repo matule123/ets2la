@@ -598,11 +598,19 @@ class Plugin(BasePlugin):
                 previous_vector = vector
                 previous_length = segment_length
         game_distance = float(self.sdk.get("game_route_distance", 0.0) or 0.0)
-        if (game_distance > 100.0
-                and abs(route_length - game_distance)
-                > max(2000.0, game_distance * 0.20)):
-            reason = (f"mapa vypocitala {route_length / 1000.0:.1f} km, "
-                      f"ale herne GPS ukazuje {game_distance / 1000.0:.1f} km")
+        # SCS reports routeDistance in real-world metres, while the map node
+        # coordinates use ETS2/ATS' compressed world.  Outside cities the
+        # scale is roughly 1:19 (and differs in cities), so comparing these
+        # values directly produced the persistent false error
+        # "map 0.8 km, game GPS 15 km".  The SDK value is authoritative for
+        # the UI; the coordinate length is only useful for detecting a wildly
+        # implausible/incomplete geometry.
+        world_scale = (game_distance / route_length
+                       if game_distance > 100.0 and route_length > 1.0 else 0.0)
+        self.sdk.set("game_route_world_scale", world_scale)
+        if game_distance > 100.0 and (world_scale < 0.45 or world_scale > 35.0):
+            reason = (f"neuplna geometria GPS trasy "
+                      f"(mierka 1:{world_scale:.1f})")
             self.sdk.set("navigation_failure_reason", reason)
             self.sdk.set("game_route_points", [])
             self.sdk.set("nav_path", [])
@@ -610,6 +618,11 @@ class Plugin(BasePlugin):
             self.sdk.set("navigation_unreliable", True)
             logging.error("Navigation rejected for safety: %s.", reason)
             return []
+        if game_distance > 100.0:
+            logging.info(
+                "Navigation geometry ready: %.3f map km = %.3f GPS km "
+                "(world scale 1:%.2f).",
+                route_length / 1000.0, game_distance / 1000.0, world_scale)
         # Publish a consistently dense route. SDK UIDs can be kilometres
         # apart, while HUD rendering and steering need regular local samples.
         dense_remaining = []
