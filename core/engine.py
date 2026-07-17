@@ -505,10 +505,9 @@ class UltraPilotEngine:
                     self.shared_state.set("navigation_recalculating", False)
                     self.shared_state.set("navigation_progress", 0.0)
                     self.shared_state.set("navigation_status", "V hernom GPS nie je zvolený cieľ")
-                # ETS2LA's native planned-route buffer is the authoritative GPS
-                # route.  SCS ``routeDistance`` is not guaranteed to describe
-                # that same route (it can remain the old job/waypoint distance),
-                # so a distance mismatch must never discard valid node UIDs.
+                # The live SCS GPS distance shown in the game is authoritative.
+                # A route buffer describing 1.7 km while the GPS shows 31 km is
+                # stale/partial and must never steer or be displayed as complete.
                 buffer_distance = 0.0
                 try:
                     buffer_distance = max(float(item.get("distance", 0.0) or 0.0)
@@ -519,12 +518,17 @@ class UltraPilotEngine:
                     route_distance > 0 and buffer_distance > 0
                     and abs(buffer_distance - route_distance)
                     > max(2000.0, max(route_distance, buffer_distance) * 0.18))
-                buffer_stale = False
+                buffer_stale = distance_disagrees
                 self.shared_state.set("route_buffer_distance", buffer_distance)
                 self.shared_state.set("route_buffer_stale", buffer_stale)
                 self.shared_state.set("route_distance_disagrees", distance_disagrees)
                 planned_uids = [int(item["uid"]) for item in planned_items
                                 if isinstance(item, dict) and item.get("uid")]
+                if buffer_stale:
+                    logging.warning(
+                        "Navigation: rejecting stale SDK route %.1f km; game GPS is %.1f km.",
+                        buffer_distance / 1000.0, route_distance / 1000.0)
+                    planned_uids = []
                 route_signature = None
                 if len(planned_uids) >= 2:
                     # Do not include routeDistance: it changes continuously and

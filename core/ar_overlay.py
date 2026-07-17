@@ -65,6 +65,11 @@ class AROverlay(QWidget):
         if (not self.state.get("ar_enabled", True)
                 or not self.state.get("game_in_truck", False)):
             return
+        if (self.state.get("navigation_unreliable", False)
+                or self.state.get("navigation_recalculating", False)):
+            self._last_path = []
+            self._last_path_at = 0.0
+            return
         pos = self.state.get("truck_world_pos")
         # Use the same real GPS path as the HUD. Keep the last valid path through
         # short shared-memory refresh gaps so the AR ribbon cannot flicker out.
@@ -104,10 +109,21 @@ class AROverlay(QWidget):
         if world and math.dist(tuple(pos), world[0]) <= 8.0:
             world.insert(0, tuple(pos))
         dense = []
+        previous_direction = None
         for a, b in zip(world, world[1:]):
-            distance = math.hypot(b[0] - a[0], b[1] - a[1])
+            vx, vz = b[0] - a[0], b[1] - a[1]
+            distance = math.hypot(vx, vz)
             if distance > 40.0:
-                break
+                return
+            if distance > .8:
+                direction = (vx / distance, vz / distance)
+                if previous_direction is not None:
+                    dot = max(-1.0, min(1.0,
+                              direction[0] * previous_direction[0]
+                              + direction[1] * previous_direction[1]))
+                    if math.degrees(math.acos(dot)) > 52.0:
+                        return
+                previous_direction = direction
             samples = max(1, min(24, int(distance / 3.0)))
             for index in range(samples):
                 t = index / samples
@@ -130,7 +146,7 @@ class AROverlay(QWidget):
                  if 7.0 < ahead < 145.0 and abs(lateral) < corridor else None)
             if p:
                 if not (-20.0 <= p.x() <= self.width() + 20.0
-                        and -20.0 <= p.y() <= self.height() + 20.0):
+                        and self.height() * .40 <= p.y() <= self.height() * .98):
                     p = None
             if p:
                 if (pts and math.hypot(p.x() - pts[-1].x(),

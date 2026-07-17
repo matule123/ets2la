@@ -431,7 +431,12 @@ class Plugin(BasePlugin):
             return []
         _score, _distance, ri, projected, _alignment = best
         remaining = [projected] + remaining[ri + 1:]
+        previous_vector = None
+        route_length = 0.0
         for a, b in zip(remaining, remaining[1:]):
+            vx, vz = b[0] - a[0], b[1] - a[1]
+            segment_length = math.hypot(vx, vz)
+            route_length += segment_length
             if math.dist(a, b) > 40.0:
                 reason = f"nespojity usek GPS trasy {math.dist(a, b):.1f} m"
                 self.sdk.set("navigation_failure_reason", reason)
@@ -441,6 +446,39 @@ class Plugin(BasePlugin):
                 self.sdk.set("navigation_unreliable", True)
                 logging.error("Navigation rejected for safety: %s.", reason)
                 return []
+            if segment_length > 0.8:
+                vector = (vx / segment_length, vz / segment_length)
+                if previous_vector is not None:
+                    dot = max(-1.0, min(1.0,
+                              previous_vector[0] * vector[0]
+                              + previous_vector[1] * vector[1]))
+                    turn_degrees = math.degrees(math.acos(dot))
+                    # Detailed prefab/road curves cannot make an instantaneous
+                    # right angle. Such a corner is a fake bridge between two
+                    # unrelated branches and caused the blue stair-step line.
+                    if turn_degrees > 52.0:
+                        reason = f"neplatny skok smeru GPS trasy {turn_degrees:.0f} stupnov"
+                        self.sdk.set("navigation_failure_reason", reason)
+                        self.sdk.set("game_route_points", [])
+                        self.sdk.set("nav_path", [])
+                        self.sdk.set("nav_active", False)
+                        self.sdk.set("navigation_unreliable", True)
+                        logging.error("Navigation rejected for safety: %s.", reason)
+                        return []
+                previous_vector = vector
+        game_distance = float(self.sdk.get("game_route_distance", 0.0) or 0.0)
+        if (game_distance > 100.0
+                and abs(route_length - game_distance)
+                > max(2000.0, game_distance * 0.20)):
+            reason = (f"mapa vypocitala {route_length / 1000.0:.1f} km, "
+                      f"ale herne GPS ukazuje {game_distance / 1000.0:.1f} km")
+            self.sdk.set("navigation_failure_reason", reason)
+            self.sdk.set("game_route_points", [])
+            self.sdk.set("nav_path", [])
+            self.sdk.set("nav_active", False)
+            self.sdk.set("navigation_unreliable", True)
+            logging.error("Navigation rejected for safety: %s.", reason)
+            return []
         self.sdk.set("navigation_unreliable", False)
         self.sdk.set("game_route_resolved_points", len(remaining))
         self.sdk.set("game_route_points", [list(p) for p in remaining])
@@ -510,7 +548,12 @@ class Plugin(BasePlugin):
             idx = route.tracking_index(pos, heading)
             remaining = [list(p) for p in route.points[idx:]]
             self.sdk.set("map_path", remaining)
-            self.sdk.set("distance_to_dest", route.distance_to_end(pos, heading))
+            # Display exactly the distance visible in ETS2 GPS. The geometric
+            # polyline length is only a validation aid, never the UI authority.
+            game_distance = float(self.sdk.get("game_route_distance", 0.0) or 0.0)
+            self.sdk.set("distance_to_dest",
+                         game_distance if game_distance > 0
+                         else route.distance_to_end(pos, heading))
             return remaining[:60]
 
         # Do not invent a route from whichever road edge happens to be ahead.
