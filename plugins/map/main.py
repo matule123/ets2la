@@ -525,7 +525,9 @@ class Plugin(BasePlugin):
         if self._roads_t >= 0.35 and self.road_net is not None and self.road_net.loaded:
             self._roads_t = 0.0
             try:
-                roads = self.road_net.hud_segments_3d_near(pos)
+                altitude = float(self.sdk.get("truck_altitude", 0.0) or 0.0)
+                roads = self.road_net.hud_segments_3d_near(
+                    pos, altitude=altitude)
                 self.sdk.set("map_road_segments",
                              [[list(a), list(b), kind] for a, b, kind in roads])
             except Exception as e:

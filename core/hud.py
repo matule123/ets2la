@@ -364,8 +364,8 @@ class UltraPilotHUD(QWidget):
                 """Clip a truck-space segment to the visible HUD rectangle."""
                 da, dl = b[0] - a[0], b[1] - a[1]
                 t0, t1 = 0.0, 1.0
-                for p, q in ((-da, a[0] - 1.5), (da, 115.0 - a[0]),
-                             (-dl, a[1] + 38.0), (dl, 38.0 - a[1])):
+                for p, q in ((-da, a[0] - 1.5), (da, 100.0 - a[0]),
+                             (-dl, a[1] + 30.0), (dl, 30.0 - a[1])):
                     if abs(p) < 1e-9:
                         if q < 0:
                             return None
@@ -411,15 +411,19 @@ class UltraPilotHUD(QWidget):
                 pa = self._project(a[0], a[1], view, ah)
                 pb = self._project(b[0], b[1], view, bh)
                 if pa and pb:
-                    if kind == "lane":
+                    centre_lateral = (a[1] + b[1]) * 0.5
+                    follows_truck_road = (
+                        kind == "road" and abs(centre_lateral) < 10.0
+                        and abs(da) / length > 0.68)
+                    if kind == "lane" or not follows_truck_road:
                         # Prefab data describes individual lane trajectories.
                         # Rendering every one as a full road created the dense
                         # overlapping mess at motorway junctions.
-                        qp.setPen(QPen(QColor(44, 49, 57, 225), 4.0,
+                        qp.setPen(QPen(QColor(38, 43, 50, 205), 3.2,
                                        Qt.PenStyle.SolidLine,
                                        Qt.PenCapStyle.RoundCap))
                         qp.drawLine(pa, pb)
-                        qp.setPen(QPen(QColor(190, 196, 205, 145), 1.1,
+                        qp.setPen(QPen(QColor(154, 161, 171, 115), 0.9,
                                        Qt.PenStyle.DashLine,
                                        Qt.PenCapStyle.RoundCap))
                         qp.drawLine(pa, pb)
@@ -428,10 +432,8 @@ class UltraPilotHUD(QWidget):
                     # and a faint centre marking. Filled rectangles for every
                     # nav-curve segment accumulated into the black blocks seen
                     # in the old HUD, especially at roundabouts.
-                    near_current = min(math.hypot(*a), math.hypot(*b)) < 24.0
-                    road_lanes = max(1, int(d.get("lanes", 2))) if near_current else 2
-                    half = (road_lanes * 3.6 / 2.0 + 0.8
-                            if near_current else 4.1)
+                    road_lanes = max(1, int(d.get("lanes", 2)))
+                    half = road_lanes * 3.6 / 2.0 + 0.8
                     edges = []
                     for side in (-1.0, 1.0):
                         ea = self._project(a[0] + na * half * side,

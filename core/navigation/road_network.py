@@ -541,7 +541,8 @@ class RoadNetwork:
             points.reverse()
         return points
 
-    def hud_segments_3d_near(self, pos, radius: float = 170.0, limit: int = 420):
+    def hud_segments_3d_near(self, pos, radius: float = 135.0, limit: int = 320,
+                             altitude=None):
         """Curved road segments with elevation for the perspective HUD."""
         if not self.loaded or not pos:
             return []
@@ -558,6 +559,9 @@ class RoadNetwork:
                     first, second = self._seg_uids[index]
                     curve = self._road_curve_3d(first, second)
                     for a, b in zip(curve, curve[1:]):
+                        if (altitude is not None
+                                and abs((a[2] + b[2]) * 0.5 - altitude) > 5.0):
+                            continue
                         distance2 = min((a[0]-px)**2+(a[1]-pz)**2,
                                         (b[0]-px)**2+(b[1]-pz)**2)
                         if distance2 <= radius*radius:
@@ -570,6 +574,8 @@ class RoadNetwork:
             uid_b = self._nearest_node(b, max_ring=1)
             ah = self.node_alt.get(uid_a, 0.0)
             bh = self.node_alt.get(uid_b, ah)
+            if altitude is not None and abs((ah + bh) * 0.5 - altitude) > 5.0:
+                continue
             distance2 = min((a[0]-px)**2+(a[1]-pz)**2,
                             (b[0]-px)**2+(b[1]-pz)**2)
             ranked.append((distance2, (a[0], a[1], ah), (b[0], b[1], bh), "lane"))
