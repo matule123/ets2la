@@ -454,6 +454,9 @@ class UltraPilotEngine:
             # 1. Telemetry
             if self.telemetry.update():
                 truck = self.telemetry.get("truck", {}) or {}
+                raw = self.telemetry.get("raw", {}) or {}
+                self.shared_state.set(
+                    "game_in_truck", bool(raw.get("sdkActive", bool(truck))))
                 self._autostart_truck(truck)
                 dest_city = self.telemetry.get("dest_city", "") or ""
                 try:
@@ -543,6 +546,8 @@ class UltraPilotEngine:
                     self.shared_state.set("light_brake", self._light_brake(light))
                 except Exception:
                     pass
+            else:
+                self.shared_state.set("game_in_truck", False)
 
             # A transient error in any one frame must NOT kill the engine — log
             # it and keep looping (self-healing). The bootloader also restarts

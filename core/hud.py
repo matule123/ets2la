@@ -54,7 +54,7 @@ class UltraPilotHUD(QWidget):
     """
 
     # Left-panel size — larger so the 3D scene + truck models read clearly.
-    W, H = 560, 640
+    W, H = 780, 440
 
     def __init__(self, shared_state):
         super().__init__()
@@ -86,9 +86,14 @@ class UltraPilotHUD(QWidget):
         self._t += 0.08   # advance the animation clock (timer fires every 80 ms)
         # Wait for the UI process to flag itself ready before we show the HUD.
         try:
-            if not self._shown and self.shared_state.get("ui_ready", False):
+            should_show = bool(self.shared_state.get("ui_ready", False)
+                               and self.shared_state.get("game_in_truck", False))
+            if should_show and not self._shown:
                 self._shown = True
                 self.show()
+            elif not should_show and self._shown:
+                self._shown = False
+                self.hide()
         except Exception:
             pass
         self.update()
@@ -161,7 +166,7 @@ class UltraPilotHUD(QWidget):
         self._draw_top_bar(qp, d)
 
         # 3) The 3D driving scene fills the rest of the panel.
-        scene = QRectF(8, 86, self.W - 16, self.H - 94)
+        scene = QRectF(8, 76, self.W - 16, self.H - 84)
         qp.save(); qp.setClipRect(scene)
         self._draw_driving_view(qp, scene, d)
         qp.restore()
@@ -416,10 +421,67 @@ class UltraPilotHUD(QWidget):
                     vehs.append((a, l, v))
             vehs.sort(key=lambda t: -t[0])
             for a, l, v in vehs:
-                self._draw_box(qp, view, a, l, v)
+                self._draw_low_poly_vehicle(qp, view, a, l, v)
 
         # Ego truck as a 3D model at the bottom centre (cab + trailer).
-        self._draw_ego_truck(qp, view, d["heading"])
+        self._draw_low_poly_ego(qp, view)
+
+    def _draw_low_poly_ego(self, qp, view):
+        """Clean neutral-grey ETS2LA-style tractor and box trailer."""
+        hw = 1.22
+        tr_n, tr_f = 4.2, 13.2
+        cab_n, cab_f = 13.0, 17.2
+        self._box3d(qp, tr_n - .25, cab_f + .15, hw + .12, 0, 0, .42, view,
+                    ("#30343A", "#454A51"))
+        self._box3d(qp, tr_n, tr_f, hw, 0, .42, 3.35, view,
+                    ("#969BA2", "#C3C6CA"))
+        self._box3d(qp, cab_n, cab_f, hw, 0, .42, 2.65, view,
+                    ("#858A91", "#B7BBC0"))
+        self._box3d(qp, cab_n + .55, cab_f - .18, hw * .88, 0, 1.55, 2.82, view,
+                    ("#4C5158", "#686E76"))
+        for axle in (tr_n + 1.0, tr_f - 1.0, cab_n + .65, cab_f - .55):
+            for side in (-1, 1):
+                self._box3d(qp, axle - .30, axle + .30, .18,
+                            side * (hw + .13), 0, .72, view,
+                            ("#24272C", "#454A50"))
+        self._draw_lights(qp, view, cab_n, cab_f, hw, 0, 2.65)
+
+    def _draw_low_poly_vehicle(self, qp, view, ahead, lateral, vehicle):
+        """New grey low-poly traffic family: car, van, bus and articulated truck."""
+        kind = str(vehicle.get("type", "car")).lower()
+        hw = max(.88, float(vehicle.get("width", 2.0) or 2.0) / 2)
+        length = max(3.5, float(vehicle.get("length", 4.5) or 4.5))
+        n, fr = ahead - length / 2, ahead + length / 2
+        height = {"car": 1.05, "van": 1.65, "bus": 2.55,
+                  "truck": 2.45}.get(kind, 1.2)
+        self._box3d(qp, n - .12, fr + .12, hw + .08, lateral, 0, .30, view,
+                    ("#30343A", "#454A50"))
+        if kind == "truck":
+            split = fr - min(3.5, length * .32)
+            self._box3d(qp, n, split, hw, lateral, .30, 3.0, view,
+                        ("#999EA5", "#C4C7CB"))
+            self._box3d(qp, split, fr, hw, lateral, .30, height, view,
+                        ("#858A91", "#B7BBC0"))
+            self._box3d(qp, split + .35, fr - .15, hw * .88, lateral, 1.35, 2.65,
+                        view, ("#4B5057", "#686D74"))
+        elif kind == "bus":
+            self._box3d(qp, n, fr, hw, lateral, .30, height, view,
+                        ("#8F949B", "#BEC2C7"))
+            self._box3d(qp, n + .35, fr - .35, hw * .91, lateral, 1.15, 2.75,
+                        view, ("#4B5057", "#686D74"))
+        else:
+            self._box3d(qp, n, fr, hw, lateral, .30, height, view,
+                        ("#8F949B", "#BEC2C7"))
+            cabin_h = 2.15 if kind == "van" else 1.62
+            self._box3d(qp, n + length * .24, fr - length * .18, hw * .82,
+                        lateral, height * .82, cabin_h, view,
+                        ("#4B5057", "#686D74"))
+        for axle in (n + length * .22, fr - length * .22):
+            for side in (-1, 1):
+                self._box3d(qp, axle - .18, axle + .18, .12,
+                            lateral + side * (hw + .07), 0, .56, view,
+                            ("#24272C", "#454A50"))
+        self._draw_lights(qp, view, n, fr, hw, lateral, height)
 
     def _draw_ego_truck(self, qp, view, heading):
         """The player's articulated truck: a detailed cab + a long box trailer.
@@ -785,10 +847,10 @@ class UltraPilotHUD(QWidget):
             box(body_h, body_h + 1.0, n_off=0.0, fr_off=-ln * 0.35,
                 hwf=0.96, faces=("#9AA0A8", "#9AA0A8"))
             box(body_h, body_h + 0.8, n_off=0.0, fr_off=-ln * 0.35,
-                hwf=0.9, faces=("#0F2A33", "#1B3A44"))
+                hwf=0.9, faces=("#4B5057", "#686D74"))
         else:
             box(body_h, body_h + 0.55, n_off=ln * 0.22, fr_off=-ln * 0.20,
-                hwf=0.86, faces=("#0F2A33", "#1B3A44"))
+                hwf=0.86, faces=("#4B5057", "#686D74"))
 
         # Lamps: we see the FRONT of these cars (they're behind us, facing our
         # direction), so warm headlamps are the bright cue; tail lamps are hidden.
