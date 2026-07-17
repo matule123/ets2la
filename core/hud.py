@@ -70,6 +70,7 @@ class UltraPilotHUD(QWidget):
         self._rear_cam_side = "off"
         self._rear_vehicle_smooth = {}
         self._view_yaw = 0.0
+        self._ego_road_lateral = 0.0
         self._camera_key_down = False
         self.init_ui()
 
@@ -411,6 +412,8 @@ class UltraPilotHUD(QWidget):
                         (a[0] + da * t1, a[1] + dl * t1), t0, t1)
 
             nearby = []
+            ego_road_lateral = None
+            ego_road_score = float("inf")
             for segment in d.get("road_segments", []):
                 try:
                     a = to_truck(float(segment[0][0]), float(segment[0][1]))
@@ -433,6 +436,23 @@ class UltraPilotHUD(QWidget):
                 a, b, t0, t1 = clipped
                 clipped_ah = ah + (bh-ah)*t0
                 clipped_bh = ah + (bh-ah)*t1
+                # Anchor the HUD vehicle to the centreline of the closest
+                # same-level road, instead of assuming that lateral zero is
+                # always the rendered carriageway centre.
+                vx, vl = b[0] - a[0], b[1] - a[1]
+                vlen2 = vx * vx + vl * vl
+                if vlen2 > .05 and abs((clipped_ah + clipped_bh) * .5) < 1.8:
+                    nearest_t = max(0.0, min(1.0,
+                        -(a[0] * vx + a[1] * vl) / vlen2))
+                    nearest_a = a[0] + vx * nearest_t
+                    nearest_l = a[1] + vl * nearest_t
+                    distance = math.hypot(nearest_a, nearest_l)
+                    alignment = abs(vx) / math.sqrt(vlen2)
+                    kind_penalty = 0.0 if kind == "road" else 2.5
+                    score = distance + (1.0 - alignment) * 6.0 + kind_penalty
+                    if score < ego_road_score and distance < 14.0:
+                        ego_road_score = score
+                        ego_road_lateral = nearest_l
                 # When the truck is on an elevated ramp/bridge, geometry more
                 # than one deck below it is occluded by the opaque asphalt.
                 if max(clipped_ah, clipped_bh) < -2.4:
@@ -522,17 +542,44 @@ class UltraPilotHUD(QWidget):
                         if pillar and pillar_clear and deck_height > 3.2:
                             drawn_pillars.append((mid_a, mid_l))
                             ua, ul = da / length, dl / length
+                            # A solid transverse cap carries the deck. Its
+                            # supports sit beyond both carriageway edges, never
+                            # in the lanes running below the bridge.
+                            support_offset = half + 2.0
+                            beam_left = (mid_a - na * (half + 2.35),
+                                         mid_l - nl * (half + 2.35))
+                            beam_right = (mid_a + na * (half + 2.35),
+                                          mid_l + nl * (half + 2.35))
+                            self._oriented_box3d(
+                                qp, beam_left, beam_right, .52,
+                                deck_height - 1.05, deck_height - .38, view,
+                                ("#4B535D", "#7B838D"))
                             for side in (-1.0, 1.0):
-                                centre = (mid_a + na * half * .62 * side,
-                                          mid_l + nl * half * .62 * side)
-                                rear = (centre[0] - ua * .38,
-                                        centre[1] - ul * .38)
-                                front = (centre[0] + ua * .38,
-                                         centre[1] + ul * .38)
+                                centre = (mid_a + na * support_offset * side,
+                                          mid_l + nl * support_offset * side)
+                                # Do not place a column through the road the
+                                # truck currently occupies beneath the bridge.
+                                if abs(centre[1] - self._ego_road_lateral) < 6.0:
+                                    continue
+                                rear = (centre[0] - ua * .62,
+                                        centre[1] - ul * .62)
+                                front = (centre[0] + ua * .62,
+                                         centre[1] + ul * .62)
                                 self._oriented_box3d(
-                                    qp, rear, front, .34, -.15,
-                                    deck_height - .18, view,
-                                    ("#59616B", "#858D97"))
+                                    qp, rear, front, .62, -.25,
+                                    deck_height - .98, view,
+                                    ("#4D555F", "#858D97"))
+                        # Two continuous filled longitudinal girders remove
+                        # the hollow/wireframe look from the bridge underside.
+                        for girder_side in (-.72, .72):
+                            girder_a = (a[0] + na * half * girder_side,
+                                        a[1] + nl * half * girder_side)
+                            girder_b = (b[0] + na * half * girder_side,
+                                        b[1] + nl * half * girder_side)
+                            self._oriented_box3d(
+                                qp, girder_a, girder_b, .28,
+                                deck_height - .92, deck_height - .34, view,
+                                ("#424952", "#707984"))
                         qp.setPen(Qt.PenStyle.NoPen)
                         qp.setBrush(QColor(18, 21, 26, 255))
                         for side, (ea, eb) in zip((-1.0, 1.0), edges):
@@ -700,16 +747,23 @@ class UltraPilotHUD(QWidget):
             for a, l, ground, v in vehs:
                 self._draw_low_poly_vehicle(qp, view, a, l, v, ground, h)
 
+        # Smoothly lock the model onto the nearest real road ribbon.
+        if pos and ego_road_lateral is not None:
+            target_lateral = max(-8.0, min(8.0, ego_road_lateral))
+            self._ego_road_lateral = (self._ego_road_lateral * .72
+                                      + target_lateral * .28)
         # Ego truck as a 3D model at the bottom centre (cab + trailer).
-        self._draw_low_poly_ego(qp, view, d.get("trailer_articulation", 0.0), True)
+        self._draw_low_poly_ego(qp, view, d.get("trailer_articulation", 0.0),
+                                True, self._ego_road_lateral)
 
-    def _draw_low_poly_ego(self, qp, view, articulation=0.0, attached=True):
+    def _draw_low_poly_ego(self, qp, view, articulation=0.0, attached=True,
+                           road_lateral=0.0):
         """Recognisable tractor/semitrailer; only this model orbits in the HUD."""
         grey, light = "#858B92", "#BEC2C7"
         angle = self._view_yaw
         ua, ul = math.cos(angle), -math.sin(angle)
         pa, pl = -ul, ua
-        centre = (12.2, 0.0)
+        centre = (12.2, float(road_lateral))
 
         def along(distance):
             return (centre[0] + ua * distance, centre[1] + ul * distance)
