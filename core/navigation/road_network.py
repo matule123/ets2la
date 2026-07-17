@@ -579,6 +579,19 @@ class RoadNetwork:
                             ranked.append((distance2, a, b, "road",
                                            max(1, lanes), divided, dash_on,
                                            pillar, rail_post))
+        # Spatial index for the overlap check below. Scanning every ordinary
+        # chord for every prefab chord made HUD publication unnecessarily
+        # expensive in large interchanges.
+        normal_bins = {}
+        overlap_cell = 12.0
+        for item in ranked:
+            _, ra, rb, rkind, *_rest = item
+            if rkind != "road":
+                continue
+            key = (math.floor(((ra[0] + rb[0]) * .5) / overlap_cell),
+                   math.floor(((ra[1] + rb[1]) * .5) / overlap_cell))
+            normal_bins.setdefault(key, []).append((ra, rb))
+
         # Prefab curves fill the otherwise missing geometry between ordinary
         # road objects at junctions. The HUD renders them only as an unmarked
         # asphalt underlay, never as independent outlined lanes.
@@ -590,6 +603,46 @@ class RoadNetwork:
             bh = self.node_alt.get(uid_b, ah)
             distance2 = min((a[0]-px)**2+(a[1]-pz)**2,
                             (b[0]-px)**2+(b[1]-pz)**2)
+            # At an overpass, a nearest-X/Z lookup can borrow the bridge's node
+            # height for the prefab road below. Close to the truck, suppress a
+            # prefab assigned to another deck; the ordinary 3-D road segments
+            # still render the real bridge at its own altitude.
+            if (altitude is not None and distance2 < 90.0 ** 2
+                    and min(abs(ah - altitude), abs(bh - altitude)) > 3.2):
+                continue
+
+            # Prefab curves bridge gaps at junctions, but some datasets repeat
+            # an exit that is already represented by a normal road curve. Do
+            # not publish a second parallel asphalt ribbon on top/beside it.
+            pmx, pmz = (a[0] + b[0]) * .5, (a[1] + b[1]) * .5
+            pvx, pvz = b[0] - a[0], b[1] - a[1]
+            plen = math.hypot(pvx, pvz)
+            duplicate = False
+            if plen > .2:
+                cell_x = math.floor(pmx / overlap_cell)
+                cell_z = math.floor(pmz / overlap_cell)
+                candidates = []
+                for cell_dx in (-1, 0, 1):
+                    for cell_dz in (-1, 0, 1):
+                        candidates.extend(normal_bins.get(
+                            (cell_x + cell_dx, cell_z + cell_dz), ()))
+                for ra, rb in candidates:
+                    rvx, rvz = rb[0] - ra[0], rb[1] - ra[1]
+                    rlen2 = rvx * rvx + rvz * rvz
+                    if rlen2 < .04:
+                        continue
+                    t = max(0.0, min(1.0,
+                        ((pmx - ra[0]) * rvx + (pmz - ra[1]) * rvz) / rlen2))
+                    qx, qz = ra[0] + rvx * t, ra[1] + rvz * t
+                    if (pmx - qx) ** 2 + (pmz - qz) ** 2 > 3.2 ** 2:
+                        continue
+                    alignment = abs((pvx * rvx + pvz * rvz)
+                                    / (plen * math.sqrt(rlen2)))
+                    if alignment > .94:
+                        duplicate = True
+                        break
+            if duplicate:
+                continue
             ranked.append((distance2, (a[0], a[1], ah),
                            (b[0], b[1], bh), "lane", 1, False,
                            (prefab_index % 5) < 3,

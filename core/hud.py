@@ -71,6 +71,7 @@ class UltraPilotHUD(QWidget):
         self._rear_vehicle_smooth = {}
         self._view_yaw = 0.0
         self._ego_road_lateral = 0.0
+        self._road_scene_shift = 0.0
         self._camera_key_down = False
         self.init_ui()
 
@@ -395,8 +396,12 @@ class UltraPilotHUD(QWidget):
         # Camera perception is the only source that knows the truck's position
         # *inside* the visible lane. Align display-only road/traffic geometry
         # with it; navigation remains in its real world coordinates below.
-        road_scene_shift = max(-2.8, min(2.8,
+        target_road_shift = max(-2.8, min(2.8,
             -float(d.get("vision_lane_offset", 0.0) or 0.0) * 8.0))
+        shift_error = target_road_shift - self._road_scene_shift
+        if abs(shift_error) >= 0.16:
+            self._road_scene_shift += max(-0.055, min(0.055, shift_error))
+        road_scene_shift = self._road_scene_shift
 
         def to_truck(wx, wz, align_road=True):
             dx, dz = wx - pos[0], wz - pos[1]

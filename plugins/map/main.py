@@ -54,6 +54,7 @@ class Plugin(BasePlugin):
         self._resolved_route_cache_signature = None
         self._resolved_route_cache = []
         self._failed_route_signature = None
+        self._vision_lane_m = 0.0
         os.makedirs(ROUTES_DIR, exist_ok=True)
         self._publish_route_list()
 
@@ -616,7 +617,15 @@ class Plugin(BasePlugin):
                     vision_offset = float(self.sdk.get("lane_offset", 0.0) or 0.0)
                 except (TypeError, ValueError):
                     vision_offset = 0.0
-                desired_lateral = max(-2.2, min(2.2, -vision_offset * 8.0))
+                target_lateral = max(-2.2, min(2.2, -vision_offset * 8.0))
+                # Lane perception contains frame-to-frame pixel noise. Never
+                # feed it directly into world geometry: hold tiny changes and
+                # slew larger real movement slowly so a stationary-in-lane
+                # truck cannot oscillate across the HUD/controller path.
+                lane_error = target_lateral - self._vision_lane_m
+                if abs(lane_error) >= 0.14:
+                    self._vision_lane_m += max(-0.025, min(0.025, lane_error))
+                desired_lateral = self._vision_lane_m
                 truck_right_x, truck_right_z = math.cos(heading), -math.sin(heading)
                 normal_screen_sign = (normal_x * truck_right_x
                                       + normal_z * truck_right_z)
