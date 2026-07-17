@@ -173,6 +173,8 @@ class UltraPilotHUD(QWidget):
             "pos": s.get("truck_world_pos"),
             "altitude": float(s.get("truck_altitude", 0.0) or 0.0),
             "heading": s.get("truck_heading", 0.0) or 0.0,
+            "trailer_attached": bool(s.get("trailer_attached", False)),
+            "trailer_articulation": float(s.get("trailer_articulation", 0.0) or 0.0),
             "traffic": s.get("traffic", []) or [],
             "light": s.get("traffic_light"),
             # The route to draw: active navigation, else the map road ahead.
@@ -396,6 +398,7 @@ class UltraPilotHUD(QWidget):
                     kind = segment[2] if len(segment) > 2 else "road"
                     segment_lanes = int(segment[3]) if len(segment) > 3 else 2
                     divided = bool(segment[4]) if len(segment) > 4 else False
+                    dash_on = bool(segment[5]) if len(segment) > 5 else True
                 except (TypeError, ValueError, IndexError):
                     continue
                 clipped = clip_road(a, b)
@@ -404,6 +407,10 @@ class UltraPilotHUD(QWidget):
                 a, b, t0, t1 = clipped
                 clipped_ah = ah + (bh-ah)*t0
                 clipped_bh = ah + (bh-ah)*t1
+                # When the truck is on an elevated ramp/bridge, geometry more
+                # than one deck below it is occluded by the opaque asphalt.
+                if max(clipped_ah, clipped_bh) < -2.4:
+                    continue
                 # Slightly overlap neighbouring sampled quads. Without this,
                 # antialiasing exposed hairline holes on tight curved roads.
                 da, dl = b[0] - a[0], b[1] - a[1]
@@ -414,9 +421,11 @@ class UltraPilotHUD(QWidget):
                     a = (a[0] - ua * overlap, a[1] - ul * overlap)
                     b = (b[0] + ua * overlap, b[1] + ul * overlap)
                 nearby.append((max(a[0], b[0]), a, b, clipped_ah, clipped_bh,
-                               kind, segment_lanes, divided))
-            nearby.sort(reverse=True, key=lambda item: item[0])
-            for _, a, b, ah, bh, kind, segment_lanes, divided in nearby:
+                               kind, segment_lanes, divided, dash_on))
+            # Lower decks first, higher/nearer decks last so opaque road
+            # polygons correctly hide roads passing underneath.
+            nearby.sort(key=lambda item: ((item[3] + item[4]) * .5, -item[0]))
+            for _, a, b, ah, bh, kind, segment_lanes, divided, dash_on in nearby:
                 da, dl = b[0] - a[0], b[1] - a[1]
                 length = math.hypot(da, dl)
                 if length < 0.15:
@@ -430,9 +439,9 @@ class UltraPilotHUD(QWidget):
                         kind == "road" and abs(centre_lateral) < 10.0
                         and abs(da) / length > 0.68)
                     if kind == "lane":
-                        # Prefab data describes individual lane trajectories.
-                        # Rendering every one as a full road created the dense
-                        # overlapping mess at motorway junctions.
+                        # Prefab data describes real lane trajectories through
+                        # ramps and junctions. Render each as an opaque asphalt
+                        # strip; outlines alone caused the thin wire roads.
                         lane_half = 1.75
                         lane_edges = []
                         for side in (-1.0, 1.0):
@@ -442,22 +451,26 @@ class UltraPilotHUD(QWidget):
                                                b[1] + nl * lane_half * side, view, bh)
                             if ea and eb:
                                 lane_edges.append((ea, eb))
-                        qp.setPen(QPen(QColor(174, 181, 191, 150), 1.15,
+                        if len(lane_edges) == 2:
+                            qp.setPen(Qt.PenStyle.NoPen)
+                            qp.setBrush(QColor(35, 39, 45, 255))
+                            qp.drawPolygon(QPolygonF([
+                                lane_edges[0][0], lane_edges[0][1],
+                                lane_edges[1][1], lane_edges[1][0],
+                            ]))
+                        qp.setPen(QPen(QColor(190, 197, 207, 220), 1.7,
                                        Qt.PenStyle.SolidLine,
                                        Qt.PenCapStyle.RoundCap))
                         for ea, eb in lane_edges:
                             qp.drawLine(ea, eb)
-                        qp.setPen(QPen(QColor(208, 213, 221, 125), 0.9,
-                                       Qt.PenStyle.DashLine,
-                                       Qt.PenCapStyle.RoundCap))
-                        qp.drawLine(pa, pb)
                         continue
                     # ETS2LA-style schematic geometry: two precise road edges
                     # and a faint centre marking. Filled rectangles for every
                     # nav-curve segment accumulated into the black blocks seen
                     # in the old HUD, especially at roundabouts.
-                    road_lanes = (max(1, int(d.get("lanes", 2)))
-                                  if follows_truck_road else max(1, segment_lanes))
+                    # Trust this map segment, never a global telemetry lane
+                    # count from a nearby toll/plaza branch.
+                    road_lanes = max(1, min(6, segment_lanes))
                     half = road_lanes * 3.6 / 2.0 + 0.8
                     edges = []
                     for side in (-1.0, 1.0):
@@ -472,7 +485,7 @@ class UltraPilotHUD(QWidget):
                     # at junctions without the former long polygon spikes.
                     if len(edges) == 2:
                         qp.setPen(Qt.PenStyle.NoPen)
-                        qp.setBrush(QColor(35, 39, 45, 225))
+                        qp.setBrush(QColor(35, 39, 45, 255))
                         qp.drawPolygon(QPolygonF([
                             edges[0][0], edges[0][1],
                             edges[1][1], edges[1][0],
@@ -485,7 +498,7 @@ class UltraPilotHUD(QWidget):
                     for ea, eb in edges:
                         qp.drawLine(ea, eb)
                     marking = QPen(QColor(230, 233, 238, 205), 1.9,
-                                   Qt.PenStyle.DashLine,
+                                   Qt.PenStyle.SolidLine,
                                    Qt.PenCapStyle.RoundCap)
                     marking.setDashPattern([4, 5])
                     qp.setPen(marking)
@@ -500,8 +513,10 @@ class UltraPilotHUD(QWidget):
                             qp.setPen(QPen(QColor(244, 246, 248, 235), 3.0,
                                            Qt.PenStyle.SolidLine,
                                            Qt.PenCapStyle.RoundCap))
-                        else:
+                        elif dash_on:
                             qp.setPen(marking)
+                        else:
+                            continue
                         ma = self._project(a[0] + na * offset,
                                            a[1] + nl * offset, view, ah)
                         mb = self._project(b[0] + na * offset,
@@ -593,47 +608,45 @@ class UltraPilotHUD(QWidget):
                 self._draw_low_poly_vehicle(qp, view, a, l, v)
 
         # Ego truck as a 3D model at the bottom centre (cab + trailer).
-        self._draw_low_poly_ego(qp, view)
+        self._draw_low_poly_ego(qp, view, d.get("trailer_articulation", 0.0),
+                                d.get("trailer_attached", False))
 
-    def _draw_low_poly_ego(self, qp, view):
-        """Grey faceted ETS2LA-style tractor and trailer, built from 3-D prisms."""
-        hw = 1.30
-        tr_n, tr_f = 1.8, 11.0
-        cab_n, cab_f = 10.8, 15.9
-        # Six visible axle positions and a narrow chassis give the silhouette
-        # of a real tractor/semitrailer instead of the former single grey box.
-        for axle in (tr_n + .9, tr_n + 2.0, tr_f - 1.0,
-                     cab_n + .45, cab_n + 1.35, cab_f - .62):
+    def _draw_low_poly_ego(self, qp, view, articulation=0.0, attached=True):
+        """Minimal grey tractor silhouette with an actually hinged trailer."""
+        grey, top, dark = "#858A90", "#B8BCC1", "#24272C"
+        hw = 1.28
+        # Tractor: chassis, cab volume and wheels only. No lamps, glass or trim.
+        self._box3d(qp, 9.7, 15.8, hw * .62, 0, .20, .55, view, (dark, dark))
+        self._box3d(qp, 11.0, 15.7, hw, 0, .48, 1.38, view, (grey, top))
+        self._wedge3d(qp, 11.15, 15.65, hw, 0, 1.30, 3.0, view,
+                      grey, top, top_hw=.82, top_near=.28, top_far=.18)
+        for axle in (10.35, 11.25, 15.0):
             for side in (-1, 1):
-                self._box3d(qp, axle - .28, axle + .28, .19,
-                            side * (hw + .15), 0, .76, view,
-                            ("#17191D", "#353940"))
-        self._box3d(qp, tr_n, cab_f, hw * .58, 0, .18, .52, view,
-                    ("#30343A", "#454A51"))
-        # Faceted silver trailer with a darker lower rail and roof plane.
-        self._box3d(qp, tr_n, tr_f, hw, 0, .42, 3.55, view,
-                    ("#858A92", "#C7CBD0"))
-        self._box3d(qp, tr_n + .08, tr_f - .08, hw + .02, 0, .37, .66,
-                    view, ("#555B63", "#747A82"))
-        # Cab-over tractor: lower bumper, sculpted body, sloped glass and roof.
-        self._box3d(qp, cab_n, cab_f, hw, 0, .40, 1.34, view,
-                    ("#737981", "#AEB3B9"))
-        self._wedge3d(qp, cab_n + .04, cab_f, hw, 0, 1.25, 3.02, view,
-                      "#7E848B", "#C8CCD1", top_hw=.84,
-                      top_near=.30, top_far=.20)
-        # Separate dark windshield prism; it follows the same perspective and
-        # therefore reads as a real low-poly face rather than a painted icon.
-        self._wedge3d(qp, cab_n + .56, cab_f + .02, hw * .91, 0,
-                      1.67, 2.76, view, "#30363D", "#59616A",
-                      top_hw=.80, top_near=.22, top_far=.13)
-        # Front grille/bumper and side fuel tanks add recognizable tractor detail.
-        self._box3d(qp, cab_f - .22, cab_f + .12, hw * .72, 0, .55, 1.13,
-                    view, ("#343941", "#515861"))
-        for side in (-1, 1):
-            self._box3d(qp, cab_n + .18, cab_n + 1.55, .24,
-                        side * .86, .46, .92, view,
-                        ("#858B92", "#BFC3C8"))
-        self._draw_lights(qp, view, cab_n, cab_f, hw, 0, 2.65)
+                self._box3d(qp, axle - .29, axle + .29, .19,
+                            side * (hw + .14), 0, .77, view, (dark, "#3B3F45"))
+
+        if not attached:
+            return
+        angle = max(-math.radians(48), min(math.radians(48), float(articulation)))
+        hinge = (10.85, 0.0)
+        length = 10.2
+        tail = (hinge[0] - math.cos(angle) * length,
+                hinge[1] + math.sin(angle) * length)
+        ua, ul = ((hinge[0] - tail[0]) / length,
+                  (hinge[1] - tail[1]) / length)
+        # One plain grey trailer prism, rotated around the fifth wheel.
+        self._oriented_box3d(qp, tail, hinge, 1.30, .45, 3.58, view,
+                             ("#8D9298", "#C3C6CA"))
+        # Trailer wheels rotate and translate with the trailer body.
+        pa, pl = -ul, ua
+        for along in (1.15, 2.15, 8.7):
+            ca, cl = tail[0] + ua * along, tail[1] + ul * along
+            for side in (-1, 1):
+                wc = (ca + pa * side * 1.43, cl + pl * side * 1.43)
+                rear = (wc[0] - ua * .30, wc[1] - ul * .30)
+                front = (wc[0] + ua * .30, wc[1] + ul * .30)
+                self._oriented_box3d(qp, rear, front, .19, 0, .77, view,
+                                     (dark, "#3B3F45"))
 
     def _draw_low_poly_vehicle(self, qp, view, ahead, lateral, vehicle):
         """New grey low-poly traffic family: car, van, bus and articulated truck."""
@@ -782,6 +795,32 @@ class UltraPilotHUD(QWidget):
         qp.drawPolygon(QPolygonF([br, fr_, frt, brt]))                                         # right
         qp.setBrush(QColor(side).darker(132)); qp.drawPolygon(QPolygonF([fl, fr_, frt, flt]))  # front
         qp.setBrush(QColor(top).lighter(112)); qp.drawPolygon(QPolygonF([blt, brt, frt, flt])) # top (lightest)
+        return True
+
+    def _oriented_box3d(self, qp, rear, front, hw, z0, z1, view, faces):
+        """Draw a cuboid following an arbitrary truck-space centre line."""
+        da, dl = front[0] - rear[0], front[1] - rear[1]
+        length = math.hypot(da, dl)
+        if length < .05:
+            return False
+        pa, pl = -dl / length * hw, da / length * hw
+        ground = [(rear[0] - pa, rear[1] - pl),
+                  (rear[0] + pa, rear[1] + pl),
+                  (front[0] - pa, front[1] - pl),
+                  (front[0] + pa, front[1] + pl)]
+        low = [self._project(a, l, view, z0) for a, l in ground]
+        high = [self._project(a, l, view, z1) for a, l in ground]
+        if any(point is None for point in low + high):
+            return False
+        bl, br, fl, fr = low
+        blt, brt, flt, frt = high
+        side, top = faces
+        qp.setPen(QPen(QColor("#1A1D21"), 1))
+        qp.setBrush(QColor(side).darker(145)); qp.drawPolygon(QPolygonF([bl, br, brt, blt]))
+        qp.setBrush(QColor(side).darker(118)); qp.drawPolygon(QPolygonF([bl, fl, flt, blt]))
+        qp.drawPolygon(QPolygonF([br, fr, frt, brt]))
+        qp.setBrush(QColor(side).darker(130)); qp.drawPolygon(QPolygonF([fl, fr, frt, flt]))
+        qp.setBrush(QColor(top)); qp.drawPolygon(QPolygonF([blt, brt, frt, flt]))
         return True
 
     def _draw_box(self, qp, view, ahead, lateral, v):

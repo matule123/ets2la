@@ -561,7 +561,7 @@ class RoadNetwork:
                              or self._road_look_token.get(second))
                     lanes = int((self.road_looks.get(token) or {}).get("lanes", 2))
                     curve = self._road_curve_3d(first, second)
-                    for a, b in zip(curve, curve[1:]):
+                    for curve_index, (a, b) in enumerate(zip(curve, curve[1:])):
                         distance2 = min((a[0]-px)**2+(a[1]-pz)**2,
                                         (b[0]-px)**2+(b[1]-pz)**2)
                         if distance2 <= radius*radius:
@@ -570,8 +570,12 @@ class RoadNetwork:
                                             and look.get("lanes_right", 0))
                                            or (lanes >= 4 and look.get("type")
                                                in ("motorway", "expressway")))
+                            # Fixed 7.5 m dash / 5 m gap in world space. Qt's
+                            # screen-space DashLine restarted on every sampled
+                            # curve and produced differently-sized markings.
+                            dash_on = (curve_index % 5) < 3
                             ranked.append((distance2, a, b, "road",
-                                           max(1, lanes), divided))
+                                           max(1, lanes), divided, dash_on))
         # Prefab lanes already have exact horizontal curves. Use the nearest
         # connected-node elevation; their short length makes this a good visual
         # approximation while keeping bridges separated from ground roads.
@@ -583,10 +587,10 @@ class RoadNetwork:
             distance2 = min((a[0]-px)**2+(a[1]-pz)**2,
                             (b[0]-px)**2+(b[1]-pz)**2)
             ranked.append((distance2, (a[0], a[1], ah),
-                           (b[0], b[1], bh), "lane", 1, False))
+                           (b[0], b[1], bh), "lane", 1, False, True))
         ranked.sort(key=lambda item: item[0])
-        return [(a, b, kind, lanes, divided)
-                for _, a, b, kind, lanes, divided in ranked[:limit]]
+        return [(a, b, kind, lanes, divided, dash_on)
+                for _, a, b, kind, lanes, divided, dash_on in ranked[:limit]]
 
     def refine_route(self, uids, progress=None):
         """Replace prefab entrance chords in a GPS UID route with nav curves."""
@@ -881,7 +885,7 @@ class RoadNetwork:
     def visual_segments_near(self, pos, radius: float = 800.0, limit: int = 12000):
         """Curved roads and true prefab geometry for the live map."""
         return [((a[0], a[1]), (b[0], b[1]))
-                for a, b, _kind, _lanes, _divided
+                for a, b, _kind, _lanes, _divided, _dash_on
                 in self.hud_segments_3d_near(pos, radius, limit)]
 
     def hud_segments_near(self, pos, radius: float = 170.0, limit: int = 320):

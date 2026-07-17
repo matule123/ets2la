@@ -647,8 +647,8 @@ class Plugin(BasePlugin):
                 roads = self.road_net.hud_segments_3d_near(
                     pos, radius=280.0, limit=950, altitude=altitude)
                 self.sdk.set("map_road_segments",
-                             [[list(a), list(b), kind, lanes, divided]
-                              for a, b, kind, lanes, divided in roads])
+                             [[list(a), list(b), kind, lanes, divided, dash_on]
+                              for a, b, kind, lanes, divided, dash_on in roads])
             except Exception as e:
                 logging.debug("HUD road geometry error: %s", e)
 
