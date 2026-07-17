@@ -712,8 +712,12 @@ class Plugin(BasePlugin):
         game_route = self._resolved_game_route(pos, heading)
         if len(game_route) >= 2:
             route = Route([tuple(p) for p in game_route])
-            idx = route.tracking_index(pos, heading)
-            remaining = [list(p) for p in route.points[idx:]]
+            # _resolved_game_route() already projects the truck onto the
+            # correct GPS segment and returns only the remaining route.  A
+            # second nearest-segment lookup here could jump to a parallel
+            # carriageway or another arm of a junction and shifted the whole
+            # HUD/controller reference sideways.
+            remaining = [list(p) for p in route.points]
             self.sdk.set("map_path", remaining)
             # Display exactly the distance visible in ETS2 GPS. The geometric
             # polyline length is only a validation aid, never the UI authority.
@@ -934,8 +938,13 @@ class Plugin(BasePlugin):
             map_path = self._ensure_map_path(pos, heading)
             if len(map_path) >= 2:
                 route = Route([tuple(p) for p in map_path])
+                # The native planned-route buffer is lane-specific geometry.
+                # Applying the generic road-centre offset once more moved the
+                # target towards the median (and made HUD and steering disagree
+                # with the truck's actual lane).
+                gps_lane_offset = 0.0
                 steer = route.steering(pos, heading, speed,
-                                       lane_offset_m=self._lane_offset())
+                                       lane_offset_m=gps_lane_offset)
                 # Safety: if the truck is far from the snapped path (wrong map
                 # dataset, or we're off-road on a ferry / car park), the CTE is
                 # huge and Stanley saturates to full-lock. Detect that and
@@ -953,7 +962,7 @@ class Plugin(BasePlugin):
                     self.sdk.set("nav_steering", float(steer))
                     self.sdk.set("nav_active", True)
                     upcoming = self._distance_window(map_path, 220.0)
-                    visible = self._driving_line(upcoming, self._lane_offset())
+                    visible = self._driving_line(upcoming, gps_lane_offset)
                     self.sdk.set("nav_path", [list(p) for p in visible])
                 # Curvature radius (m) of the road ahead — lets the autopilot
                 # anticipate bends (brake before, not during).

@@ -509,11 +509,49 @@ class UltraPilotEngine:
                 # A route buffer describing 1.7 km while the GPS shows 31 km is
                 # stale/partial and must never steer or be displayed as complete.
                 buffer_distance = 0.0
-                try:
-                    buffer_distance = max(float(item.get("distance", 0.0) or 0.0)
-                                          for item in planned_items)
-                except (TypeError, ValueError):
-                    buffer_distance = 0.0
+                # ETS2LA keeps already-passed nodes at the beginning of the
+                # shared route buffer for a while.  Comparing routeDistance to
+                # the oldest/max distance therefore becomes a false mismatch
+                # after a few minutes (for example 49.9 vs 32.1 km).  Match the
+                # live GPS distance to the closest buffered node and discard
+                # only the stale prefix, retaining one node for interpolation.
+                distance_samples = []
+                for index, item in enumerate(planned_items):
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        distance = float(item.get("distance", 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        continue
+                    if distance > 0.0:
+                        distance_samples.append((index, distance))
+                nearest_route_index = 0
+                if distance_samples:
+                    if route_distance > 0.0:
+                        nearest_route_index, buffer_distance = min(
+                            distance_samples,
+                            key=lambda sample: abs(sample[1] - route_distance))
+                    else:
+                        nearest_route_index, buffer_distance = distance_samples[0]
+                    if nearest_route_index > 1:
+                        keep_from = nearest_route_index - 1
+                        first_item = (planned_items[0]
+                                      if isinstance(planned_items[0], dict) else {})
+                        matched_item = planned_items[nearest_route_index]
+                        trim_signature = (
+                            int(first_item.get("uid", 0) or 0),
+                            int(matched_item.get("uid", 0) or 0),
+                            keep_from,
+                        )
+                        if trim_signature != getattr(
+                                self, "_last_route_trim_signature", None):
+                            logging.info(
+                                "Navigation: advanced SDK route buffer by %d passed nodes "
+                                "(matched %.1f km to game GPS %.1f km).",
+                                keep_from, buffer_distance / 1000.0,
+                                route_distance / 1000.0)
+                            self._last_route_trim_signature = trim_signature
+                        planned_items = planned_items[keep_from:]
                 distance_disagrees = bool(
                     route_distance > 0 and buffer_distance > 0
                     and abs(buffer_distance - route_distance)
@@ -521,7 +559,7 @@ class UltraPilotEngine:
                     # steps, while SCS routeDistance decreases continuously.
                     # A temporary 16.3 vs 13.3 km difference while driving is
                     # normal; gross mismatches such as 1.7 vs 31 km are not.
-                    > max(5000.0, max(route_distance, buffer_distance) * 0.32))
+                    > max(5000.0, route_distance * 0.32))
                 buffer_stale = distance_disagrees
                 self.shared_state.set("route_buffer_distance", buffer_distance)
                 self.shared_state.set("route_buffer_stale", buffer_stale)

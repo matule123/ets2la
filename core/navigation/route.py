@@ -268,7 +268,11 @@ class Route:
         if len(self.points) < 2:
             return 0.0
 
-        idx = self.closest_index(pos)
+        # A plain nearest-waypoint lookup is ambiguous on divided motorways,
+        # roundabouts and junctions.  Use the heading-aware segment selected by
+        # the same geometry used for localisation, otherwise steering can jump
+        # onto a neighbouring arm and immediately pull across the median.
+        idx = self.tracking_index(pos, heading)
 
         # --- Curvature-aware lookahead (Fáza 3b) ---------------------------
         # Look far ahead on straights (so we anticipate the next bend early),
