@@ -91,6 +91,20 @@ class Plugin(BasePlugin):
                                 point[1] + dx / length * offset))
         return shifted
 
+    @staticmethod
+    def _distance_window(points, metres=220.0):
+        """Keep a physical look-ahead distance, independent of point density."""
+        points = list(points)
+        if len(points) < 2:
+            return points
+        result, travelled = [points[0]], 0.0
+        for point in points[1:]:
+            travelled += math.dist(tuple(result[-1][:2]), tuple(point[:2]))
+            result.append(point)
+            if travelled >= metres:
+                break
+        return result
+
     def _handle_command(self, pos):
         cmd = self.sdk.get("nav_cmd")
         if not cmd:
@@ -554,7 +568,7 @@ class Plugin(BasePlugin):
             self.sdk.set("distance_to_dest",
                          game_distance if game_distance > 0
                          else route.distance_to_end(pos, heading))
-            return remaining[:60]
+            return self._distance_window(remaining, 260.0)
 
         # Do not invent a route from whichever road edge happens to be ahead.
         # Steering is allowed only from the in-game GPS (or a recorded route).
@@ -756,8 +770,8 @@ class Plugin(BasePlugin):
 
             # Publish the upcoming path points so the HUD can draw "where to go".
             idx = self.active_route.closest_index(pos)
-            visible = self._driving_line(self.active_route.points[idx:idx + 25],
-                                         self._lane_offset())
+            upcoming = self._distance_window(self.active_route.points[idx:], 220.0)
+            visible = self._driving_line(upcoming, self._lane_offset())
             self.sdk.set("nav_path", [list(p) for p in visible])
         else:
             # No recorded route: drive by the downloaded MAP. This is automatic
@@ -783,7 +797,8 @@ class Plugin(BasePlugin):
                 else:
                     self.sdk.set("nav_steering", float(steer))
                     self.sdk.set("nav_active", True)
-                    visible = self._driving_line(map_path[:25], self._lane_offset())
+                    upcoming = self._distance_window(map_path, 220.0)
+                    visible = self._driving_line(upcoming, self._lane_offset())
                     self.sdk.set("nav_path", [list(p) for p in visible])
                 # Curvature radius (m) of the road ahead — lets the autopilot
                 # anticipate bends (brake before, not during).

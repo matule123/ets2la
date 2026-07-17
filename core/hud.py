@@ -480,6 +480,22 @@ class UltraPilotHUD(QWidget):
                                            b[1] + nl * half * side, view, bh)
                         if ea and eb:
                             edges.append((ea, eb))
+                    # Give elevated roads a real opaque bridge deck. A dark
+                    # vertical fascia under both outer edges makes the height
+                    # separation unmistakable and hides geometry below it.
+                    deck_height = (ah + bh) * .5
+                    if len(edges) == 2 and deck_height > 2.0:
+                        qp.setPen(Qt.PenStyle.NoPen)
+                        qp.setBrush(QColor(18, 21, 26, 255))
+                        for side, (ea, eb) in zip((-1.0, 1.0), edges):
+                            low_a = self._project(a[0] + na * half * side,
+                                                  a[1] + nl * half * side,
+                                                  view, ah - 1.35)
+                            low_b = self._project(b[0] + na * half * side,
+                                                  b[1] + nl * half * side,
+                                                  view, bh - 1.35)
+                            if low_a and low_b:
+                                qp.drawPolygon(QPolygonF([ea, eb, low_b, low_a]))
                     # A real asphalt ribbon makes individual curved roads and
                     # roundabouts readable. Short sampled quads overlap cleanly
                     # at junctions without the former long polygon spikes.
@@ -497,6 +513,12 @@ class UltraPilotHUD(QWidget):
                     qp.setPen(edge_pen)
                     for ea, eb in edges:
                         qp.drawLine(ea, eb)
+                    if deck_height > 2.0:
+                        qp.setPen(QPen(QColor(112, 120, 132, 255), 3.2,
+                                       Qt.PenStyle.SolidLine,
+                                       Qt.PenCapStyle.RoundCap))
+                        for ea, eb in edges:
+                            qp.drawLine(ea, eb)
                     marking = QPen(QColor(230, 233, 238, 205), 1.9,
                                    Qt.PenStyle.SolidLine,
                                    Qt.PenCapStyle.RoundCap)
@@ -559,7 +581,7 @@ class UltraPilotHUD(QWidget):
                                   start[1] + (end[1] - start[1]) * fraction))
             if local_path:
                 dense.append(local_path[-1])
-            raw = [point for point in dense if 0.5 <= point[0] <= 140.0]
+            raw = [point for point in dense if 0.5 <= point[0] <= 210.0]
             # Prefab routes are already densely sampled from their exact
             # Hermite curves.  Re-running Catmull-Rom here can overshoot the
             # circle and visually cut across the middle of a roundabout.
