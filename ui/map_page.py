@@ -297,6 +297,7 @@ class MapPage(QWidget):
 
         self._dl_worker = None
         self._net_worker = None
+        self._last_active_map_key = None
         self._populate_maps()
         self._load_road_net()   # if a map is already downloaded, load it for display
 
@@ -493,6 +494,20 @@ class MapPage(QWidget):
         self.status.setText("Navigation stopped.")
 
     def refresh(self):
+        # The engine may auto-select a compatible dataset after comparing live
+        # GPS node UIDs. Reload that same network in the UI process as well.
+        active_key = self.state.get("active_map_key")
+        if (active_key and active_key != self._last_active_map_key
+                and self._net_worker is None):
+            self._last_active_map_key = active_key
+            index = self.map_combo.findData(active_key)
+            if index >= 0:
+                self.map_combo.blockSignals(True)
+                self.map_combo.setCurrentIndex(index)
+                self.map_combo.blockSignals(False)
+            self.view.road_net = None
+            self._load_road_net(active_key, force=True)
+
         # Keep the route dropdown in sync with what the map plugin published.
         routes = self.state.get("nav_routes", []) or []
         if routes != self._last_routes:

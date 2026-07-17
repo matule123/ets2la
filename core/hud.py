@@ -302,6 +302,28 @@ class UltraPilotHUD(QWidget):
         if pos:
             # Draw the full nearby road network first; the selected GPS route
             # is then overlaid in blue and remains visually unambiguous.
+            def clip_road(a, b):
+                """Clip a truck-space segment to the visible HUD rectangle."""
+                da, dl = b[0] - a[0], b[1] - a[1]
+                t0, t1 = 0.0, 1.0
+                for p, q in ((-da, a[0] - 1.5), (da, 140.0 - a[0]),
+                             (-dl, a[1] + 48.0), (dl, 48.0 - a[1])):
+                    if abs(p) < 1e-9:
+                        if q < 0:
+                            return None
+                        continue
+                    r = q / p
+                    if p < 0:
+                        if r > t1:
+                            return None
+                        t0 = max(t0, r)
+                    else:
+                        if r < t0:
+                            return None
+                        t1 = min(t1, r)
+                return ((a[0] + da * t0, a[1] + dl * t0),
+                        (a[0] + da * t1, a[1] + dl * t1))
+
             nearby = []
             for segment in d.get("road_segments", []):
                 try:
@@ -309,10 +331,10 @@ class UltraPilotHUD(QWidget):
                     b = to_truck(float(segment[1][0]), float(segment[1][1]))
                 except (TypeError, ValueError, IndexError):
                     continue
-                if max(a[0], b[0]) < 0.5 or min(a[0], b[0]) > 150:
+                clipped = clip_road(a, b)
+                if clipped is None:
                     continue
-                if min(abs(a[1]), abs(b[1])) > 70:
-                    continue
+                a, b = clipped
                 nearby.append((max(a[0], b[0]), a, b))
             nearby.sort(reverse=True, key=lambda item: item[0])
             for _, a, b in nearby:

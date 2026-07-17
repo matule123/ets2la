@@ -42,6 +42,8 @@ class Plugin(BasePlugin):
         self._roads_t = 0.0          # throttle nearby-road HUD publishing
         self._last_recalc_request = None
         self._recalc_started = 0.0
+        self._auto_map_signature = None
+        self._auto_map_loading = False
         os.makedirs(ROUTES_DIR, exist_ok=True)
         self._publish_route_list()
 
@@ -114,8 +116,8 @@ class Plugin(BasePlugin):
         The full ETS2 map is ~1.1 M nodes / 250 k segments and takes ~20 s to
         parse, so we must NOT do it on the engine tick thread (that would freeze
         the whole autopilot).  Instead we kick off a worker thread once; while it
-        runs the truck keeps driving by whatever path is already available, and
-        map-based steering switches on the moment the network is ready.
+        runs the truck keeps its current safe state. The network resolves the
+        node UIDs supplied by the in-game GPS; it never invents a route.
         """
         if self.road_net is not None and self.road_net.loaded:
             return
@@ -153,7 +155,7 @@ class Plugin(BasePlugin):
                         self.road_net = net
                         self.sdk.set("map_status",
                                      f"Map ready ({len(net.segments)} segments). "
-                                     "Map-based steering active.")
+                                     "Waiting for the in-game GPS route.")
                         logging.info("Navigation: road network loaded engine-side "
                                      "(%d segments, key=%s).", len(net.segments), chosen["key"])
                     else:
@@ -246,6 +248,7 @@ class Plugin(BasePlugin):
                 "map_status",
                 "Vybraná mapa nezodpovedá trase v hre. Vyber správny ETS2/ATS dataset.")
             self.sdk.set("game_route_points", [])
+            self._auto_select_matching_map(uids)
             return []
         self.sdk.set("navigation_unreliable", False)
 
@@ -270,6 +273,54 @@ class Plugin(BasePlugin):
         remaining = matched[idx:]
         self.sdk.set("game_route_points", [list(p) for p in remaining])
         return remaining
+
+    def _auto_select_matching_map(self, uids):
+        """Background-select a downloaded dataset matching the live GPS UIDs."""
+        signature = (len(uids), tuple(uids[:3]), tuple(uids[-3:]))
+        if self._auto_map_loading or signature == self._auto_map_signature:
+            return
+        self._auto_map_signature = signature
+        self._auto_map_loading = True
+
+        def worker():
+            try:
+                from core.navigation import map_data
+                from core.navigation.road_network import RoadNetwork
+                from core.settings.manager import SettingsManager
+                active = self.sdk.get("active_map_key")
+                best = (0.0, None, None)
+                for dataset in map_data.list_datasets():
+                    if not dataset.get("downloaded") or dataset.get("key") == active:
+                        continue
+                    candidate = RoadNetwork()
+                    if not candidate.load(map_data.dataset_dir(dataset["key"])):
+                        continue
+                    ratio = sum(1 for uid in uids if int(uid) in candidate.nodes) / len(uids)
+                    if ratio > best[0]:
+                        best = (ratio, dataset, candidate)
+                    if ratio >= 0.92:
+                        break
+                ratio, dataset, candidate = best
+                if dataset is not None and ratio >= 0.55:
+                    self.road_net = candidate
+                    key = dataset["key"]
+                    SettingsManager().set("selected_map", key)
+                    self.sdk.set("active_map_key", key)
+                    self.sdk.set("active_map_name", dataset.get("name") or key)
+                    self.sdk.set("map_status", f"Automaticky zvolená kompatibilná mapa: {key}")
+                    logging.info("Navigation: auto-selected %s (GPS UID match %.0f%%).",
+                                 key, ratio * 100)
+                else:
+                    self.sdk.set(
+                        "map_status",
+                        "Žiadna stiahnutá mapa nezodpovedá GPS trase v hre.")
+            except Exception as error:
+                logging.warning("Navigation: automatic map matching failed: %s", error)
+            finally:
+                self._auto_map_loading = False
+
+        import threading
+        threading.Thread(target=worker, name="MapAutoMatcher", daemon=True).start()
 
     def _ensure_map_path(self, pos, heading):
         """Compute and publish the road-ahead polyline from the downloaded map.
