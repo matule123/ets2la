@@ -24,7 +24,7 @@ _meta_dir = os.path.join(os.path.dirname(__file__), "build", "metadata")
 os.makedirs(_meta_dir, exist_ok=True)
 try:
     _commit = subprocess.check_output(
-        ["git", "rev-parse", "--short", "HEAD"], cwd=os.path.dirname(__file__),
+        ["git", "rev-parse", "--short=7", "HEAD"], cwd=os.path.dirname(__file__),
         text=True, timeout=8).strip()
 except Exception:
     _commit = "build"

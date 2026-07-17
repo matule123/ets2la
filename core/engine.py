@@ -303,8 +303,32 @@ class UltraPilotEngine:
         return diff
 
     # --- Hotkey ---------------------------------------------------------------
+    @staticmethod
+    def _game_window_active():
+        """True only when ETS2/ATS owns the foreground Windows window."""
+        try:
+            import psutil
+            import win32gui
+            import win32process
+            hwnd = win32gui.GetForegroundWindow()
+            if not hwnd:
+                return False
+            _thread_id, process_id = win32process.GetWindowThreadProcessId(hwnd)
+            executable = psutil.Process(process_id).name().lower()
+            return executable in {"eurotrucks2.exe", "amtrucks.exe"}
+        except Exception:
+            # Process-name lookup can be denied by Windows security software;
+            # the official game window titles are a safe secondary check.
+            try:
+                import win32gui
+                title = win32gui.GetWindowText(win32gui.GetForegroundWindow()).lower()
+                return ("euro truck simulator 2" in title
+                        or "american truck simulator" in title)
+            except Exception:
+                return False
+
     def _check_hotkey(self):
-        """Toggle autopilot_active on a rising edge of the 'N' key (app-wide)."""
+        """Toggle on an N-key rising edge, but only inside the game window."""
         if not self._has_win32:
             return
         try:
@@ -312,7 +336,7 @@ class UltraPilotEngine:
             down = bool(win32api.GetAsyncKeyState(self._hotkey_vk) & 0x8000)
         except Exception:
             return
-        if down and not self._hotkey_was_down:
+        if down and not self._hotkey_was_down and self._game_window_active():
             new_state = not bool(self.shared_state.get("autopilot_active", False))
             self.shared_state.set("autopilot_active", new_state)
             msg = "Autopilot enabled." if new_state else "Autopilot disabled."

@@ -62,18 +62,12 @@ def git_commit() -> str:
                 break
         except Exception:
             pass
-    # In a clean checkout HEAD is authoritative. If a ZIP fallback replaced
-    # files without moving HEAD, the tree is dirty and commit.txt identifies
-    # the code that is actually installed.
+    # In a real checkout HEAD is always authoritative. A stale commit.txt from
+    # an older ZIP update must never replace the repository's actual revision.
     if os.path.isdir(os.path.join(_app_dir(), ".git")):
         try:
-            status = subprocess.run(
-                ["git", "-C", _app_dir(), "status", "--porcelain"],
-                capture_output=True, text=True, timeout=8)
-            if marker and status.returncode == 0 and status.stdout.strip():
-                return marker
             out = subprocess.run(
-                ["git", "-C", _app_dir(), "rev-parse", "--short", "HEAD"],
+                ["git", "-C", _app_dir(), "rev-parse", "--short=7", "HEAD"],
                 capture_output=True, text=True, timeout=8)
             if out.returncode == 0:
                 return _display_commit(out.stdout) or "build"

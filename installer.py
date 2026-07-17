@@ -354,10 +354,11 @@ def _installer_commit():
     checkout (e.g. a built exe). Used for the version badge on the welcome page."""
     try:
         here = os.path.dirname(os.path.abspath(__file__))
-        out = subprocess.run(["git", "-C", here, "rev-parse", "--short", "HEAD"],
+        out = subprocess.run(["git", "-C", here, "rev-parse", "--short=7", "HEAD"],
                              capture_output=True, text=True, timeout=6)
         if out.returncode == 0:
-            return out.stdout.strip()
+            match = re.search(r"(?i)\b[0-9a-f]{7,40}\b", out.stdout)
+            return match.group(0)[:7].lower() if match else ""
     except Exception:
         pass
     return ""
