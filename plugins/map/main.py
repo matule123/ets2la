@@ -561,6 +561,49 @@ class Plugin(BasePlugin):
             return []
         _score, _distance, ri, projected, _alignment = best
         remaining = [projected] + remaining[ri + 1:]
+        # Native GPS/map nodes describe the carriageway reference line, which
+        # is often the median/road centre rather than the centre of the lane
+        # occupied by the truck.  Measure the truck's real lateral displacement
+        # from the selected route segment and carry that lane centre through
+        # the remaining path.  HUD, AR and steering then share one line that
+        # starts underneath the truck instead of several metres to its left.
+        if len(remaining) >= 2:
+            vx = remaining[1][0] - remaining[0][0]
+            vz = remaining[1][1] - remaining[0][1]
+            segment_length = math.hypot(vx, vz)
+            if segment_length > 0.2:
+                normal_x, normal_z = -vz / segment_length, vx / segment_length
+                lane_shift = ((pos[0] - projected[0]) * normal_x
+                              + (pos[1] - projected[1]) * normal_z)
+                # More than one normal lane width means localisation selected
+                # the wrong carriageway; do not hide that with a huge shift.
+                lane_shift = max(-5.25, min(5.25, lane_shift))
+                aligned = []
+                for point_index, point in enumerate(remaining):
+                    before = remaining[max(0, point_index - 1)]
+                    after = remaining[min(len(remaining) - 1, point_index + 1)]
+                    local_x = after[0] - before[0]
+                    local_z = after[1] - before[1]
+                    local_length = math.hypot(local_x, local_z)
+                    if local_length <= 0.2:
+                        aligned.append(tuple(point))
+                        continue
+                    # Recompute the normal at every point. A single world-space
+                    # translation is only correct on a straight; through a bend
+                    # it cuts across lanes and eventually reaches the median.
+                    local_normal_x = -local_z / local_length
+                    local_normal_z = local_x / local_length
+                    aligned.append((
+                        point[0] + local_normal_x * lane_shift,
+                        point[1] + local_normal_z * lane_shift,
+                    ))
+                remaining = aligned
+                # Remove the tiny residual created when the closest point was
+                # an endpoint.  This also guarantees zero initial CTE when the
+                # autopilot is enabled on a correctly occupied lane.
+                if math.dist(pos, remaining[0]) <= 2.5:
+                    remaining[0] = tuple(pos)
+                self.sdk.set("navigation_lane_alignment_m", lane_shift)
         previous_vector = None
         previous_length = None
         route_length = 0.0

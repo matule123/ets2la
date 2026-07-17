@@ -209,6 +209,17 @@ class AROverlay(QWidget):
         if len(pts) >= 2:
             strips.append(pts)
         for pts in strips:
+            # Without a game camera matrix an external/top-down camera cannot
+            # be projected honestly.  Reject screen-wide, almost-horizontal
+            # strokes instead of painting the route across the cab/grass.  A
+            # valid road ribbon in the supported interior camera has tangible
+            # depth towards the horizon even through a bend.
+            xs = [point.x() for point in pts]
+            ys = [point.y() for point in pts]
+            width = max(xs) - min(xs)
+            height = max(ys) - min(ys)
+            if height < 18.0 or width > max(180.0, height * 4.0):
+                continue
             # Glow + core line, like ETS2LA's painted route.
             glow = QPen(QColor(45, 142, 255, 90), 18,
                        Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
