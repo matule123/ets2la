@@ -567,6 +567,16 @@ class UltraPilotHUD(QWidget):
                                 lane_edges[0][0], lane_edges[0][1],
                                 lane_edges[1][1], lane_edges[1][0],
                             ]))
+                        # Prefab geometry contains the real curved lane paths
+                        # through junctions/ramps. It previously stopped here
+                        # after painting only grey asphalt, so these branches
+                        # looked like unfinished drawn ribbons. Add one clean
+                        # world-spaced marking to each enabled dash section.
+                        if dash_on and pa and pb:
+                            qp.setPen(QPen(QColor(226, 230, 236, 205), 2.0,
+                                           Qt.PenStyle.SolidLine,
+                                           Qt.PenCapStyle.FlatCap))
+                            qp.drawLine(pa, pb)
                         continue
                     # ETS2LA-style schematic geometry: two precise road edges
                     # and a faint centre marking. Filled rectangles for every

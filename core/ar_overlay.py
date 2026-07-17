@@ -40,7 +40,7 @@ class AROverlay(QWidget):
         v = self.state.get(key, None)
         return float(v) if v is not None else default
 
-    def _project(self, ahead, lateral):
+    def _project(self, ahead, lateral, road_height=0.0):
         """Approx world→screen for a chase camera. Returns QPointF or None."""
         if not self.state.get("ar_enabled", True):
             return None
@@ -56,10 +56,50 @@ class AROverlay(QWidget):
             return None
         f = (w / 2) / math.tan(math.radians(fov) / 2)
         # camera looks slightly down by `pitch`
-        y_world = cam_h
+        # A road above the truck must project higher on the windscreen and a
+        # road below it lower. The old fixed ground plane made the route float
+        # in the air at ramps and bridges.
+        y_world = cam_h - road_height
         sx = w / 2 + (lateral / d) * f
         sy = h / 2 + ((y_world / d) * f) + math.tan(pitch) * f
         return QPointF(sx, sy)
+
+    @staticmethod
+    def _road_height_at(px, pz, road_segments, truck_altitude):
+        """Return the nearby road surface height relative to the truck.
+
+        Only accept a route point when it lies on published map geometry. This
+        prevents stale/incorrect AR points from being painted through the sky.
+        """
+        best = None
+        for segment in road_segments:
+            try:
+                a, b = segment[0], segment[1]
+                ax, az = float(a[0]), float(a[1])
+                bx, bz = float(b[0]), float(b[1])
+                ah = float(a[2]) if len(a) > 2 else truck_altitude
+                bh = float(b[2]) if len(b) > 2 else ah
+            except (TypeError, ValueError, IndexError):
+                continue
+            vx, vz = bx - ax, bz - az
+            length2 = vx * vx + vz * vz
+            if length2 < 1e-6:
+                continue
+            t = max(0.0, min(1.0,
+                    ((px - ax) * vx + (pz - az) * vz) / length2))
+            qx, qz = ax + vx * t, az + vz * t
+            distance2 = (px - qx) ** 2 + (pz - qz) ** 2
+            relative_height = ah + (bh - ah) * t - truck_altitude
+            # At an overpass two road segments can occupy the same X/Z. Pick
+            # the deck closest to the truck's current level instead of an
+            # arbitrary upper/lower road, while horizontal distance remains
+            # the hard on-road acceptance condition below.
+            score = distance2 + relative_height * relative_height * 2.0
+            if best is None or score < best[0]:
+                best = (score, distance2, relative_height)
+        # The planned driving line can be laterally offset from the map road
+        # centre, but it must still be within a normal carriageway width.
+        return best[2] if best is not None and best[1] <= 10.0 ** 2 else None
 
     def paintEvent(self, event):
         if (not self.state.get("ar_enabled", True)
@@ -73,9 +113,10 @@ class AROverlay(QWidget):
         pos = self.state.get("truck_world_pos")
         # Use the same real GPS path as the HUD. Keep the last valid path through
         # short shared-memory refresh gaps so the AR ribbon cannot flicker out.
-        path = (self.state.get("nav_path", [])
-                or self.state.get("game_route_points", [])
-                or self.state.get("map_path", []) or [])
+        # AR is safety-sensitive: draw only the route that the navigation
+        # plugin has localized and published for steering. Never fall back to
+        # raw/stale route buffers or an arbitrary road-ahead path.
+        path = self.state.get("nav_path", []) or []
         now = time.monotonic()
         if len(path) >= 2:
             self._last_path = [tuple(point[:2]) for point in path]
@@ -114,15 +155,15 @@ class AROverlay(QWidget):
             vx, vz = b[0] - a[0], b[1] - a[1]
             distance = math.hypot(vx, vz)
             if distance > 40.0:
-                return
+                break
             if distance > .8:
                 direction = (vx / distance, vz / distance)
                 if previous_direction is not None:
                     dot = max(-1.0, min(1.0,
                               direction[0] * previous_direction[0]
                               + direction[1] * previous_direction[1]))
-                    if math.degrees(math.acos(dot)) > 52.0:
-                        return
+                    if math.degrees(math.acos(dot)) > 105.0:
+                        break
                 previous_direction = direction
             samples = max(1, min(24, int(distance / 3.0)))
             for index in range(samples):
@@ -132,6 +173,10 @@ class AROverlay(QWidget):
         if world:
             dense.append(world[-1])
 
+        road_segments = self.state.get("map_road_segments", []) or []
+        truck_altitude = float(self.state.get("truck_altitude", 0.0) or 0.0)
+        if not road_segments:
+            return
         strips = []
         pts = []
         for px, pz in dense:
@@ -142,8 +187,11 @@ class AROverlay(QWidget):
             # source of screen-wide blue diagonals. Only render a plausible,
             # forward road corridor and let the line begin a few metres ahead.
             corridor = max(5.0, 3.8 + ahead * 0.16)
-            p = (self._project(ahead, lateral)
-                 if 7.0 < ahead < 145.0 and abs(lateral) < corridor else None)
+            road_height = self._road_height_at(
+                px, pz, road_segments, truck_altitude)
+            p = (self._project(ahead, lateral, road_height)
+                 if (road_height is not None and 7.0 < ahead < 145.0
+                     and abs(lateral) < corridor) else None)
             if p:
                 if not (-20.0 <= p.x() <= self.width() + 20.0
                         and self.height() * .40 <= p.y() <= self.height() * .98):
