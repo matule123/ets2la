@@ -281,7 +281,9 @@ class UltraPilotHUD(QWidget):
         H = 13.0          # camera height above road
         cam_back = 20.0   # camera behind the truck
         f = view.height() * 0.92
-        horizon = view.top() + view.height() * 0.15
+        # Put the horizon directly against the top of the scene. The old 15%
+        # empty band looked like a gap between the game road and HUD geometry.
+        horizon = view.top() + view.height() * 0.025
         d = ahead + cam_back
         if d < 1.6:
             return None
@@ -324,7 +326,7 @@ class UltraPilotHUD(QWidget):
 
     def _draw_driving_view(self, qp, view, d):
         # Slightly darker ground band below the horizon for depth.
-        horizon_y = view.top() + view.height() * 0.15
+        horizon_y = view.top() + view.height() * 0.025
         qp.setPen(Qt.PenStyle.NoPen)
         qp.setBrush(QColor(9, 11, 14, 235))
         qp.drawRect(QRectF(view.left(), horizon_y, view.width(), view.bottom() - horizon_y))
@@ -364,8 +366,8 @@ class UltraPilotHUD(QWidget):
                 """Clip a truck-space segment to the visible HUD rectangle."""
                 da, dl = b[0] - a[0], b[1] - a[1]
                 t0, t1 = 0.0, 1.0
-                for p, q in ((-da, a[0] + 16.0), (da, 115.0 - a[0]),
-                             (-dl, a[1] + 38.0), (dl, 38.0 - a[1])):
+                for p, q in ((-da, a[0] + 18.0), (da, 210.0 - a[0]),
+                             (-dl, a[1] + 62.0), (dl, 62.0 - a[1])):
                     if abs(p) < 1e-9:
                         if q < 0:
                             return None
@@ -402,6 +404,15 @@ class UltraPilotHUD(QWidget):
                 a, b, t0, t1 = clipped
                 clipped_ah = ah + (bh-ah)*t0
                 clipped_bh = ah + (bh-ah)*t1
+                # Slightly overlap neighbouring sampled quads. Without this,
+                # antialiasing exposed hairline holes on tight curved roads.
+                da, dl = b[0] - a[0], b[1] - a[1]
+                seg_len = math.hypot(da, dl)
+                if seg_len > 0.15:
+                    overlap = min(0.7, seg_len * 0.22)
+                    ua, ul = da / seg_len, dl / seg_len
+                    a = (a[0] - ua * overlap, a[1] - ul * overlap)
+                    b = (b[0] + ua * overlap, b[1] + ul * overlap)
                 nearby.append((max(a[0], b[0]), a, b, clipped_ah, clipped_bh,
                                kind, segment_lanes, divided))
             nearby.sort(reverse=True, key=lambda item: item[0])
@@ -585,31 +596,43 @@ class UltraPilotHUD(QWidget):
         self._draw_low_poly_ego(qp, view)
 
     def _draw_low_poly_ego(self, qp, view):
-        """Clean articulated ETS2LA-style tractor: one solid trailer and cab."""
+        """Grey faceted ETS2LA-style tractor and trailer, built from 3-D prisms."""
         hw = 1.30
         tr_n, tr_f = 1.8, 11.0
         cab_n, cab_f = 10.8, 15.9
-        # Wheels and narrow chassis are behind the body, so no slabs protrude
-        # from the back of the model.
-        for axle in (tr_n + 1.0, tr_f - 1.0, cab_n + .72, cab_f - .58):
+        # Six visible axle positions and a narrow chassis give the silhouette
+        # of a real tractor/semitrailer instead of the former single grey box.
+        for axle in (tr_n + .9, tr_n + 2.0, tr_f - 1.0,
+                     cab_n + .45, cab_n + 1.35, cab_f - .62):
             for side in (-1, 1):
-                self._box3d(qp, axle - .30, axle + .30, .18,
-                            side * (hw + .13), 0, .72, view,
+                self._box3d(qp, axle - .28, axle + .28, .19,
+                            side * (hw + .15), 0, .76, view,
                             ("#17191D", "#353940"))
         self._box3d(qp, tr_n, cab_f, hw * .58, 0, .18, .52, view,
                     ("#30343A", "#454A51"))
-        # Single uninterrupted silver trailer volume.
+        # Faceted silver trailer with a darker lower rail and roof plane.
         self._box3d(qp, tr_n, tr_f, hw, 0, .42, 3.55, view,
-                    ("#92979E", "#D1D4D8"))
-        # Tractor body and sloped cab roof/windshield.
-        self._box3d(qp, cab_n, cab_f, hw, 0, .42, 1.28, view,
-                    ("#7F848B", "#AEB2B7"))
-        self._wedge3d(qp, cab_n, cab_f, hw, 0, 1.22, 2.92, view,
-                      "#858A91", "#C5C9CD", top_hw=.86,
-                      top_near=.34, top_far=.16)
-        self._wedge3d(qp, cab_n + .50, cab_f + .01, hw * .90, 0, 1.62, 2.73, view,
-                      "#353A40", "#596068", top_hw=.82,
-                      top_near=.24, top_far=.12)
+                    ("#858A92", "#C7CBD0"))
+        self._box3d(qp, tr_n + .08, tr_f - .08, hw + .02, 0, .37, .66,
+                    view, ("#555B63", "#747A82"))
+        # Cab-over tractor: lower bumper, sculpted body, sloped glass and roof.
+        self._box3d(qp, cab_n, cab_f, hw, 0, .40, 1.34, view,
+                    ("#737981", "#AEB3B9"))
+        self._wedge3d(qp, cab_n + .04, cab_f, hw, 0, 1.25, 3.02, view,
+                      "#7E848B", "#C8CCD1", top_hw=.84,
+                      top_near=.30, top_far=.20)
+        # Separate dark windshield prism; it follows the same perspective and
+        # therefore reads as a real low-poly face rather than a painted icon.
+        self._wedge3d(qp, cab_n + .56, cab_f + .02, hw * .91, 0,
+                      1.67, 2.76, view, "#30363D", "#59616A",
+                      top_hw=.80, top_near=.22, top_far=.13)
+        # Front grille/bumper and side fuel tanks add recognizable tractor detail.
+        self._box3d(qp, cab_f - .22, cab_f + .12, hw * .72, 0, .55, 1.13,
+                    view, ("#343941", "#515861"))
+        for side in (-1, 1):
+            self._box3d(qp, cab_n + .18, cab_n + 1.55, .24,
+                        side * .86, .46, .92, view,
+                        ("#858B92", "#BFC3C8"))
         self._draw_lights(qp, view, cab_n, cab_f, hw, 0, 2.65)
 
     def _draw_low_poly_vehicle(self, qp, view, ahead, lateral, vehicle):

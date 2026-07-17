@@ -508,7 +508,7 @@ class RoadNetwork:
                                 return result
         return result
 
-    def _road_curve_3d(self, first, second, spacing=5.0):
+    def _road_curve_3d(self, first, second, spacing=2.5):
         """Exact-ish Hermite centreline for a normal road, including height."""
         reverse = False
         tangent_length = self._road_length.get((first, second))
@@ -541,7 +541,7 @@ class RoadNetwork:
             points.reverse()
         return points
 
-    def hud_segments_3d_near(self, pos, radius: float = 170.0, limit: int = 420,
+    def hud_segments_3d_near(self, pos, radius: float = 280.0, limit: int = 950,
                              altitude=None):
         """Curved road segments with elevation for the perspective HUD."""
         if not self.loaded or not pos:
