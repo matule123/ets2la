@@ -513,7 +513,7 @@ class UltraPilotHUD(QWidget):
                                 lane_edges.append((ea, eb))
                         if len(lane_edges) == 2:
                             qp.setPen(Qt.PenStyle.NoPen)
-                            qp.setBrush(QColor(43, 48, 56, 255))
+                            qp.setBrush(QColor(61, 67, 76, 255))
                             qp.drawPolygon(QPolygonF([
                                 lane_edges[0][0], lane_edges[0][1],
                                 lane_edges[1][1], lane_edges[1][0],
@@ -571,7 +571,7 @@ class UltraPilotHUD(QWidget):
                     # at junctions without the former long polygon spikes.
                     if len(edges) == 2:
                         qp.setPen(Qt.PenStyle.NoPen)
-                        qp.setBrush(QColor(43, 48, 56, 255))
+                        qp.setBrush(QColor(61, 67, 76, 255))
                         qp.drawPolygon(QPolygonF([
                             edges[0][0], edges[0][1],
                             edges[1][1], edges[1][0],
@@ -715,8 +715,11 @@ class UltraPilotHUD(QWidget):
                 relative_y = float(v.get("y", d["altitude"]) or 0.0) - d["altitude"]
                 # Never flatten traffic from another bridge level onto the
                 # truck's road. It becomes visible once we are on that deck.
-                if (-2.4 <= relative_y <= 12.0 and -6 < a < 80
-                        and abs(l) < (HALF + 6)):
+                # Retain traffic behind the player as well. It becomes visible
+                # when the user orbits the complete HUD to a rear/side view;
+                # the old -6 m cutoff discarded an entire queue behind us.
+                if (-2.4 <= relative_y <= 12.0 and -100 < a < 100
+                        and abs(l) < max(34.0, HALF + 10)):
                     vehs.append((a, l, relative_y, v))
             vehs.sort(key=lambda t: -t[0])
             for a, l, ground, v in vehs:

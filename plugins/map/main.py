@@ -304,10 +304,11 @@ class Plugin(BasePlugin):
         if current:
             runs.append(current)
         viable = [run for run in runs if len(run) >= 2]
-        valid_uids = (min(viable,
-                          key=lambda run: min(math.dist(pos, self.road_net.nodes[uid])
-                                              for uid in run))
-                      if viable else all_valid)
+        # Keep every UID that exists in the selected dataset, in native GPS
+        # order. Choosing only the run nearest the truck could retain a 0.5 km
+        # fragment from a 9.8 km route. refine_route() safely fills gaps
+        # between surviving UIDs through the directed road graph.
+        valid_uids = all_valid
         matched = [tuple(self.road_net.nodes[uid]) for uid in valid_uids]
         match_ratio = len(all_valid) / max(1, len(uids))
         self.sdk.set("game_route_match", match_ratio)
