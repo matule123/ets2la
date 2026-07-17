@@ -107,12 +107,14 @@ class UltraPilotHUD(QWidget):
             right = bool(key(0x27) & 0x8000)
             reset = bool(key(0x52) & 0x8000)
             pressed = ctrl and (left or right or reset)
+            # Reset is idempotent, so apply it for the whole chord instead of
+            # relying on an edge that Windows can lose while ETS2 has focus.
+            if ctrl and reset:
+                self._view_yaw = 0.0
             if pressed and not self._camera_key_down:
-                if reset:
-                    self._view_yaw = 0.0
-                elif left:
+                if left and not reset:
                     self._view_yaw -= math.radians(15.0)
-                elif right:
+                elif right and not reset:
                     self._view_yaw += math.radians(15.0)
                 self._view_yaw = ((self._view_yaw + math.pi)
                                   % (2 * math.pi)) - math.pi
@@ -548,47 +550,11 @@ class UltraPilotHUD(QWidget):
                         pillar_clear = all(
                             math.hypot(mid_a - old_a, mid_l - old_l) >= 22.0
                             for old_a, old_l in drawn_pillars)
-                        if pillar and pillar_clear and deck_height > 3.2:
-                            drawn_pillars.append((mid_a, mid_l))
-                            ua, ul = da / length, dl / length
-                            # A solid transverse cap carries the deck. Its
-                            # supports sit beyond both carriageway edges, never
-                            # in the lanes running below the bridge.
-                            support_offset = half + 2.0
-                            beam_left = (mid_a - na * (half + 2.35),
-                                         mid_l - nl * (half + 2.35))
-                            beam_right = (mid_a + na * (half + 2.35),
-                                          mid_l + nl * (half + 2.35))
-                            self._oriented_box3d(
-                                qp, beam_left, beam_right, .52,
-                                deck_height - 1.05, deck_height - .38, view,
-                                ("#4B535D", "#7B838D"))
-                            for side in (-1.0, 1.0):
-                                centre = (mid_a + na * support_offset * side,
-                                          mid_l + nl * support_offset * side)
-                                # Do not place a column through the road the
-                                # truck currently occupies beneath the bridge.
-                                if abs(centre[1] - self._ego_road_lateral) < 6.0:
-                                    continue
-                                rear = (centre[0] - ua * .62,
-                                        centre[1] - ul * .62)
-                                front = (centre[0] + ua * .62,
-                                         centre[1] + ul * .62)
-                                self._oriented_box3d(
-                                    qp, rear, front, .62, -.25,
-                                    deck_height - .98, view,
-                                    ("#4D555F", "#858D97"))
-                        # Two continuous filled longitudinal girders remove
-                        # the hollow/wireframe look from the bridge underside.
-                        for girder_side in (-.72, .72):
-                            girder_a = (a[0] + na * half * girder_side,
-                                        a[1] + nl * half * girder_side)
-                            girder_b = (b[0] + na * half * girder_side,
-                                        b[1] + nl * half * girder_side)
-                            self._oriented_box3d(
-                                qp, girder_a, girder_b, .28,
-                                deck_height - .92, deck_height - .34, view,
-                                ("#424952", "#707984"))
+                        # Keep the ETS2LA-style clean elevated ribbon. The old
+                        # procedural columns/crossbeams were generated for
+                        # every sampled road and formed a forest of supports in
+                        # live lanes. Opaque fascia below provides correct
+                        # height and occlusion without inventing structures.
                         qp.setPen(Qt.PenStyle.NoPen)
                         qp.setBrush(QColor(18, 21, 26, 255))
                         for side, (ea, eb) in zip((-1.0, 1.0), edges):
@@ -788,42 +754,42 @@ class UltraPilotHUD(QWidget):
                                         min(math.radians(48), float(articulation)))
             tua, tul = math.cos(trailer_angle), -math.sin(trailer_angle)
             tpa, tpl = -tul, tua
-            self._draw_section_mesh(
-                qp, view, hinge, trailer_angle,
-                [(-11.45, 1.18, .48, 3.42),
-                 (-10.95, 1.30, .48, 3.62),
-                 (-.55, 1.30, .48, 3.62),
-                 (.28, 1.06, .58, 3.42)],
-                ("#747B84", "#969CA3", "#C9CDD1"))
             tail = (hinge[0] - tua * 11.45,
                     hinge[1] - tul * 11.45)
-            # Three closely spaced trailer axles at the rear, as on a semi.
+            # Wheels are painted first so the opaque body correctly hides
+            # their inner halves in rear/front views.
             for axle in (1.35, 2.35, 3.35):
                 ca, cl = tail[0] + tua * axle, tail[1] + tul * axle
                 for side in (-1, 1):
                     self._draw_round_wheel(
                         qp, view, ca + tpa * side * 1.18,
-                        cl + tpl * side * 1.18, 0.0, .39)
+                        cl + tpl * side * 1.18, 0.0, .52)
+            self._draw_section_mesh(
+                qp, view, hinge, trailer_angle,
+                [(-11.45, 1.18, .42, 3.42),
+                 (-10.95, 1.30, .42, 3.62),
+                 (-.55, 1.30, .42, 3.62),
+                 (.28, 1.06, .52, 3.42)],
+                ("#747B84", "#969CA3", "#C9CDD1"))
 
         # Tractor chassis, sleeper and sloped cab form one continuous sealed
         # mesh rather than several intersecting cubes.
-        self._draw_section_mesh(
-            qp, view, centre, angle,
-            [(-3.15, 1.13, .28, 1.12),
-             (-.25, 1.25, .25, 1.32),
-             (.05, 1.25, .25, 2.92),
-             (2.55, 1.20, .25, 3.08),
-             (3.18, .92, .32, 2.52),
-             (3.38, .68, .42, 1.72)],
-            ("#666D76", grey, light))
-
-        # Two driven rear axles and one steering axle, inset in the body.
+        # Wheels first, then one opaque tractor shell over them.
         for axle in (-2.15, -1.15, 2.55):
             ca, cl = along(axle)
             for side in (-1, 1):
                 self._draw_round_wheel(qp, view,
                                        ca + pa * side * 1.16,
-                                       cl + pl * side * 1.16, 0.0, .40)
+                                       cl + pl * side * 1.16, 0.0, .54)
+        self._draw_section_mesh(
+            qp, view, centre, angle,
+            [(-3.15, 1.13, .22, 1.12),
+             (-.25, 1.25, .22, 1.32),
+             (.05, 1.25, .22, 2.92),
+             (2.55, 1.20, .22, 3.08),
+             (3.18, .92, .30, 2.52),
+             (3.38, .68, .40, 1.72)],
+            ("#666D76", grey, light))
 
     def _draw_section_mesh(self, qp, view, centre, angle, sections, colors):
         """Draw a watertight faceted body from connected cross-sections."""
@@ -842,9 +808,8 @@ class UltraPilotHUD(QWidget):
         if not rings or any(point is None for ring in rings for point in ring):
             return
         dark, side, roof = map(QColor, colors)
-        qp.setPen(QPen(QColor(48, 53, 60, 210), .8,
-                       Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
-                       Qt.PenJoinStyle.RoundJoin))
+        # No wireframe seams: ETS2LA models read as solid shaded silhouettes.
+        qp.setPen(Qt.PenStyle.NoPen)
         # Closed end caps.
         qp.setBrush(dark)
         qp.drawPolygon(QPolygonF([rings[0][0], rings[0][1],

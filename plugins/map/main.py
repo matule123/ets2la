@@ -360,6 +360,33 @@ class Plugin(BasePlugin):
         # the segment projection below trim the result at the truck position.
         route_start = max(0, idx - 1)
         remaining_uids = valid_uids[route_start:]
+        route_snap_point = None
+        # Join the truck's exact position to the SDK route through the real
+        # directed road graph. Merely retaining an earlier sparse GPS UID is
+        # insufficient on long road sectors, where its curve can still start
+        # 50+ metres away from the truck.
+        snap_point, start_uid, _dir_x, _dir_z = self.road_net._locate_on_road(
+            pos, heading)
+        if snap_point is not None and start_uid is not None:
+            best_join = None
+            for target_index in range(route_start,
+                                      min(len(valid_uids), route_start + 5)):
+                bridge = self.road_net._route_bridge(
+                    start_uid, valid_uids[target_index], max_expanded=16000)
+                if not bridge:
+                    continue
+                bridge_length = sum(
+                    math.dist(self.road_net.nodes[a], self.road_net.nodes[b])
+                    for a, b in zip(bridge, bridge[1:]))
+                if best_join is None or bridge_length < best_join[0]:
+                    best_join = (bridge_length, target_index, bridge)
+            if best_join is not None:
+                _join_length, target_index, bridge = best_join
+                remaining_uids = bridge + valid_uids[target_index + 1:]
+                route_snap_point = tuple(snap_point)
+                logging.info(
+                    "Navigation: truck snapped to road graph; joining GPS route over %.1f m.",
+                    _join_length)
         cache_signature = tuple(remaining_uids)
         if cache_signature == self._failed_route_signature:
             return []
@@ -407,6 +434,21 @@ class Plugin(BasePlugin):
             self.sdk.set("navigation_failure_reason", "")
         if len(remaining) < 2:
             remaining = matched[idx:]
+        if (route_snap_point is not None and remaining
+                and math.dist(route_snap_point, remaining[0]) <= 180.0):
+            # The snap point and start_uid lie on the same physical road
+            # segment, so this is a valid short partial segment, not an
+            # off-road straight-line shortcut.
+            first = remaining[0]
+            gap = math.dist(route_snap_point, first)
+            steps = max(1, int(math.ceil(gap / 8.0)))
+            partial = [(
+                route_snap_point[0]
+                + (first[0] - route_snap_point[0]) * step / steps,
+                route_snap_point[1]
+                + (first[1] - route_snap_point[1]) * step / steps,
+            ) for step in range(steps)]
+            remaining = partial + remaining
         # Final safety net for both rendering and steering: never publish a
         # discontinuous route across unrelated map sectors.
         continuous = [remaining[0]] if remaining else []
