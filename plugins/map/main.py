@@ -49,6 +49,7 @@ class Plugin(BasePlugin):
         self._route_reversed = False
         self._last_route_progress_log = 0.0
         self._last_navigation_status_log = 0.0
+        self._last_geometry_log = 0.0
         self._resolved_route_cache_signature = None
         self._resolved_route_cache = []
         self._failed_route_signature = None
@@ -618,7 +619,10 @@ class Plugin(BasePlugin):
             self.sdk.set("navigation_unreliable", True)
             logging.error("Navigation rejected for safety: %s.", reason)
             return []
-        if game_distance > 100.0:
+        now = time.monotonic()
+        if (game_distance > 100.0
+                and now - getattr(self, "_last_geometry_log", 0.0) >= 5.0):
+            self._last_geometry_log = now
             logging.info(
                 "Navigation geometry ready: %.3f map km = %.3f GPS km "
                 "(world scale 1:%.2f).",
