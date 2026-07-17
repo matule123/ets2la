@@ -55,7 +55,7 @@ class UltraPilotHUD(QWidget):
     """
 
     # Left-panel size — larger so the 3D scene + truck models read clearly.
-    W, H = 980, 540
+    W, H = 980, 600
 
     def __init__(self, shared_state):
         super().__init__()
@@ -114,10 +114,17 @@ class UltraPilotHUD(QWidget):
         if screen is None:
             return
         area = screen.availableGeometry()
-        max_x = max(area.left(), area.right() - self.width() + 1)
-        max_y = max(area.top(), area.bottom() - self.height() + 1)
-        x = min(max(self.x(), area.left()), max_x)
-        y = min(max(self.y(), area.top()), max_y)
+        # Permit placing most of the HUD outside the game view (for example on
+        # a second monitor or partly beyond a desktop edge). Keep only the drag
+        # grip reachable so the user can always bring it back.
+        grip_width = 58
+        grip_offset = (self.width() - grip_width) // 2
+        min_x = area.left() - grip_offset
+        max_x = area.right() - grip_width - grip_offset + 1
+        min_y = area.top() - 7
+        max_y = area.bottom() - visible_grip + 1
+        x = min(max(self.x(), min_x), max_x)
+        y = min(max(self.y(), min_y), max_y)
         if x != self.x() or y != self.y():
             self.move(x, y)
 
@@ -255,10 +262,13 @@ class UltraPilotHUD(QWidget):
     # --- Driving scene --------------------------------------------------------
     def _project(self, ahead, lateral, view, height=0.0):
         """Ground-plane perspective projection (chase-cam looking forward)."""
-        H = 8.0           # camera height above road
-        cam_back = 14.0   # camera behind the truck
-        f = view.height() * 1.05
-        horizon = view.top() + view.height() * 0.26
+        # Higher chase camera and a higher horizon give the ETS2LA-like
+        # top-down perspective: junction shapes remain legible instead of
+        # collapsing into a dense horizontal bundle in the distance.
+        H = 13.0          # camera height above road
+        cam_back = 20.0   # camera behind the truck
+        f = view.height() * 0.92
+        horizon = view.top() + view.height() * 0.15
         d = ahead + cam_back
         if d < 1.6:
             return None
@@ -301,7 +311,7 @@ class UltraPilotHUD(QWidget):
 
     def _draw_driving_view(self, qp, view, d):
         # Slightly darker ground band below the horizon for depth.
-        horizon_y = view.top() + view.height() * 0.26
+        horizon_y = view.top() + view.height() * 0.15
         qp.setPen(Qt.PenStyle.NoPen)
         qp.setBrush(QColor(9, 11, 14, 235))
         qp.drawRect(QRectF(view.left(), horizon_y, view.width(), view.bottom() - horizon_y))
@@ -341,8 +351,8 @@ class UltraPilotHUD(QWidget):
                 """Clip a truck-space segment to the visible HUD rectangle."""
                 da, dl = b[0] - a[0], b[1] - a[1]
                 t0, t1 = 0.0, 1.0
-                for p, q in ((-da, a[0] - 1.5), (da, 140.0 - a[0]),
-                             (-dl, a[1] + 48.0), (dl, 48.0 - a[1])):
+                for p, q in ((-da, a[0] - 1.5), (da, 115.0 - a[0]),
+                             (-dl, a[1] + 38.0), (dl, 38.0 - a[1])):
                     if abs(p) < 1e-9:
                         if q < 0:
                             return None
@@ -400,6 +410,16 @@ class UltraPilotHUD(QWidget):
                                            b[1] + nl * half * side, view, bh)
                         if ea and eb:
                             edges.append((ea, eb))
+                    # A real asphalt ribbon makes individual curved roads and
+                    # roundabouts readable. Short sampled quads overlap cleanly
+                    # at junctions without the former long polygon spikes.
+                    if len(edges) == 2:
+                        qp.setPen(Qt.PenStyle.NoPen)
+                        qp.setBrush(QColor(35, 39, 45, 225))
+                        qp.drawPolygon(QPolygonF([
+                            edges[0][0], edges[0][1],
+                            edges[1][1], edges[1][0],
+                        ]))
                     edge_pen = QPen(QColor(175, 181, 190, 150), 1.35,
                                     Qt.PenStyle.SolidLine,
                                     Qt.PenCapStyle.RoundCap,
