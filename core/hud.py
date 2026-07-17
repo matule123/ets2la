@@ -302,6 +302,15 @@ class UltraPilotHUD(QWidget):
     # --- Driving scene --------------------------------------------------------
     def _project(self, ahead, lateral, view, height=0.0):
         """Ground-plane perspective projection (chase-cam looking forward)."""
+        # Orbit the complete 3D world around the player's truck. Camera
+        # controls must rotate roads, bridges, traffic and the rig together;
+        # rotating only the truck made it appear detached from its lane.
+        if abs(self._view_yaw) > 1e-6:
+            pivot_a, pivot_l = 12.2, self._ego_road_lateral
+            da, dl = ahead - pivot_a, lateral - pivot_l
+            cosine, sine = math.cos(self._view_yaw), math.sin(self._view_yaw)
+            ahead = pivot_a + da * cosine - dl * sine
+            lateral = pivot_l + da * sine + dl * cosine
         # Higher chase camera and a higher horizon give the ETS2LA-like
         # top-down perspective: junction shapes remain legible instead of
         # collapsing into a dense horizontal bundle in the distance.
@@ -758,9 +767,11 @@ class UltraPilotHUD(QWidget):
 
     def _draw_low_poly_ego(self, qp, view, articulation=0.0, attached=True,
                            road_lateral=0.0):
-        """Recognisable tractor/semitrailer; only this model orbits in the HUD."""
-        grey, light = "#858B92", "#BEC2C7"
-        angle = self._view_yaw
+        """One closed low-poly tractor/semitrailer mesh without box gaps."""
+        grey, light = "#858B92", "#C5C8CC"
+        # _project rotates the entire scene. Geometry remains aligned with the
+        # real truck and therefore cannot orbit independently of its road.
+        angle = 0.0
         ua, ul = math.cos(angle), -math.sin(angle)
         pa, pl = -ul, ua
         centre = (12.2, float(road_lateral))
@@ -768,21 +779,24 @@ class UltraPilotHUD(QWidget):
         def along(distance):
             return (centre[0] + ua * distance, centre[1] + ul * distance)
 
-        tractor_rear, tractor_front = along(-3.0), along(3.2)
         hinge = along(-2.15)
 
-        # Trailer first (behind tractor), articulated around the fifth wheel.
+        # Trailer is a single closed tapered mesh. Its nose overlaps the fifth
+        # wheel so articulation never opens a visible hole in the model.
         if attached:
             trailer_angle = angle - max(-math.radians(48),
                                         min(math.radians(48), float(articulation)))
             tua, tul = math.cos(trailer_angle), -math.sin(trailer_angle)
             tpa, tpl = -tul, tua
-            trailer_length = 11.2
-            tail = (hinge[0] - tua * trailer_length,
-                    hinge[1] - tul * trailer_length)
-            trailer_front = (hinge[0] - tua * .25, hinge[1] - tul * .25)
-            self._oriented_box3d(qp, tail, trailer_front, 1.30, .48, 3.62,
-                                 view, ("#91969C", "#C7CACD"))
+            self._draw_section_mesh(
+                qp, view, hinge, trailer_angle,
+                [(-11.45, 1.18, .48, 3.42),
+                 (-10.95, 1.30, .48, 3.62),
+                 (-.55, 1.30, .48, 3.62),
+                 (.28, 1.06, .58, 3.42)],
+                ("#747B84", "#969CA3", "#C9CDD1"))
+            tail = (hinge[0] - tua * 11.45,
+                    hinge[1] - tul * 11.45)
             # Three closely spaced trailer axles at the rear, as on a semi.
             for axle in (1.35, 2.35, 3.35):
                 ca, cl = tail[0] + tua * axle, tail[1] + tul * axle
@@ -791,12 +805,17 @@ class UltraPilotHUD(QWidget):
                         qp, view, ca + tpa * side * 1.18,
                         cl + tpl * side * 1.18, 0.0, .39)
 
-        # Long low tractor body, then a tall cab only at the front.
-        self._oriented_box3d(qp, tractor_rear, tractor_front, 1.27,
-                             .25, 1.30, view, (grey, light))
-        cab_rear = along(.05)
-        self._oriented_box3d(qp, cab_rear, tractor_front, 1.24,
-                             1.18, 3.08, view, (grey, "#C5C8CC"))
+        # Tractor chassis, sleeper and sloped cab form one continuous sealed
+        # mesh rather than several intersecting cubes.
+        self._draw_section_mesh(
+            qp, view, centre, angle,
+            [(-3.15, 1.13, .28, 1.12),
+             (-.25, 1.25, .25, 1.32),
+             (.05, 1.25, .25, 2.92),
+             (2.55, 1.20, .25, 3.08),
+             (3.18, .92, .32, 2.52),
+             (3.38, .68, .42, 1.72)],
+            ("#666D76", grey, light))
 
         # Two driven rear axles and one steering axle, inset in the body.
         for axle in (-2.15, -1.15, 2.55):
@@ -805,6 +824,48 @@ class UltraPilotHUD(QWidget):
                 self._draw_round_wheel(qp, view,
                                        ca + pa * side * 1.16,
                                        cl + pl * side * 1.16, 0.0, .40)
+
+    def _draw_section_mesh(self, qp, view, centre, angle, sections, colors):
+        """Draw a watertight faceted body from connected cross-sections."""
+        ua, ul = math.cos(angle), -math.sin(angle)
+        pa, pl = -ul, ua
+        rings = []
+        for distance, half, bottom, top in sections:
+            ca = centre[0] + ua * distance
+            cl = centre[1] + ul * distance
+            rings.append([
+                self._project(ca - pa * half, cl - pl * half, view, bottom),
+                self._project(ca + pa * half, cl + pl * half, view, bottom),
+                self._project(ca - pa * half, cl - pl * half, view, top),
+                self._project(ca + pa * half, cl + pl * half, view, top),
+            ])
+        if not rings or any(point is None for ring in rings for point in ring):
+            return
+        dark, side, roof = map(QColor, colors)
+        qp.setPen(QPen(QColor(48, 53, 60, 210), .8,
+                       Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                       Qt.PenJoinStyle.RoundJoin))
+        # Closed end caps.
+        qp.setBrush(dark)
+        qp.drawPolygon(QPolygonF([rings[0][0], rings[0][1],
+                                  rings[0][3], rings[0][2]]))
+        qp.drawPolygon(QPolygonF([rings[-1][0], rings[-1][1],
+                                  rings[-1][3], rings[-1][2]]))
+        # Every adjacent ring shares its vertices: there are no cracks between
+        # the chassis, sleeper, cab or trailer body.
+        for first, second in zip(rings, rings[1:]):
+            qp.setBrush(side.darker(116))
+            qp.drawPolygon(QPolygonF([first[0], second[0],
+                                      second[2], first[2]]))
+            qp.setBrush(side.darker(103))
+            qp.drawPolygon(QPolygonF([first[1], second[1],
+                                      second[3], first[3]]))
+            qp.setBrush(roof)
+            qp.drawPolygon(QPolygonF([first[2], second[2],
+                                      second[3], first[3]]))
+            qp.setBrush(dark.darker(120))
+            qp.drawPolygon(QPolygonF([first[0], second[0],
+                                      second[1], first[1]]))
 
     def _draw_round_wheel(self, qp, view, ahead, lateral, ground=0.0, radius=.36):
         """Perspective-scaled round wheel with a grey inset hub."""
