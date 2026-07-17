@@ -517,7 +517,11 @@ class UltraPilotEngine:
                 distance_disagrees = bool(
                     route_distance > 0 and buffer_distance > 0
                     and abs(buffer_distance - route_distance)
-                    > max(2000.0, max(route_distance, buffer_distance) * 0.18))
+                    # The native SDK buffer advances in sparse node-sized
+                    # steps, while SCS routeDistance decreases continuously.
+                    # A temporary 16.3 vs 13.3 km difference while driving is
+                    # normal; gross mismatches such as 1.7 vs 31 km are not.
+                    > max(5000.0, max(route_distance, buffer_distance) * 0.32))
                 buffer_stale = distance_disagrees
                 self.shared_state.set("route_buffer_distance", buffer_distance)
                 self.shared_state.set("route_buffer_stale", buffer_stale)

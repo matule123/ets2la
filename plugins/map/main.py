@@ -509,6 +509,7 @@ class Plugin(BasePlugin):
         _score, _distance, ri, projected, _alignment = best
         remaining = [projected] + remaining[ri + 1:]
         previous_vector = None
+        previous_length = None
         route_length = 0.0
         for a, b in zip(remaining, remaining[1:]):
             vx, vz = b[0] - a[0], b[1] - a[1]
@@ -530,10 +531,14 @@ class Plugin(BasePlugin):
                               previous_vector[0] * vector[0]
                               + previous_vector[1] * vector[1]))
                     turn_degrees = math.degrees(math.acos(dot))
-                    # Detailed prefab/road curves cannot make an instantaneous
-                    # right angle. Such a corner is a fake bridge between two
-                    # unrelated branches and caused the blue stair-step line.
-                    if turn_degrees > 52.0:
+                    # A connected map graph can legitimately contain an
+                    # approximately 90-degree turn at a junction. Reject it
+                    # only when both arms are long (a fake chord between
+                    # unrelated roads), or when the reversal is extreme.
+                    long_corner = (previous_length is not None
+                                   and min(previous_length, segment_length) > 24.0)
+                    if turn_degrees > 125.0 or (turn_degrees > 72.0
+                                                and long_corner):
                         reason = f"neplatny skok smeru GPS trasy {turn_degrees:.0f} stupnov"
                         self.sdk.set("navigation_failure_reason", reason)
                         self.sdk.set("game_route_points", [])
@@ -543,6 +548,7 @@ class Plugin(BasePlugin):
                         logging.error("Navigation rejected for safety: %s.", reason)
                         return []
                 previous_vector = vector
+                previous_length = segment_length
         game_distance = float(self.sdk.get("game_route_distance", 0.0) or 0.0)
         if (game_distance > 100.0
                 and abs(route_length - game_distance)
@@ -556,6 +562,21 @@ class Plugin(BasePlugin):
             self.sdk.set("navigation_unreliable", True)
             logging.error("Navigation rejected for safety: %s.", reason)
             return []
+        # Publish a consistently dense route. SDK UIDs can be kilometres
+        # apart, while HUD rendering and steering need regular local samples.
+        dense_remaining = []
+        for start, end in zip(remaining, remaining[1:]):
+            distance = math.dist(start, end)
+            samples = max(1, int(math.ceil(distance / 4.0)))
+            for sample in range(samples):
+                fraction = sample / samples
+                point = (start[0] + (end[0] - start[0]) * fraction,
+                         start[1] + (end[1] - start[1]) * fraction)
+                if not dense_remaining or math.dist(dense_remaining[-1], point) > .15:
+                    dense_remaining.append(point)
+        if remaining:
+            dense_remaining.append(remaining[-1])
+        remaining = dense_remaining
         self.sdk.set("navigation_unreliable", False)
         self.sdk.set("game_route_resolved_points", len(remaining))
         self.sdk.set("game_route_points", [list(p) for p in remaining])

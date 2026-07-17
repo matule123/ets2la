@@ -513,7 +513,7 @@ class UltraPilotHUD(QWidget):
                                 lane_edges.append((ea, eb))
                         if len(lane_edges) == 2:
                             qp.setPen(Qt.PenStyle.NoPen)
-                            qp.setBrush(QColor(35, 39, 45, 255))
+                            qp.setBrush(QColor(43, 48, 56, 255))
                             qp.drawPolygon(QPolygonF([
                                 lane_edges[0][0], lane_edges[0][1],
                                 lane_edges[1][1], lane_edges[1][0],
@@ -571,7 +571,7 @@ class UltraPilotHUD(QWidget):
                     # at junctions without the former long polygon spikes.
                     if len(edges) == 2:
                         qp.setPen(Qt.PenStyle.NoPen)
-                        qp.setBrush(QColor(35, 39, 45, 255))
+                        qp.setBrush(QColor(43, 48, 56, 255))
                         qp.drawPolygon(QPolygonF([
                             edges[0][0], edges[0][1],
                             edges[1][1], edges[1][0],
