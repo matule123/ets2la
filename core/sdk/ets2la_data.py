@@ -118,7 +118,7 @@ class ETS2LAData:
             if px == 0 and pz == 0:
                 continue
             out.append({
-                "x": px, "z": pz, "yaw": _yaw(rx, ry, rz, rw),
+                "x": px, "y": py, "z": pz, "yaw": _yaw(rx, ry, rz, rw),
                 "length": length or 4.5, "width": width or 2.0,
                 "speed": speed, "type": _veh_type(length or 4.5), "id": vid,
             })
@@ -138,7 +138,7 @@ class ETS2LAData:
                             or not any((q0, q1, q2, q3))):
                         continue
                     out.append({
-                        "x": px, "z": pz, "yaw": _yaw(q0, q1, q2, q3),
+                        "x": px, "y": py, "z": pz, "yaw": _yaw(q0, q1, q2, q3),
                         "length": length or 4.5, "width": width or 2.0,
                         "speed": 0.0, "type": _veh_type(length or 4.5),
                         "id": vid, "parked": True,
