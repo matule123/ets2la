@@ -154,8 +154,12 @@ class DynamicIsland(QWidget):
             self._navigation_was_active = False
             self.time_lbl.setText("NAV")
             self.msg_lbl.setText(status or "Trasa je pripravená")
-            self.src_lbl.setText("100%")
-            self.progress.setValue(100)
+            succeeded = progress >= 0.99 or "pripraven" in status.lower()
+            self.src_lbl.setText("100%" if succeeded else "NEÚSPEŠNÉ")
+            self.progress.setValue(100 if succeeded else max(0, int(progress * 100)))
+            self.msg_lbl.setStyleSheet(
+                ("color:#047857;" if succeeded else "color:#B42318;")
+                + "font-size:12px;font-weight:700;border:none;")
             self.progress.show()
             self._slide_in()
             self._hide_timer.start(2600)

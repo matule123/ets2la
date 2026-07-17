@@ -108,7 +108,8 @@ class AROverlay(QWidget):
                 t = index / samples
                 dense.append((a[0] + (b[0] - a[0]) * t,
                               a[1] + (b[1] - a[1]) * t))
-        dense.append(world[-1])
+        if world:
+            dense.append(world[-1])
 
         strips = []
         pts = []
@@ -116,7 +117,16 @@ class AROverlay(QWidget):
             dx, dz = px - tx, pz - tz
             ahead = dx * (-math.sin(h)) + dz * (-math.cos(h))
             lateral = dx * math.cos(h) - dz * math.sin(h)
-            p = self._project(ahead, lateral) if 1.0 < ahead < 220.0 else None
+            # The near-camera projection is numerically explosive and was the
+            # source of screen-wide blue diagonals. Only render a plausible,
+            # forward road corridor and let the line begin a few metres ahead.
+            corridor = max(9.0, ahead * 0.62)
+            p = (self._project(ahead, lateral)
+                 if 7.0 < ahead < 145.0 and abs(lateral) < corridor else None)
+            if p:
+                if not (-20.0 <= p.x() <= self.width() + 20.0
+                        and -20.0 <= p.y() <= self.height() + 20.0):
+                    p = None
             if p:
                 if (pts and math.hypot(p.x() - pts[-1].x(),
                                       p.y() - pts[-1].y()) > self.width() * 0.18):

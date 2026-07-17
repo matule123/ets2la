@@ -42,6 +42,7 @@ class Plugin(BasePlugin):
         self._roads_t = 0.0          # throttle nearby-road HUD publishing
         self._last_recalc_request = None
         self._recalc_started = 0.0
+        self._last_recalc_stage = None
         self._auto_map_signature = None
         self._auto_map_loading = False
         self._route_orientation_signature = None
@@ -397,13 +398,19 @@ class Plugin(BasePlugin):
         return []
 
     def _update_recalculation(self, pos, heading):
+        def publish(stage, progress, status):
+            self.sdk.set("navigation_progress", progress)
+            self.sdk.set("navigation_status", status)
+            if stage != self._last_recalc_stage:
+                self._last_recalc_stage = stage
+                logging.info("Navigation: %s", status)
+
         request = self.sdk.get("nav_recalc_request")
         if request and request != self._last_recalc_request:
             self._last_recalc_request = request
             self._recalc_started = time.monotonic()
             self.sdk.set("navigation_recalculating", True)
-            self.sdk.set("navigation_progress", 0.08)
-            self.sdk.set("navigation_status", "Nový cieľ · načítavam trasu z hry…")
+            publish("request", 0.08, "Nový cieľ · čítam body trasy z ETS2…")
             self.sdk.set("nav_path", [])
             logging.info("Navigation: recalculating route for new in-game destination.")
         if not self.sdk.get("navigation_recalculating", False):
@@ -411,18 +418,15 @@ class Plugin(BasePlugin):
         elapsed = time.monotonic() - self._recalc_started
         points = self.sdk.get("game_route_node_uids", []) or []
         if elapsed < 0.25:
-            self.sdk.set("navigation_progress", 0.25)
-            self.sdk.set("navigation_status", "Kontrolujem cieľ a mapové dáta…")
+            publish("validate", 0.25, "Kontrolujem cieľ, mapu a súvislosť trasy…")
             return
         if len(points) < 2:
             stale = bool(self.sdk.get("route_buffer_stale", False))
             if stale:
                 game_km = float(self.sdk.get("game_route_distance", 0.0) or 0.0) / 1000.0
                 old_km = float(self.sdk.get("route_buffer_distance", 0.0) or 0.0) / 1000.0
-                self.sdk.set("navigation_progress", 0.36)
-                self.sdk.set(
-                    "navigation_status",
-                    f"Čakám na novú trasu z hry · stará {old_km:.0f} km, cieľ {game_km:.0f} km")
+                publish("wait-new", 0.36,
+                        f"Čakám na novú trasu · stará {old_km:.0f} km, cieľ {game_km:.0f} km")
                 # Keep polling while the player closes the world map and ETS2
                 # republishes its route; never fall back to the stale UIDs.
                 return
@@ -433,22 +437,31 @@ class Plugin(BasePlugin):
                 self.sdk.set("navigation_status", "Herné GPS neposkytlo naplánovanú trasu")
                 self.sdk.set("navigation_recalculating", False)
                 return
-            self.sdk.set("navigation_progress", 0.42)
-            self.sdk.set("navigation_status", "Čakám na naplánovanú trasu z ETS2…")
+            publish("wait-points", 0.42,
+                    f"Čakám na body GPS z ETS2 · {elapsed:.0f} s")
             return
-        self.sdk.set("navigation_progress", 0.72)
-        self.sdk.set("navigation_status", f"Spracúvam {len(points)} bodov trasy…")
+        if self._net_loading or self.road_net is None or not self.road_net.loaded:
+            publish("load-map", 0.55,
+                    f"Načítavam mapové dáta · prijatých {len(points)} bodov · {elapsed:.0f} s")
+            # Loading a full map can legitimately take longer than route
+            # matching. Do not report a false route failure after 15 seconds.
+            return
+        match = float(self.sdk.get("game_route_match", 0.0) or 0.0)
+        publish("match", 0.72,
+                f"Párujem {len(points)} GPS bodov s mapou · {match * 100:.0f}%")
         path = self._ensure_map_path(pos, heading)
         if len(path) >= 2 and elapsed >= 0.55:
             self.sdk.set("nav_path", path[:60])
             self.sdk.set("navigation_progress", 1.0)
             self.sdk.set("navigation_status", "Trasa prepočítaná · navigácia pripravená")
             self.sdk.set("navigation_recalculating", False)
+            self._last_recalc_stage = "ready"
             logging.info("Navigation: route recalculated (%d planned points).", len(points))
         elif elapsed > 15.0:
             self.sdk.set("navigation_progress", 0.0)
             self.sdk.set("navigation_status", "Trasa nezodpovedá vybranej mape · skontroluj mapové rozhranie")
             self.sdk.set("navigation_recalculating", False)
+            self._last_recalc_stage = "failed"
 
     # --- Tick -----------------------------------------------------------------
     def on_tick(self, delta_time: float):

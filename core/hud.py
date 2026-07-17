@@ -420,14 +420,14 @@ class UltraPilotHUD(QWidget):
                             edges[0][0], edges[0][1],
                             edges[1][1], edges[1][0],
                         ]))
-                    edge_pen = QPen(QColor(175, 181, 190, 150), 1.35,
+                    edge_pen = QPen(QColor(195, 201, 210, 205), 2.35,
                                     Qt.PenStyle.SolidLine,
                                     Qt.PenCapStyle.RoundCap,
                                     Qt.PenJoinStyle.RoundJoin)
                     qp.setPen(edge_pen)
                     for ea, eb in edges:
                         qp.drawLine(ea, eb)
-                    marking = QPen(QColor(218, 222, 228, 155), 1.1,
+                    marking = QPen(QColor(230, 233, 238, 205), 1.9,
                                    Qt.PenStyle.DashLine,
                                    Qt.PenCapStyle.RoundCap)
                     marking.setDashPattern([4, 5])
@@ -492,9 +492,15 @@ class UltraPilotHUD(QWidget):
                 pts = [self._project(a, l, view, 0.0) for a, l in al]
                 pts = [p for p in pts if p is not None]
                 if len(pts) >= 2:
-                    qp.setPen(QPen(QColor(59, 130, 246, 80), 10))
+                    qp.setPen(QPen(QColor(59, 130, 246, 85), 14,
+                                   Qt.PenStyle.SolidLine,
+                                   Qt.PenCapStyle.RoundCap,
+                                   Qt.PenJoinStyle.RoundJoin))
                     qp.drawPolyline(QPolygonF(pts))
-                    qp.setPen(QPen(QColor("#3B82F6"), 4))
+                    qp.setPen(QPen(QColor("#3B82F6"), 6,
+                                   Qt.PenStyle.SolidLine,
+                                   Qt.PenCapStyle.RoundCap,
+                                   Qt.PenJoinStyle.RoundJoin))
                     qp.drawPolyline(QPolygonF(pts))
             # With no GPS route we intentionally draw no invented straight
             # ribbon. Only real nearby map segments remain visible.
