@@ -50,6 +50,7 @@ class Plugin(BasePlugin):
         self._last_route_progress_log = 0.0
         self._last_navigation_status_log = 0.0
         self._last_geometry_log = 0.0
+        self._last_route_join_log = 0.0
         self._resolved_route_cache_signature = None
         self._resolved_route_cache = []
         self._failed_route_signature = None
@@ -447,9 +448,12 @@ class Plugin(BasePlugin):
                 _join_length, target_index, bridge = best_join
                 remaining_uids = bridge + valid_uids[target_index + 1:]
                 route_snap_point = tuple(snap_point)
-                logging.info(
-                    "Navigation: truck snapped to road graph; joining GPS route over %.1f m.",
-                    _join_length)
+                now = time.monotonic()
+                if now - getattr(self, "_last_route_join_log", 0.0) >= 5.0:
+                    self._last_route_join_log = now
+                    logging.info(
+                        "Navigation: truck snapped to road graph; "
+                        "joining GPS route over %.1f m.", _join_length)
         cache_signature = tuple(remaining_uids)
         if cache_signature == self._failed_route_signature:
             return []
