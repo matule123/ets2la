@@ -205,7 +205,8 @@ class MapView(QWidget):
             qp.drawLine(to_screen(a), to_screen(b))
 
         # Blue is reserved for the route selected in the game's GPS.
-        ahead = self.state.get("game_route_points", []) or []
+        ahead = (self.state.get("game_route_points", [])
+                 or self.state.get("nav_path", []) or [])
         if len(ahead) >= 2:
             qp.setPen(QPen(QColor("#1597F5"), 6, Qt.PenStyle.SolidLine,
                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))

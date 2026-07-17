@@ -240,8 +240,10 @@ class Plugin(BasePlugin):
         uids = self.sdk.get("game_route_node_uids", []) or []
         if len(uids) < 2 or self.road_net is None or not self.road_net.loaded:
             return []
-        points = [self.road_net.nodes.get(int(uid)) for uid in uids]
-        matched = [tuple(p) for p in points if p is not None]
+        from core.navigation.road_network import _uid
+        normalized_uids = [_uid(uid) for uid in uids]
+        valid_uids = [uid for uid in normalized_uids if uid in self.road_net.nodes]
+        matched = [tuple(self.road_net.nodes[uid]) for uid in valid_uids]
         match_ratio = len(matched) / max(1, len(uids))
         self.sdk.set("game_route_match", match_ratio)
         if len(matched) < 2 or match_ratio < 0.55:
@@ -274,9 +276,13 @@ class Plugin(BasePlugin):
             self._route_reversed = direction_score(idx - 1) > direction_score(idx + 1)
         if self._route_reversed:
             matched.reverse()
+            valid_uids.reverse()
             route = Route(matched)
             idx = route.closest_index(pos)
-        remaining = matched[idx:]
+        remaining_uids = valid_uids[idx:]
+        remaining = self.road_net.refine_route(remaining_uids)
+        if len(remaining) < 2:
+            remaining = matched[idx:]
         self.sdk.set("game_route_points", [list(p) for p in remaining])
         return remaining
 
@@ -301,7 +307,8 @@ class Plugin(BasePlugin):
                     candidate = RoadNetwork()
                     if not candidate.load(map_data.dataset_dir(dataset["key"])):
                         continue
-                    ratio = sum(1 for uid in uids if int(uid) in candidate.nodes) / len(uids)
+                    from core.navigation.road_network import _uid
+                    ratio = sum(1 for uid in uids if _uid(uid) in candidate.nodes) / len(uids)
                     if ratio > best[0]:
                         best = (ratio, dataset, candidate)
                     if ratio >= 0.92:

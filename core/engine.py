@@ -475,7 +475,14 @@ class UltraPilotEngine:
                                 if isinstance(item, dict) and item.get("uid")]
                 route_signature = None
                 if len(planned_uids) >= 2:
-                    route_signature = (len(planned_uids), planned_uids[-1])
+                    # Include both ends, a middle sample and GPS distance. A
+                    # length+last-node signature missed many newly selected
+                    # waypoints and left the previous/empty route cached.
+                    route_signature = (
+                        len(planned_uids), planned_uids[0],
+                        planned_uids[len(planned_uids) // 2], planned_uids[-1],
+                        int(route_distance // 25),
+                    )
                     if route_signature != self._last_route_signature:
                         self.shared_state.set("game_route_points", [])
                     self.shared_state.set("game_route_node_uids", planned_uids)

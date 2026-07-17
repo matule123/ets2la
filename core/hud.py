@@ -374,18 +374,29 @@ class UltraPilotHUD(QWidget):
                     continue
                 na, nl = -dl / length, da / length
                 half = 3.7
-                corners = [
-                    self._project(a[0] + na * half, a[1] + nl * half, view),
-                    self._project(b[0] + na * half, b[1] + nl * half, view),
-                    self._project(b[0] - na * half, b[1] - nl * half, view),
-                    self._project(a[0] - na * half, a[1] - nl * half, view),
-                ]
-                if all(corners):
-                    # Filled overlapping geometry with no per-segment outline.
-                    # Graph connectors close prefab/junction gaps underneath.
-                    qp.setPen(Qt.PenStyle.NoPen)
-                    qp.setBrush(QColor(31, 35, 41, 248))
-                    qp.drawPolygon(QPolygonF(corners))
+                pa = self._project(a[0], a[1], view)
+                pb = self._project(b[0], b[1], view)
+                ml = self._project((a[0] + b[0]) * .5,
+                                   (a[1] + b[1]) * .5 + half, view)
+                mr = self._project((a[0] + b[0]) * .5,
+                                   (a[1] + b[1]) * .5 - half, view)
+                if pa and pb and ml and mr:
+                    # Bounded screen-space ribbon: near-plane perspective can
+                    # otherwise expand a short junction edge into a giant
+                    # triangle covering half the HUD.
+                    projected = math.hypot(ml.x() - mr.x(), ml.y() - mr.y())
+                    road_width = max(3.0, min(22.0, projected))
+                    qp.setPen(QPen(QColor(31, 35, 41, 248), road_width,
+                                   Qt.PenStyle.SolidLine,
+                                   Qt.PenCapStyle.FlatCap,
+                                   Qt.PenJoinStyle.RoundJoin))
+                    qp.drawLine(pa, pb)
+                    marking = QPen(QColor(218, 222, 228, 155), 1.1,
+                                   Qt.PenStyle.DashLine,
+                                   Qt.PenCapStyle.FlatCap)
+                    marking.setDashPattern([4, 5])
+                    qp.setPen(marking)
+                    qp.drawLine(pa, pb)
 
             path = d["nav_path"]
             local_path = [(0.0, 0.0)]
@@ -407,8 +418,10 @@ class UltraPilotHUD(QWidget):
             if local_path:
                 dense.append(local_path[-1])
             raw = [point for point in dense if 0.5 <= point[0] <= 140.0]
-            # Smooth the path so curves are continuous (no hard kinks).
-            al = self._smooth_path(raw) if len(raw) >= 2 else raw
+            # Prefab routes are already densely sampled from their exact
+            # Hermite curves.  Re-running Catmull-Rom here can overshoot the
+            # circle and visually cut across the middle of a roundabout.
+            al = raw
 
             # Dynamic half-width from the live lane count (not a fixed 2 lanes).
             # ~3.6 m per lane + 1.5 m shoulder on each side, clamped sanely.
