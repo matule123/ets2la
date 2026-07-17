@@ -73,6 +73,7 @@ class UltraPilotEngine:
         self._last_game_route_distance = None
         self._last_game_destination = ""
         self._last_route_signature = None
+        self._had_game_destination = False
         # Track autopilot on/off edges so we release controls only once on disable.
         self._was_active = False
         try:
@@ -469,8 +470,30 @@ class UltraPilotEngine:
                 route_changed = bool(
                     route_distance > 0 and prev_distance is not None and prev_distance > 0
                     and abs(route_distance - prev_distance) > 80.0)
-                first_route = bool(route_distance > 0 and prev_distance in (None, 0))
-                planned_items = self.ets2la_route.read()
+                # A Local\ETS2LARoute mapping can retain its previous UIDs after
+                # the player removes the waypoint. The live SCS route distance
+                # (or an active job destination) is the gate that tells us a
+                # destination actually exists; never plan from buffer contents
+                # alone.
+                has_game_destination = bool(route_distance > 25.0 or dest_city)
+                first_route = bool(has_game_destination and route_distance > 0
+                                   and prev_distance in (None, 0))
+                planned_items = (self.ets2la_route.read()
+                                 if has_game_destination else [])
+                if not has_game_destination:
+                    if (self._had_game_destination
+                            or self.shared_state.get("game_route_node_uids", [])):
+                        logging.info("Navigation: in-game destination cleared; discarding SDK route buffer.")
+                    for key, value in (
+                            ("game_route_node_uids", []),
+                            ("game_route_points", []),
+                            ("game_route_meta", []),
+                            ("map_path", []), ("nav_path", [])):
+                        self.shared_state.set(key, value)
+                    self.shared_state.set("nav_active", False)
+                    self.shared_state.set("navigation_recalculating", False)
+                    self.shared_state.set("navigation_progress", 0.0)
+                    self.shared_state.set("navigation_status", "V hernom GPS nie je zvolený cieľ")
                 # ETS2LA's native planned-route buffer is the authoritative GPS
                 # route.  SCS ``routeDistance`` is not guaranteed to describe
                 # that same route (it can remain the old job/waypoint distance),
@@ -532,10 +555,16 @@ class UltraPilotEngine:
                     self.shared_state.set("game_route_meta", planned_items)
                 if route_signature:
                     self._last_route_signature = route_signature
-                if route_distance > 0:
+                if has_game_destination and route_distance > 0:
                     self._last_game_route_distance = route_distance
+                elif not has_game_destination:
+                    self._last_game_route_distance = None
+                    self._last_route_signature = None
                 if dest_city:
                     self._last_game_destination = dest_city
+                elif not has_game_destination:
+                    self._last_game_destination = ""
+                self._had_game_destination = has_game_destination
                 self.shared_state.update_batch({
                     "telemetry": self.telemetry.data,
                     "speed": truck.get("speed", 0),

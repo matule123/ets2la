@@ -122,7 +122,7 @@ class UltraPilotHUD(QWidget):
         min_x = area.left() - grip_offset
         max_x = area.right() - grip_width - grip_offset + 1
         min_y = area.top() - 7
-        max_y = area.bottom() - visible_grip + 1
+        max_y = area.bottom() - 70 + 1
         x = min(max(self.x(), min_x), max_x)
         y = min(max(self.y(), min_y), max_y)
         if x != self.x() or y != self.y():

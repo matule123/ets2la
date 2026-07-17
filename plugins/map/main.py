@@ -322,6 +322,7 @@ class Plugin(BasePlugin):
                 break
             continuous.append(point)
         remaining = continuous
+        self.sdk.set("game_route_resolved_points", len(remaining))
         self.sdk.set("game_route_points", [list(p) for p in remaining])
         return remaining
 
@@ -458,8 +459,11 @@ class Plugin(BasePlugin):
             self._last_recalc_stage = "ready"
             logging.info("Navigation: route recalculated (%d planned points).", len(points))
         elif elapsed > 15.0:
+            resolved = int(self.sdk.get("game_route_resolved_points", 0) or 0)
             self.sdk.set("navigation_progress", 0.0)
-            self.sdk.set("navigation_status", "Trasa nezodpovedá vybranej mape · skontroluj mapové rozhranie")
+            self.sdk.set(
+                "navigation_status",
+                f"Trasu sa nepodarilo spojiť · {len(points)} GPS bodov, {resolved} mapových bodov")
             self.sdk.set("navigation_recalculating", False)
             self._last_recalc_stage = "failed"
 

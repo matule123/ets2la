@@ -18,6 +18,7 @@ import os
 import json
 import math
 import logging
+import heapq
 
 CACHE_VERSION = 5  # exact road curves + elevation-aware HUD geometry
 
@@ -630,8 +631,80 @@ class RoadNetwork:
                         break
                     result.extend(points[1:] if gap < 1.0 else points)
             elif target is not None:
-                result.append(target)
+                # SDK route nodes are deliberately sparse (dozens of nodes can
+                # represent 100+ km). Fill a non-adjacent pair through the map
+                # graph instead of appending a kilometre-long straight chord.
+                gap = math.dist(result[-1], target) if result else 0.0
+                if gap > 350.0:
+                    bridge = self._route_bridge(first, second)
+                    if len(bridge) < 2:
+                        logging.warning(
+                            "road_network: cannot connect sparse GPS nodes %s -> %s (%.0f m)",
+                            first, second, gap)
+                        break
+                    for bridge_a, bridge_b in zip(bridge, bridge[1:]):
+                        curve = self._road_curve_3d(bridge_a, bridge_b)
+                        points = [(point[0], point[1]) for point in curve]
+                        if points:
+                            if (result and math.dist(result[-1], points[-1])
+                                    < math.dist(result[-1], points[0])):
+                                points.reverse()
+                            result.extend(points[1:] if result and
+                                          math.dist(result[-1], points[0]) < 1.0
+                                          else points)
+                        else:
+                            result.append(self.nodes[bridge_b])
+                else:
+                    result.append(target)
         return result
+
+    def _route_bridge(self, start, goal, max_expanded=12000):
+        """A* bridge between two sparse SDK GPS nodes on the loaded graph."""
+        if start == goal:
+            return [start]
+        cache = getattr(self, "_route_bridge_cache", None)
+        if cache is None:
+            cache = self._route_bridge_cache = {}
+        key = (start, goal)
+        if key in cache:
+            return cache[key]
+        if start not in self.nodes or goal not in self.nodes:
+            return []
+
+        gx, gz = self.nodes[goal]
+        queue = [(math.dist(self.nodes[start], self.nodes[goal]), 0.0, start)]
+        cost = {start: 0.0}
+        previous = {}
+        expanded = 0
+        while queue and expanded < max_expanded:
+            _score, current_cost, current = heapq.heappop(queue)
+            if current_cost != cost.get(current):
+                continue
+            if current == goal:
+                path = [goal]
+                while path[-1] != start:
+                    path.append(previous[path[-1]])
+                path.reverse()
+                cache[key] = path
+                return path
+            expanded += 1
+            neighbours = set(self.adj.get(current, ()))
+            neighbours.update(self.fwd.get(current, ()))
+            neighbours.update(self.bwd.get(current, ()))
+            cx, cz = self.nodes[current]
+            for neighbour in neighbours:
+                point = self.nodes.get(neighbour)
+                if point is None:
+                    continue
+                new_cost = current_cost + math.hypot(point[0] - cx, point[1] - cz)
+                if new_cost >= cost.get(neighbour, float("inf")):
+                    continue
+                cost[neighbour] = new_cost
+                previous[neighbour] = current
+                heuristic = math.hypot(point[0] - gx, point[1] - gz)
+                heapq.heappush(queue, (new_cost + heuristic, new_cost, neighbour))
+        cache[key] = []
+        return []
 
     def _load_road_looks(self, data_dir: str):
         """Load the road-look table (``roadLooks.json``).
