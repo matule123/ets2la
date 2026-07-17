@@ -316,8 +316,8 @@ class UltraPilotHUD(QWidget):
         # Higher chase camera and a higher horizon give the ETS2LA-like
         # top-down perspective: junction shapes remain legible instead of
         # collapsing into a dense horizontal bundle in the distance.
-        H = 18.0          # higher bird's-eye camera, like ETS2LA visualisation
-        cam_back = 38.0   # leaves visible HUD space behind the player's rig
+        H = 17.0          # high bird's-eye camera, like ETS2LA visualisation
+        cam_back = 33.0   # slightly closer rig while retaining some rear space
         f = view.height() * 0.96
         # Put the horizon directly against the top of the scene. The old 15%
         # empty band looked like a gap between the game road and HUD geometry.
@@ -495,13 +495,18 @@ class UltraPilotHUD(QWidget):
             qp.setBrush(QColor(61, 67, 76, 255))
             for (_, sa, sb, sah, sbh, skind, slanes, _divided, _dash,
                  _pillar, _rail) in nearby:
+                # Prefab lane trajectories are navigation curves inside an
+                # already existing road, not additional roads. Rendering each
+                # one as asphalt created the separated parallel strips and
+                # black drop-outs shown in the screenshot.
+                if skind == "lane":
+                    continue
                 sda, sdl = sb[0] - sa[0], sb[1] - sa[1]
                 slength = math.hypot(sda, sdl)
                 if slength < .15:
                     continue
                 sna, snl = -sdl / slength, sda / slength
-                shalf = (1.92 if skind == "lane" else
-                         max(1, min(6, slanes)) * 3.6 / 2.0 + .98)
+                shalf = max(1, min(6, slanes)) * 3.6 / 2.0 + .98
                 surface_edges = []
                 for side in (-1.0, 1.0):
                     sea = self._project(sa[0] + sna * shalf * side,
@@ -656,7 +661,16 @@ class UltraPilotHUD(QWidget):
                                            Qt.PenStyle.SolidLine,
                                            Qt.PenCapStyle.RoundCap))
                         elif dash_on:
-                            qp.setPen(marking)
+                            # Keep the dash cycle continuous across sampled
+                            # chords instead of restarting with a long/short
+                            # fragment at every map segment.
+                            segment_marking = QPen(marking)
+                            ua, ul = da / length, dl / length
+                            along_road = a[0] * ua + a[1] * ul
+                            segment_marking.setDashOffset(
+                                -((along_road / max(1.0, marking.widthF()))
+                                  % 9.5))
+                            qp.setPen(segment_marking)
                         else:
                             continue
                         ma = self._project(a[0] + na * offset,
