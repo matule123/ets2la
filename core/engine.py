@@ -468,7 +468,7 @@ class UltraPilotEngine:
                     dest_city and dest_city != self._last_game_destination)
                 route_changed = bool(
                     route_distance > 0 and prev_distance is not None and prev_distance > 0
-                    and abs(route_distance - prev_distance) > 1000.0)
+                    and abs(route_distance - prev_distance) > 80.0)
                 first_route = bool(route_distance > 0 and prev_distance in (None, 0))
                 planned_items = self.ets2la_route.read()
                 planned_uids = [int(item["uid"]) for item in planned_items
@@ -493,6 +493,14 @@ class UltraPilotEngine:
                 planned_route_changed = bool(
                     route_signature and route_signature != self._last_route_signature)
                 if destination_changed or route_changed or first_route or planned_route_changed:
+                    # Drop every old representation immediately. Otherwise the
+                    # map plugin can keep steering along the previous target
+                    # while the native route buffer is being rebuilt.
+                    self.shared_state.set("game_route_node_uids", [])
+                    self.shared_state.set("game_route_points", [])
+                    self.shared_state.set("game_route_meta", [])
+                    self.shared_state.set("map_path", [])
+                    self.shared_state.set("nav_path", [])
                     request = f"{time.time():.3f}:{dest_city}:{route_distance:.0f}"
                     self.shared_state.set("nav_recalc_request", request)
                     self.shared_state.set("nav_destination", dest_city or "nový cieľ")

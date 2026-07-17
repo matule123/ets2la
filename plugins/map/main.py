@@ -188,6 +188,11 @@ class Plugin(BasePlugin):
         that when present (it's the coherent combined plan). Fallbacks, in order:
         a manual ``lane_offset_m`` override, then the 2.7 m right-lane default.
         This keeps the map plugin a geometry follower, not a strategist."""
+        # The ETS2LA GPS route is built from prefab navigation *lane* curves,
+        # not a road centreline. Applying another 3.5 m lane shift makes the
+        # controller drive beside that curve and oscillate on straight roads.
+        if len(self.sdk.get("game_route_node_uids", []) or []) >= 2:
+            return 0.0
         drv = self.sdk.get("drive_lane_offset", None)
         if drv is not None:
             try:
@@ -276,7 +281,7 @@ class Plugin(BasePlugin):
         # Route buffers can be ordered either way. At the closest node choose
         # the direction whose next segment agrees with the truck heading.
         route = Route(matched)
-        idx = route.closest_index(pos)
+        idx = route.tracking_index(pos, heading)
         fx, fz = -math.sin(heading), -math.cos(heading)
 
         def direction_score(target_index):
@@ -295,7 +300,7 @@ class Plugin(BasePlugin):
             matched.reverse()
             valid_uids.reverse()
             route = Route(matched)
-            idx = route.closest_index(pos)
+            idx = route.tracking_index(pos, heading)
         remaining_uids = valid_uids[idx:]
         remaining = self.road_net.refine_route(remaining_uids)
         if len(remaining) < 2:
@@ -372,7 +377,7 @@ class Plugin(BasePlugin):
         game_route = self._resolved_game_route(pos, heading)
         if len(game_route) >= 2:
             route = Route([tuple(p) for p in game_route])
-            idx = route.closest_index(pos)
+            idx = route.tracking_index(pos, heading)
             remaining = [list(p) for p in route.points[idx:]]
             self.sdk.set("map_path", remaining)
             self.sdk.set("distance_to_dest", route.distance_to_end(pos))

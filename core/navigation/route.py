@@ -104,6 +104,42 @@ class Route:
                 best_d, best_i = d, i
         return best_i
 
+    def tracking_index(self, pos: Point, heading: float) -> int:
+        """Closest route segment that also agrees with the truck heading.
+
+        A pure nearest-point lookup is ambiguous on roundabouts, crossings and
+        parallel carriageways. It can jump to another arm and command a random
+        left/right turn even though the truck is driving straight.
+        """
+        if len(self.points) < 2:
+            return 0
+        px, pz = pos
+        fx, fz = -math.sin(heading), -math.cos(heading)
+        best_index, best_score = 0, float("inf")
+        fallback_index, fallback_score = 0, float("inf")
+        for index, (a, b) in enumerate(zip(self.points, self.points[1:])):
+            ax, az = a
+            bx, bz = b
+            dx, dz = bx - ax, bz - az
+            length2 = dx*dx + dz*dz
+            if length2 < 1e-8:
+                continue
+            t = _clamp(((px-ax)*dx + (pz-az)*dz) / length2, 0.0, 1.0)
+            qx, qz = ax + t*dx, az + t*dz
+            distance2 = (px-qx)**2 + (pz-qz)**2
+            length = math.sqrt(length2)
+            alignment = (dx*fx + dz*fz) / length
+            if distance2 < fallback_score:
+                fallback_index, fallback_score = index, distance2
+            # A heading mismatch carries a strong penalty. Opposite segments
+            # are rejected while a forward-facing alternative exists.
+            if alignment < -0.15:
+                continue
+            score = distance2 + (1.0 - alignment) * 36.0
+            if score < best_score:
+                best_index, best_score = index, score
+        return best_index if best_score < float("inf") else fallback_index
+
     def lookahead_point(self, idx: int, pos: Point, distance: float) -> Point:
         """Walk forward along the polyline ``distance`` metres from waypoint ``idx``."""
         if not self.points:
@@ -142,7 +178,7 @@ class Route:
         """Path-length distance from ``pos`` (snapped to nearest waypoint) to the end."""
         if not self.points:
             return 0.0
-        idx = self.closest_index(pos)
+        idx = self.tracking_index(pos, heading)
         total = math.hypot(self.points[idx][0] - pos[0], self.points[idx][1] - pos[1])
         for i in range(idx, len(self.points) - 1):
             ax, az = self.points[i]
@@ -171,7 +207,7 @@ class Route:
         through three points: the truck, a near point, a far point)."""
         if len(self.points) < 3:
             return 1e6
-        idx = self.closest_index(pos)
+        idx = self.tracking_index(pos, heading)
         # Sample the path at three positions along the upcoming window.
         p0 = (pos[0], pos[1])
         p1 = self.lookahead_point(idx, pos, window_m * 0.5)
@@ -251,6 +287,11 @@ class Route:
         dot = fx * dx + fz * dz
         heading_error = math.atan2(cross, dot)
 
+        # Never chase a target behind the cab. This is a stale/wrong branch,
+        # not a valid steering request.
+        if dot <= 1.0 or abs(heading_error) > math.radians(82.0):
+            return 0.0
+
         # Cross-track error, measured to the lane-offset line so it pulls us
         # into our lane, not the centre. CLAMPED to ±5 m: when the truck is far
         # from the road (e.g. a wrong map dataset is loaded, or we're on a ferry
@@ -276,4 +317,9 @@ class Route:
         # after _clamp and looked like „always full lock one way".
         steer = max(-0.7, min(0.7, steer))
         steer *= speed_gain(speed_ms)
+        # On a genuinely straight road only small lane-centering corrections
+        # are valid. This prevents a bad waypoint from winding the wheel until
+        # the truck leaves its lane, while tight roundabouts remain unrestricted.
+        if radius > 300.0:
+            steer = _clamp(steer, -0.16, 0.16)
         return _clamp(steer, -1.0, 1.0)

@@ -70,8 +70,12 @@ class UltraPilotHUD(QWidget):
 
     def init_ui(self):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint |
-                            Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
+                            Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool |
+                            Qt.WindowType.WindowTransparentForInput)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        # HUD is display-only. It must never capture the mouse while the user
+        # is choosing a new destination on ETS2's world map.
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.resize(self.W, self.H)
         screen = QApplication.primaryScreen().availableGeometry()
         # Bottom-left of the screen (the reference HUD is on the left side).
