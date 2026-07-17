@@ -100,13 +100,13 @@ class UpdateConfirmDialog(QDialog):
     native QMessageBox). Shows the new version, a short note that the app will
     restart, and green/grey Yes–No buttons."""
 
-    def __init__(self, latest_tag, parent=None):
+    def __init__(self, latest_tag, title="", description="", parent=None):
         super().__init__(parent)
         from core.update_check import _display_commit
         latest_tag = _display_commit(str(latest_tag)) or str(latest_tag)
         self.setWindowTitle("Aktualizovať UltraPilot")
         self.setModal(True)
-        self.setFixedSize(420, 230)
+        self.setFixedSize(470, 310)
         # Match the application's default white ETS2LA-style surfaces.
         self.setStyleSheet(
             "UpdateConfirmDialog{background:#FFFFFF;}"
@@ -127,14 +127,19 @@ class UpdateConfirmDialog(QDialog):
         title = QLabel("Dostupná aktualizácia")
         title.setStyleSheet("font-size:18px;font-weight:800;color:#111827;")
         col.addWidget(title)
-        ver = QLabel("Nová verzia: " + str(latest_tag))
+        ver = QLabel("Commit: " + str(latest_tag))
         ver.setStyleSheet("font-size:12px;color:#047857;font-weight:700;")
         col.addWidget(ver)
         head.addLayout(col, stretch=1)
         lay.addLayout(head)
 
-        note = QLabel("Aplikácia sa po dokončení reštartuje.\n"
-                      "Tvoje nastavenia, trasy a mapy zostanú zachované.")
+        commit_title = QLabel(title or "Aktualizácia UltraPilot")
+        commit_title.setWordWrap(True)
+        commit_title.setStyleSheet("font-size:14px;font-weight:800;color:#111827;")
+        lay.addWidget(commit_title)
+        note_text = description or "Táto verzia obsahuje najnovšie opravy a vylepšenia."
+        note = QLabel(note_text + "\n\nAplikácia sa po dokončení reštartuje. "
+                      "Nastavenia, trasy a mapy zostanú zachované.")
         note.setWordWrap(True)
         note.setStyleSheet("font-size:13px;color:#4B5563;background:#F9FAFB;border:1px solid #E5E7EB;border-radius:10px;padding:12px;")
         lay.addWidget(note)
@@ -267,11 +272,15 @@ class UpdateCheckerWidget(QWidget):
         if available and latest:
             from core.update_check import _display_commit
             latest = _display_commit(str(latest)) or str(latest)
+            from core.update_check import latest_commit_info
+            info = latest_commit_info()
+            self._latest_title = info.get("title", "")
+            self._latest_description = info.get("description", "")
             # Remember the tag/SHA so the confirm dialog can show it.
             self._latest_tag = str(latest)
-            # Show the remote commit short SHA so the user knows what's coming.
-            self.status_lbl.setText("Dostupná: " + str(latest))
-            self.btn.setText("Aktualizovať")
+            summary = self._latest_title or "Nová verzia UltraPilot"
+            self.status_lbl.setText("Commit " + str(latest) + "\n" + summary)
+            self.btn.setText("Stiahnuť " + str(latest))
             self._apply_btn_style(update_available=True)
             try:
                 self.btn.clicked.disconnect()
@@ -290,7 +299,11 @@ class UpdateCheckerWidget(QWidget):
 
     def _confirm_update(self):
         latest = getattr(self, "_latest_tag", None) or ""
-        dlg = UpdateConfirmDialog(latest, parent=self)
+        dlg = UpdateConfirmDialog(
+            latest,
+            title=getattr(self, "_latest_title", ""),
+            description=getattr(self, "_latest_description", ""),
+            parent=self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         self._do_update()

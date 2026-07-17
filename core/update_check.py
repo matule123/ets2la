@@ -26,6 +26,7 @@ import sys
 import re
 
 VERSION = "0.4.1"
+_LATEST_COMMIT_INFO = {}
 REPO = "matule123/ets2la"
 API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 ARCHIVE_URL = f"https://github.com/{REPO}/archive/refs/heads/main.zip"
@@ -100,6 +101,15 @@ def latest_release() -> str | None:
         rc = requests.get(f"https://api.github.com/repos/{REPO}/commits/main",
                           headers=headers, timeout=8)
         if rc.status_code == 200:
+            global _LATEST_COMMIT_INFO
+            payload = rc.json() or {}
+            message = (((payload.get("commit") or {}).get("message")) or "").strip()
+            lines = [line.strip() for line in message.splitlines() if line.strip()]
+            _LATEST_COMMIT_INFO = {
+                "sha": _display_commit(payload.get("sha", "")),
+                "title": lines[0] if lines else "Aktualizácia UltraPilot",
+                "description": "\n".join(lines[1:]) if len(lines) > 1 else "",
+            }
             # Keep remote and local revisions identical in presentation and
             # comparison: one conventional seven-character short SHA.
             return _display_commit(rc.json().get("sha", "")) or None
@@ -119,6 +129,11 @@ def latest_release() -> str | None:
     except Exception as e:
         logging.warning("update check: network error — %s", e)
     return None
+
+
+def latest_commit_info() -> dict:
+    """Metadata captured during the latest GitHub commit check."""
+    return dict(_LATEST_COMMIT_INFO)
 
 
 def _looks_like_sha(s: str) -> bool:

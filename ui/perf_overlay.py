@@ -23,7 +23,7 @@ except Exception:
     psutil = None
 
 
-def _collect():
+def _collect(state=None):
     """Return (app_rss_mb, app_cpu_pct, [(plugin_name, rss_mb, cpu_pct), ...])."""
     if psutil is None:
         return 0.0, 0.0, []
@@ -46,13 +46,17 @@ def _collect():
             except Exception:
                 cpu = 0.0
             app_cpu += cpu
-            try:
-                mp_name = next((a for a in p.cmdline() if a.startswith("Plugin-")), None)
-            except Exception:
-                mp_name = None
-            label = mp_name or p.name()
-            if label.startswith("Plugin-"):
-                plugins.append((label.replace("Plugin-", "").capitalize(), rss, cpu))
+            # Plugin names cannot be recovered reliably from a spawned
+            # python.exe command line on Windows. Exact PIDs are published by
+            # PluginManager and resolved below.
+        except Exception:
+            continue
+    published = state.get("plugin_processes", {}) if state is not None else {}
+    for name, pid in dict(published or {}).items():
+        try:
+            proc = psutil.Process(int(pid))
+            plugins.append((str(name).replace("_", " ").title(),
+                            proc.memory_info().rss, proc.cpu_percent(interval=None)))
         except Exception:
             continue
     return app_rss / 1e6, app_cpu, [(n, r / 1e6, c) for n, r, c in plugins]
@@ -78,7 +82,7 @@ class PerfOverlay(QWidget):
             Qt.WindowType.WindowStaysOnTopHint |
             Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
-        self.setFixedSize(330, 360)
+        self.setFixedSize(390, 460)
         self._drag = None
         # Resolve the palette BEFORE _build() so the labels can read _pal.
         from core.theme import palette
@@ -130,10 +134,13 @@ class PerfOverlay(QWidget):
         title.setStyleSheet("font-size:17px;font-weight:800;color:" + self._pal['title'] + ";")
         head.addWidget(title)
         head.addStretch()
-        close = QPushButton("✕")
-        close.setFixedSize(22, 22)
+        close = QPushButton("×")
+        close.setToolTip("Zavrieť Performance")
+        close.setFixedSize(28, 28)
         close.setCursor(Qt.CursorShape.PointingHandCursor)
-        close.setStyleSheet("QPushButton{background:transparent;border:none;color:" + self._pal['muted'] + ";font-size:14px;} QPushButton:hover{color:#EF4444;}")
+        close.setStyleSheet("QPushButton{background:#FEE2E2;border:1px solid #FCA5A5;"
+                            "border-radius:14px;color:#B91C1C;font-size:18px;font-weight:800;}"
+                            "QPushButton:hover{background:#EF4444;color:#FFFFFF;}")
         close.clicked.connect(self.hide)
         head.addWidget(close)
         root.addLayout(head)
@@ -190,24 +197,40 @@ class PerfOverlay(QWidget):
             "stop:0 " + p['title'] + ", stop:1 " + p['accent2'] + ");}")
 
     def refresh(self):
-        app_mb, app_cpu, plugins = _collect()
+        app_mb, app_cpu, plugins = _collect(self.state)
         self.total_lbl.setText(f"RAM\n{app_mb:.0f} MB")
         self.cpu_lbl.setText(f"CPU\n{app_cpu:.0f} %")
         # The total bar is relative to a 1 GB soft cap for a quick visual feel.
         self.total_bar.setValue(min(100, int(app_mb / 1024 * 100)))
         self._clear_rows()
         plug_total = sum(r for _, r, _ in plugins) or 1.0
+        root_row = QHBoxLayout()
+        root_icon = QLabel("●")
+        root_icon.setFixedWidth(24)
+        root_icon.setStyleSheet("color:" + self._pal['title'] + ";font-size:13px;")
+        root_name = QLabel("UltraPilot")
+        root_name.setStyleSheet("font-size:12px;font-weight:800;color:" + self._pal['text'] + ";")
+        root_ram = QLabel(f"{app_mb:.0f} MB")
+        root_ram.setStyleSheet("font-size:11px;font-weight:700;color:" + self._pal['muted'] + ";")
+        root_row.addWidget(root_icon); root_row.addWidget(root_name); root_row.addStretch(); root_row.addWidget(root_ram)
+        root_wrap = QWidget(); root_wrap.setLayout(root_row)
+        root_wrap.setStyleSheet("background:transparent;border:none;")
+        self.rows_box.addWidget(root_wrap)
         if not plugins:
             lbl = QLabel("žiadne pluginy")
             lbl.setStyleSheet("font-size: 11px; color: " + self._pal['muted'] + ";")
             self.rows_box.addWidget(lbl)
             return
-        for name, mb, cpu in sorted(plugins, key=lambda r: -r[1]):
+        ordered = sorted(plugins, key=lambda r: -r[1])
+        for index, (name, mb, cpu) in enumerate(ordered):
             frac = mb / plug_total
             row = QHBoxLayout()
             row.setSpacing(6)
+            branch = QLabel("└─" if index == len(ordered) - 1 else "├─")
+            branch.setFixedWidth(24)
+            branch.setStyleSheet("font-family:Consolas;font-size:14px;color:" + self._pal['muted'] + ";")
             n = QLabel(name)
-            n.setFixedWidth(90)
+            n.setFixedWidth(105)
             n.setStyleSheet("font-size: 11px; color: " + self._pal['text'] + ";")
             bar = QProgressBar()
             bar.setFixedHeight(7)
@@ -219,9 +242,10 @@ class PerfOverlay(QWidget):
             bar.setStyleSheet(
                 "QProgressBar{background:" + self._pal['field'] + "; border:none; border-radius:3px;}"
                 "QProgressBar::chunk{background:" + col + "; border-radius:3px;}")
-            val = QLabel(f"{mb:.0f} MB · {cpu:.0f}%")
-            val.setFixedWidth(72)
+            val = QLabel(f"{mb:.1f} MB")
+            val.setFixedWidth(65)
             val.setStyleSheet("font-size: 11px; color: " + self._pal['muted'] + ";")
+            row.addWidget(branch)
             row.addWidget(n)
             row.addWidget(bar, stretch=1)
             row.addWidget(val)

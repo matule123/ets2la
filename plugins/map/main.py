@@ -44,6 +44,8 @@ class Plugin(BasePlugin):
         self._recalc_started = 0.0
         self._auto_map_signature = None
         self._auto_map_loading = False
+        self._route_orientation_signature = None
+        self._route_reversed = False
         os.makedirs(ROUTES_DIR, exist_ok=True)
         self._publish_route_list()
 
@@ -266,7 +268,11 @@ class Plugin(BasePlugin):
             length = math.hypot(dx, dz) or 1.0
             return (dx * fx + dz * fz) / length
 
-        if direction_score(idx - 1) > direction_score(idx + 1):
+        orientation_signature = (len(uids), int(uids[0]), int(uids[-1]))
+        if orientation_signature != self._route_orientation_signature:
+            self._route_orientation_signature = orientation_signature
+            self._route_reversed = direction_score(idx - 1) > direction_score(idx + 1)
+        if self._route_reversed:
             matched.reverse()
             route = Route(matched)
             idx = route.closest_index(pos)

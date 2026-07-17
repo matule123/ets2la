@@ -1,6 +1,7 @@
 import sys
 import math
 import logging
+import time
 from PyQt6.QtWidgets import QApplication, QWidget
 from PyQt6.QtGui import QPainter, QColor, QFont, QPen, QPolygonF, QRadialGradient, QLinearGradient, QBrush
 from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
@@ -54,7 +55,7 @@ class UltraPilotHUD(QWidget):
     """
 
     # Left-panel size — larger so the 3D scene + truck models read clearly.
-    W, H = 780, 440
+    W, H = 980, 540
 
     def __init__(self, shared_state):
         super().__init__()
@@ -63,6 +64,8 @@ class UltraPilotHUD(QWidget):
         self._drag = None
         self._t = 0.0          # animation clock (seconds) for moving lane dashes
         self._shown = False   # becomes True once the UI process signals ready
+        self._last_nav_path = []
+        self._last_nav_path_at = 0.0
         self.init_ui()
 
     def init_ui(self):
@@ -109,6 +112,17 @@ class UltraPilotHUD(QWidget):
         except (TypeError, ValueError):
             speed = 0.0
         truck = (s.get("telemetry", {}) or {}).get("truck", {}) or {}
+        live_path = (s.get("nav_path", []) or s.get("game_route_points", []) or [])
+        now = time.monotonic()
+        if len(live_path) >= 2:
+            self._last_nav_path = [list(point) for point in live_path]
+            self._last_nav_path_at = now
+        elif self._last_nav_path and now - self._last_nav_path_at <= 3.0:
+            # Keep the previous valid route through brief shared-memory gaps;
+            # this removes the visible blue-line flicker.
+            live_path = self._last_nav_path
+        else:
+            live_path = []
         return {
             "state": state,
             "speed_kmh": abs(speed) * 3.6 if abs(speed) < 200 else abs(speed),
@@ -121,7 +135,7 @@ class UltraPilotHUD(QWidget):
             "traffic": s.get("traffic", []) or [],
             "light": s.get("traffic_light"),
             # The route to draw: active navigation, else the map road ahead.
-            "nav_path": (s.get("nav_path", []) or s.get("map_path", []) or []),
+            "nav_path": live_path,
             "road_segments": s.get("map_road_segments", []) or [],
             "limit_ms": truck.get("speedLimit", 0.0) or 0.0,
             # Rear-view camera: shown when a turn signal is active (left/right)
@@ -356,8 +370,19 @@ class UltraPilotHUD(QWidget):
                     qp.drawPolygon(QPolygonF(corners))
 
             path = d["nav_path"]
-            raw = [pt for pt in (to_truck(px, pz) for px, pz in path)
-                   if 0.5 <= pt[0] <= 140.0]
+            local_path = [(0.0, 0.0)]
+            local_path.extend(to_truck(px, pz) for px, pz in path)
+            dense = []
+            for start, end in zip(local_path, local_path[1:]):
+                distance = math.hypot(end[0] - start[0], end[1] - start[1])
+                samples = max(1, int(distance / 4.0))
+                for index in range(samples):
+                    fraction = index / samples
+                    dense.append((start[0] + (end[0] - start[0]) * fraction,
+                                  start[1] + (end[1] - start[1]) * fraction))
+            if local_path:
+                dense.append(local_path[-1])
+            raw = [point for point in dense if 0.5 <= point[0] <= 140.0]
             # Smooth the path so curves are continuous (no hard kinks).
             al = self._smooth_path(raw) if len(raw) >= 2 else raw
 
@@ -412,7 +437,8 @@ class UltraPilotHUD(QWidget):
                             qp.setPen(pen)
                             qp.drawPolyline(QPolygonF(pts))
                 # 4) Anticipated route (blue) glow on the road.
-                pts = [self._project(a, l, view) for a, l in al]
+                # Height zero pins the route to the asphalt plane.
+                pts = [self._project(a, l, view, 0.0) for a, l in al]
                 pts = [p for p in pts if p is not None]
                 if len(pts) >= 2:
                     qp.setPen(QPen(QColor(59, 130, 246, 80), 10))
@@ -438,16 +464,20 @@ class UltraPilotHUD(QWidget):
     def _draw_low_poly_ego(self, qp, view):
         """Clean neutral-grey ETS2LA-style tractor and box trailer."""
         hw = 1.22
-        tr_n, tr_f = 4.2, 13.2
-        cab_n, cab_f = 13.0, 17.2
+        tr_n, tr_f = 2.4, 11.5
+        cab_n, cab_f = 11.2, 15.6
         self._box3d(qp, tr_n - .25, cab_f + .15, hw + .12, 0, 0, .42, view,
                     ("#30343A", "#454A51"))
         self._box3d(qp, tr_n, tr_f, hw, 0, .42, 3.35, view,
                     ("#969BA2", "#C3C6CA"))
-        self._box3d(qp, cab_n, cab_f, hw, 0, .42, 2.65, view,
-                    ("#858A91", "#B7BBC0"))
-        self._box3d(qp, cab_n + .55, cab_f - .18, hw * .88, 0, 1.55, 2.82, view,
-                    ("#4C5158", "#686E76"))
+        self._box3d(qp, cab_n, cab_f, hw, 0, .42, 1.25, view,
+                    ("#858A91", "#A8ACB2"))
+        self._wedge3d(qp, cab_n, cab_f, hw, 0, 1.25, 2.82, view,
+                      "#858A91", "#BFC3C8", top_hw=.88,
+                      top_near=.38, top_far=.12)
+        self._wedge3d(qp, cab_n + .48, cab_f + .01, hw * .9, 0, 1.58, 2.66, view,
+                      "#4B5057", "#686D74", top_hw=.82,
+                      top_near=.24, top_far=.10)
         for axle in (tr_n + 1.0, tr_f - 1.0, cab_n + .65, cab_f - .55):
             for side in (-1, 1):
                 self._box3d(qp, axle - .30, axle + .30, .18,
@@ -482,15 +512,44 @@ class UltraPilotHUD(QWidget):
             self._box3d(qp, n, fr, hw, lateral, .30, height, view,
                         ("#8F949B", "#BEC2C7"))
             cabin_h = 2.15 if kind == "van" else 1.62
-            self._box3d(qp, n + length * .24, fr - length * .18, hw * .82,
-                        lateral, height * .82, cabin_h, view,
-                        ("#4B5057", "#686D74"))
+            self._wedge3d(qp, n + length * .24, fr - length * .18, hw * .82,
+                          lateral, height * .82, cabin_h, view,
+                          "#4B5057", "#686D74", top_hw=.72,
+                          top_near=.28, top_far=.22)
         for axle in (n + length * .22, fr - length * .22):
             for side in (-1, 1):
                 self._box3d(qp, axle - .18, axle + .18, .12,
                             lateral + side * (hw + .07), 0, .56, view,
                             ("#24272C", "#454A50"))
         self._draw_lights(qp, view, n, fr, hw, lateral, height)
+
+    def _wedge3d(self, qp, near, far, half_width, lateral, z0, z1, view,
+                 side_color, top_color, top_hw=.8, top_near=.2, top_far=.1):
+        """Faceted low-poly prism with a narrower, inset roof."""
+        bottom = [
+            self._project(near, lateral - half_width, view, z0),
+            self._project(near, lateral + half_width, view, z0),
+            self._project(far, lateral - half_width, view, z0),
+            self._project(far, lateral + half_width, view, z0),
+        ]
+        roof_half = half_width * top_hw
+        top = [
+            self._project(near + top_near, lateral - roof_half, view, z1),
+            self._project(near + top_near, lateral + roof_half, view, z1),
+            self._project(far - top_far, lateral - roof_half, view, z1),
+            self._project(far - top_far, lateral + roof_half, view, z1),
+        ]
+        if any(point is None for point in bottom + top):
+            return
+        bl, br, fl, fr = bottom
+        blt, brt, flt, frt = top
+        base = QColor(side_color)
+        qp.setPen(QPen(QColor("#292D32"), 1))
+        qp.setBrush(base.darker(145)); qp.drawPolygon(QPolygonF([bl, br, brt, blt]))
+        qp.setBrush(base.darker(116)); qp.drawPolygon(QPolygonF([bl, fl, flt, blt]))
+        qp.setBrush(base.darker(108)); qp.drawPolygon(QPolygonF([br, fr, frt, brt]))
+        qp.setBrush(base.darker(128)); qp.drawPolygon(QPolygonF([fl, fr, frt, flt]))
+        qp.setBrush(QColor(top_color)); qp.drawPolygon(QPolygonF([blt, brt, frt, flt]))
 
     def _draw_ego_truck(self, qp, view, heading):
         """The player's articulated truck: a detailed cab + a long box trailer.

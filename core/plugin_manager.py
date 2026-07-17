@@ -83,6 +83,7 @@ class PluginManager:
         self.plugin_dir = os.path.join(app_dir(), "plugins")
         # folder -> {class, process, stop_event}
         self.plugins: Dict[str, Dict[str, Any]] = {}
+        self._published_processes = None
 
     # --- Discovery ------------------------------------------------------------
     def _find_plugin_class(self, folder: str) -> Type[BasePlugin]:
@@ -139,6 +140,18 @@ class PluginManager:
         proc.start()
         entry["process"] = proc
         entry["stop_event"] = stop_event
+        self._publish_processes()
+
+    def _publish_processes(self):
+        """Expose exact plugin PIDs for the Performance UI on Windows."""
+        processes = {}
+        for name, entry in self.plugins.items():
+            proc = entry.get("process")
+            if proc is not None and proc.pid and proc.is_alive():
+                processes[name] = int(proc.pid)
+        if processes != self._published_processes:
+            self._published_processes = dict(processes)
+            self.engine.shared_state.set("plugin_processes", processes)
 
     def tick(self, delta_time: float):
         """Supervise plugin processes; restart any that died unexpectedly."""
@@ -151,6 +164,7 @@ class PluginManager:
                     and not stop_event.is_set():
                 logging.warning(f"Plugin '{folder}' died — restarting.")
                 self._spawn(folder)
+        self._publish_processes()
 
     def stop_all(self):
         for entry in self.plugins.values():
@@ -162,3 +176,4 @@ class PluginManager:
                 proc.join(timeout=1)
                 if proc.is_alive():
                     proc.terminate()
+        self.engine.shared_state.set("plugin_processes", {})
