@@ -477,7 +477,7 @@ class UltraPilotHUD(QWidget):
                     # A small overlap left wedge-shaped holes between chords;
                     # extend almost half a chord at each end so adjacent
                     # asphalt polygons always form one continuous ribbon.
-                    overlap = min(1.8, seg_len * 0.46)
+                    overlap = min(0.8, seg_len * 0.24)
                     ua, ul = da / seg_len, dl / seg_len
                     a = (a[0] - ua * overlap, a[1] - ul * overlap)
                     b = (b[0] + ua * overlap, b[1] + ul * overlap)
@@ -503,9 +503,10 @@ class UltraPilotHUD(QWidget):
                         kind == "road" and abs(centre_lateral) < 10.0
                         and abs(da) / length > 0.68)
                     if kind == "lane":
-                        # Prefab data describes real lane trajectories through
-                        # ramps and junctions. Render each as an opaque asphalt
-                        # strip; outlines alone caused the thin wire roads.
+                        # Prefab trajectories connect roads through junctions.
+                        # Draw one round-capped surface only. Giving every
+                        # individual trajectory its own polygon and two white
+                        # edges sliced the underlying road into rectangles.
                         lane_half = 1.92
                         lane_edges = []
                         for side in (-1.0, 1.0):
@@ -529,17 +530,6 @@ class UltraPilotHUD(QWidget):
                                            Qt.PenCapStyle.RoundCap,
                                            Qt.PenJoinStyle.RoundJoin))
                             qp.drawLine(pa, pb)
-                            qp.setPen(Qt.PenStyle.NoPen)
-                            qp.setBrush(QColor(61, 67, 76, 255))
-                            qp.drawPolygon(QPolygonF([
-                                lane_edges[0][0], lane_edges[0][1],
-                                lane_edges[1][1], lane_edges[1][0],
-                            ]))
-                        qp.setPen(QPen(QColor(190, 197, 207, 220), 1.7,
-                                       Qt.PenStyle.SolidLine,
-                                       Qt.PenCapStyle.RoundCap))
-                        for ea, eb in lane_edges:
-                            qp.drawLine(ea, eb)
                         continue
                     # ETS2LA-style schematic geometry: two precise road edges
                     # and a faint centre marking. Filled rectangles for every
@@ -639,9 +629,10 @@ class UltraPilotHUD(QWidget):
                                     view, deck_height + .62)
                                 if post_bottom and post_top:
                                     qp.drawLine(post_bottom, post_top)
-                    marking = QPen(QColor(230, 233, 238, 220), 2.4,
-                                   Qt.PenStyle.SolidLine,
-                                   Qt.PenCapStyle.RoundCap)
+                    marking = QPen(QColor(230, 233, 238, 220), 2.2,
+                                   Qt.PenStyle.CustomDashLine,
+                                   Qt.PenCapStyle.FlatCap)
+                    marking.setDashPattern([5.5, 4.0])
                     qp.setPen(marking)
                     # Draw every divider on the road occupied by the truck.
                     # Four detected lanes therefore produce three dashed lines.
@@ -650,8 +641,7 @@ class UltraPilotHUD(QWidget):
                     if not offsets:
                         offsets = [0.0]
                     for offset in offsets:
-                        if ((divided and abs(offset) < 0.25)
-                                or follows_truck_road):
+                        if divided and abs(offset) < 0.25:
                             qp.setPen(QPen(QColor(244, 246, 248, 235), 3.0,
                                            Qt.PenStyle.SolidLine,
                                            Qt.PenCapStyle.RoundCap))
