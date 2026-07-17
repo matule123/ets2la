@@ -583,6 +583,7 @@ class RoadNetwork:
     def refine_route(self, uids, progress=None):
         """Replace prefab entrance chords in a GPS UID route with nav curves."""
         self._last_refine_complete = True
+        self._last_refine_error = ""
         deadline = time.monotonic() + 25.0
         uids = [_uid(value) for value in uids]
         if not uids:
@@ -592,6 +593,7 @@ class RoadNetwork:
         for pair_index, (first, second) in enumerate(pairs, 1):
             if time.monotonic() >= deadline:
                 self._last_refine_complete = False
+                self._last_refine_error = f"časový limit pri úseku {pair_index}/{len(pairs)}"
                 logging.warning("road_network: GPS route refinement timed out at %d/%d sections",
                                 pair_index, len(pairs))
                 break
@@ -626,15 +628,16 @@ class RoadNetwork:
                         instance, indices, self.nodes[first])
                     break
             if detailed:
+                start_gap = math.dist(result[-1], detailed[0]) if result else 0.0
+                end_gap = math.dist(detailed[-1], target) if target is not None else 0.0
+                # A prefab transform can be offset from the SDK endpoint. Do
+                # not abort the whole route; fall through to graph bridging.
+                if start_gap > 12.0 or end_gap > 12.0:
+                    detailed = None
+            if detailed:
                 gap = math.dist(result[-1], detailed[0]) if result else 0.0
-                if gap > 12.0:
-                    self._last_refine_complete = False
-                    break
                 result.extend(detailed[1:] if gap < 1.0 else detailed)
                 if target is not None:
-                    if math.dist(result[-1], target) > 12.0:
-                        self._last_refine_complete = False
-                        break
                     result.append(target)
             elif ((first, second) in self._road_length
                   or (second, first) in self._road_length):
@@ -646,6 +649,8 @@ class RoadNetwork:
                     gap = math.dist(result[-1], points[0]) if result else 0.0
                     if gap > 12.0:
                         self._last_refine_complete = False
+                        self._last_refine_error = (
+                            f"nesúvislá cestná krivka {first} → {second}, medzera {gap:.0f} m")
                         break
                     result.extend(points[1:] if gap < 1.0 else points)
             elif target is not None:
@@ -653,7 +658,7 @@ class RoadNetwork:
                 # represent 100+ km). Fill a non-adjacent pair through the map
                 # graph instead of appending a kilometre-long straight chord.
                 gap = math.dist(result[-1], target) if result else 0.0
-                if gap > 350.0:
+                if gap > 40.0:
                     bridge = self._route_bridge(
                         first, second,
                         progress=(lambda expanded, pi=pair_index:
@@ -661,6 +666,8 @@ class RoadNetwork:
                         if progress else None)
                     if len(bridge) < 2:
                         self._last_refine_complete = False
+                        self._last_refine_error = (
+                            f"cestný graf nespojil uzly {first} → {second}, medzera {gap:.0f} m")
                         logging.warning(
                             "road_network: cannot connect sparse GPS nodes %s -> %s (%.0f m)",
                             first, second, gap)

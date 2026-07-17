@@ -347,11 +347,17 @@ class Plugin(BasePlugin):
             if not getattr(self.road_net, "_last_refine_complete", True):
                 self.sdk.set("game_route_resolved_points", len(remaining))
                 self.sdk.set("game_route_points", [])
+                reason = (getattr(self.road_net, "_last_refine_error", "")
+                          or "neznáma chyba spojenia cestnej siete")
+                self.sdk.set("navigation_failure_reason", reason)
+                logging.error("Navigation geometry failed: %s (%d partial points).",
+                              reason, len(remaining))
                 self._failed_route_signature = cache_signature
                 return []
             self._resolved_route_cache_signature = cache_signature
             self._resolved_route_cache = list(remaining)
             self._failed_route_signature = None
+            self.sdk.set("navigation_failure_reason", "")
         if len(remaining) < 2:
             remaining = matched[idx:]
         # Final safety net for both rendering and steering: never publish a
@@ -511,10 +517,12 @@ class Plugin(BasePlugin):
                          len(path[:60]))
         elif elapsed > 15.0:
             resolved = int(self.sdk.get("game_route_resolved_points", 0) or 0)
+            reason = (self.sdk.get("navigation_failure_reason", "")
+                      or "mapové body nevytvorili súvislú trasu")
             self.sdk.set("navigation_progress", 0.0)
             self.sdk.set(
                 "navigation_status",
-                f"Trasu sa nepodarilo spojiť · {len(points)} GPS bodov, {resolved} mapových bodov")
+                f"Chyba trasy: {reason} · {len(points)} GPS / {resolved} mapových bodov")
             self.sdk.set("navigation_recalculating", False)
             self._last_recalc_stage = "failed"
             logging.error(
@@ -522,7 +530,8 @@ class Plugin(BasePlugin):
                 "match %.1f%%, elapsed %.2fs.",
                 len(points), resolved, match * 100.0,
                 time.monotonic() - self._recalc_started)
-            logging.error("Navigation route was not published; HUD/live map keep navigation empty for safety.")
+            logging.error("Navigation route was not published: %s. HUD/live map remain empty for safety.",
+                          reason)
 
     # --- Tick -----------------------------------------------------------------
     def on_tick(self, delta_time: float):

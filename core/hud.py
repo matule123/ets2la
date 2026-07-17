@@ -364,7 +364,7 @@ class UltraPilotHUD(QWidget):
                 """Clip a truck-space segment to the visible HUD rectangle."""
                 da, dl = b[0] - a[0], b[1] - a[1]
                 t0, t1 = 0.0, 1.0
-                for p, q in ((-da, a[0] - 1.5), (da, 115.0 - a[0]),
+                for p, q in ((-da, a[0] + 16.0), (da, 115.0 - a[0]),
                              (-dl, a[1] + 38.0), (dl, 38.0 - a[1])):
                     if abs(p) < 1e-9:
                         if q < 0:
@@ -421,11 +421,21 @@ class UltraPilotHUD(QWidget):
                         # Prefab data describes individual lane trajectories.
                         # Rendering every one as a full road created the dense
                         # overlapping mess at motorway junctions.
-                        qp.setPen(QPen(QColor(38, 43, 50, 205), 3.2,
+                        lane_half = 1.75
+                        lane_edges = []
+                        for side in (-1.0, 1.0):
+                            ea = self._project(a[0] + na * lane_half * side,
+                                               a[1] + nl * lane_half * side, view, ah)
+                            eb = self._project(b[0] + na * lane_half * side,
+                                               b[1] + nl * lane_half * side, view, bh)
+                            if ea and eb:
+                                lane_edges.append((ea, eb))
+                        qp.setPen(QPen(QColor(174, 181, 191, 150), 1.15,
                                        Qt.PenStyle.SolidLine,
                                        Qt.PenCapStyle.RoundCap))
-                        qp.drawLine(pa, pb)
-                        qp.setPen(QPen(QColor(154, 161, 171, 115), 0.9,
+                        for ea, eb in lane_edges:
+                            qp.drawLine(ea, eb)
+                        qp.setPen(QPen(QColor(208, 213, 221, 125), 0.9,
                                        Qt.PenStyle.DashLine,
                                        Qt.PenCapStyle.RoundCap))
                         qp.drawLine(pa, pb)
