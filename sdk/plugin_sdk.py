@@ -28,6 +28,7 @@ CTL_THROTTLE = "ctl_throttle"
 CTL_BRAKE = "ctl_brake"
 CTL_BLINKER = "ctl_blinker"
 CTL_PAY_TOLL = "ctl_pay_toll"
+CTL_SELECT_DRIVE = "ctl_select_drive"
 
 
 class _SharedStateView:
@@ -104,6 +105,11 @@ class _ControllerProxy:
 
     def pay_toll(self):
         self._state[CTL_PAY_TOLL] = True
+
+    def select_drive(self, pressed: bool = True):
+        """Publish a momentary Drive-selector intent for the engine owner."""
+        self._state[CTL_SELECT_DRIVE] = bool(pressed)
+        return True
 
 
 class _Tags:

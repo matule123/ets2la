@@ -40,6 +40,7 @@ class Plugin(BasePlugin):
         self.road_net = None         # RoadNetwork loaded from a downloaded map
         self._net_attempted = False  # tried to load the road network this run?
         self._net_loading = False    # background load in progress (don't re-enter)
+        self._map_load_generation = 0
         self._diag_t = 0.0           # throttle for localization diagnostics
         self._roads_t = 0.0          # throttle nearby-road HUD publishing
         self._lane_signature = None
@@ -395,13 +396,27 @@ class Plugin(BasePlugin):
             logging.info("Navigation: stopped.")
 
         elif cmd == "switch_map":
+            self._map_load_generation += 1
             self.road_net = None
             self._net_attempted = False
             self._net_loading = False
+            self._lane_signature = None
+            self._lane_path = None
+            self._lane_route = None
+            self._lane_match = None
+            self._lane_failure_signature = None
+            self._last_logged_lane_failure = None
+            self._lane_retry_at = 0.0
             self.sdk.set("active_map_key", None)
             self.sdk.set("active_map_name", None)
             self.sdk.set("map_path", [])
+            self.sdk.set("map_road_segments", [])
+            self.sdk.set("lane_match", None)
             self.sdk.set("nav_active", False)
+            self.sdk.set("nav_steering", 0.0)
+            self._publish_invalid_lane_trajectory(
+                "Map dataset is changing", (),
+                "Načítavam zvolenú mapu", log_failure=False)
             self.sdk.set("map_status", f"Loading map dataset {arg}...")
             logging.info("Navigation: switching map dataset to %s.", arg)
 
@@ -422,6 +437,7 @@ class Plugin(BasePlugin):
         self._net_loading = True
         try:
             import threading
+            generation = self._map_load_generation
 
             def _worker():
                 try:
@@ -440,6 +456,8 @@ class Plugin(BasePlugin):
                     chosen = next((d for d in downloaded if d["key"] == wanted), None)
                     if chosen is None:
                         chosen = downloaded[0]
+                    if generation != self._map_load_generation:
+                        return
                     self.sdk.set("active_map_key", chosen["key"])
                     self.sdk.set("active_map_name",
                                  chosen.get("name") or chosen["key"])
@@ -447,6 +465,11 @@ class Plugin(BasePlugin):
                                  f"Loading road network ({chosen['key']})…")
                     net = RoadNetwork()
                     if net.load(map_data.dataset_dir(chosen["key"])):
+                        if generation != self._map_load_generation:
+                            logging.info(
+                                "Navigation: discarded stale map load for %s.",
+                                chosen["key"])
+                            return
                         self.road_net = net
                         self.sdk.set("map_status",
                                      f"Map ready ({len(net.segments)} segments). "
@@ -462,7 +485,8 @@ class Plugin(BasePlugin):
                     logging.error("Navigation: engine-side road network load failed: %s", e)
                     self.sdk.set("map_status", f"Map load error: {e}")
                 finally:
-                    self._net_loading = False
+                    if generation == self._map_load_generation:
+                        self._net_loading = False
 
             threading.Thread(target=_worker, name="RoadNetLoader", daemon=True).start()
         except Exception as e:

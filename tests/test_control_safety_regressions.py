@@ -12,6 +12,7 @@ from core.ar_overlay import _perspective_route_widths, _segment_is_occluded
 from core.hud import HUD_CAMERA_BACK_M, HUD_EGO_AHEAD_M, UltraPilotHUD
 from plugins.autopilot.main import Plugin as AutopilotPlugin
 from plugins.lanecontrol.main import Plugin as LaneControlPlugin
+from sdk.plugin_sdk import _ControllerProxy, CTL_SELECT_DRIVE
 
 
 class State:
@@ -57,6 +58,14 @@ def autopilot(truck, state):
 
 
 class ControlSafetyRegressionTests(unittest.TestCase):
+    def test_plugin_controller_proxy_supports_drive_selector(self):
+        state = {}
+        proxy = _ControllerProxy(state)
+        self.assertTrue(proxy.select_drive(True))
+        self.assertIs(state[CTL_SELECT_DRIVE], True)
+        self.assertTrue(proxy.select_drive(False))
+        self.assertIs(state[CTL_SELECT_DRIVE], False)
+
     def test_lanecontrol_accepts_authoritative_xyz_path(self):
         plugin = LaneControlPlugin.__new__(LaneControlPlugin)
         plugin.sdk = type("SDK", (), {})()

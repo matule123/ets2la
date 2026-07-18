@@ -17,6 +17,7 @@ from core.camera import CameraSnapshotProducer
 from core.navigation.runtime_preflight import build_runtime_preflight
 from sdk.plugin_sdk import (
     CTL_STEERING, CTL_THROTTLE, CTL_BRAKE, CTL_BLINKER, CTL_PAY_TOLL,
+    CTL_SELECT_DRIVE,
 )
 
 
@@ -565,6 +566,13 @@ class UltraPilotEngine:
         if self.shared_state.get(CTL_PAY_TOLL):
             self.controller.pay_toll()
             self.shared_state.set(CTL_PAY_TOLL, False)
+
+        drive_intent = self.shared_state.get(CTL_SELECT_DRIVE, None)
+        if drive_intent is not None:
+            self.controller.select_drive(bool(drive_intent))
+            # Event semantics: consume exactly once. The plugin explicitly
+            # publishes False when the selector should be released.
+            self.shared_state.set(CTL_SELECT_DRIVE, None)
 
     def run_loop(self):
         last_time = time.time()
