@@ -579,9 +579,6 @@ class UltraPilotEngine:
                 camera_snapshot = self.camera_snapshot_producer.read(
                     raw.get("renderTime", 0), telemetry_timestamp)
                 self._camera_diagnostic(camera_snapshot)
-                camera_matrix = (list(camera_snapshot.get(
-                    "view_projection", ()))
-                    if camera_snapshot.get("valid", False) else [])
                 self.shared_state.set(
                     "game_in_truck", bool(raw.get("sdkActive", bool(truck))))
                 self._autostart_truck(truck)
@@ -777,23 +774,10 @@ class UltraPilotEngine:
                     "telemetry": self.telemetry.data,
                     "telemetry_valid": bool(truck.get("pose_valid", False)),
                     "telemetry_timestamp": telemetry_timestamp,
-                    # Camera snapshot + matrix compatibility output are
-                    # published in the same Manager update as telemetry.
+                    # Camera and telemetry are one atomic Manager update.
+                    # Consumers use this snapshot directly; no second matrix
+                    # authority is published under a compatibility key.
                     "camera_snapshot": camera_snapshot,
-                    "game_camera_view_projection": camera_matrix,
-                    "game_camera_view_projection_meta": {
-                        "revision": camera_snapshot.get("revision", 0),
-                        "valid": bool(camera_snapshot.get("valid", False)),
-                        "failure_reason": camera_snapshot.get(
-                            "failure_reason", ""),
-                        "layout": camera_snapshot.get("matrix_layout"),
-                        "handedness": camera_snapshot.get("handedness"),
-                        "clip_space": camera_snapshot.get("clip_space"),
-                        "timestamp": camera_snapshot.get("timestamp", 0.0),
-                        "telemetry_timestamp": telemetry_timestamp,
-                        "render_time_us": camera_snapshot.get(
-                            "render_time_us", 0),
-                    },
                     "speed": truck.get("speed", 0),
                     # World pose for coordinate-based navigation (map plugin).
                     "truck_world_pos": (truck.get("x", 0.0), truck.get("z", 0.0)),
@@ -858,14 +842,6 @@ class UltraPilotEngine:
                     "telemetry_valid": False,
                     "telemetry_timestamp": telemetry_timestamp,
                     "camera_snapshot": camera_snapshot,
-                    "game_camera_view_projection": [],
-                    "game_camera_view_projection_meta": {
-                        "revision": camera_snapshot.get("revision", 0),
-                        "valid": False,
-                        "failure_reason": camera_snapshot.get(
-                            "failure_reason", "telemetry is unavailable"),
-                        "timestamp": telemetry_timestamp,
-                    },
                 })
 
             # A transient error in any one frame must NOT kill the engine — log

@@ -239,7 +239,7 @@ class LaneLocator:
             elif self.network.lanes_connected(previous.lane_id,
                                               chosen[1].lane_id):
                 reason = "topology_transition"
-        score, lane, point, segment_index, point_index, signed, vertical, error, confidence, components = chosen
+        score, lane, point, segment_index, point_index, signed, vertical, _, confidence, components = chosen
         match = LaneMatch(lane.lane_id, point, segment_index, point_index,
                           signed, vertical, wrap_angle(heading - point.heading),
                           score, confidence, reason, components)

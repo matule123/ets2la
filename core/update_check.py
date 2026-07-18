@@ -233,11 +233,19 @@ _PROTECTED = {
     "UltraPilot_Installer.exe", "install.json",
 }
 
+# Removed production modules that a ZIP update cannot delete merely by
+# extracting the new archive. Paths are explicit and repository-relative.
+_OBSOLETE = {
+    "core/sdk/projection.py",
+    "plugins/hud/elements/traffic_lights.py",
+    "plugins/hud/elements/world.py",
+}
+
 
 def _zip_update(progress_cb=None, target_commit=None) -> bool:
     """Fallback: download the main-branch zip and overwrite non-protected files."""
     try:
-        import requests, zipfile, io, shutil
+        import requests, zipfile, io
         if progress_cb:
             progress_cb(0.1, "Sťahujem balík aktualizácie…")
         r = requests.get(ARCHIVE_URL, timeout=180, stream=True)
@@ -257,13 +265,23 @@ def _zip_update(progress_cb=None, target_commit=None) -> bool:
             if n.endswith("/"):
                 continue
             rel = n[len(prefix) + 1:] if prefix and n.startswith(prefix + "/") else n
-            if not rel or rel in _PROTECTED or rel.split(os.sep)[0] in _PROTECTED:
+            # ZIP member names always use '/', including on Windows. Validate
+            # each component before turning it into a local path; this also
+            # prevents a malformed archive from escaping the app directory.
+            parts = tuple(part for part in rel.replace("\\", "/").split("/")
+                          if part not in ("", "."))
+            if (not parts or parts[0] in _PROTECTED
+                    or any(part == ".." or ":" in part for part in parts)):
                 continue
-            dest = os.path.join(_app_dir(), rel)
+            dest = os.path.join(_app_dir(), *parts)
             os.makedirs(os.path.dirname(dest) or _app_dir(), exist_ok=True)
             with open(dest, "wb") as f:
                 f.write(zf.read(n))
             replaced += 1
+        for rel in _OBSOLETE:
+            obsolete = os.path.join(_app_dir(), *rel.split("/"))
+            if os.path.isfile(obsolete):
+                os.remove(obsolete)
         # Persist the exact remote revision outside the bundled executable.
         # git_commit() reads this file before the embedded build metadata, so
         # the same downloaded update is not offered again after restart.

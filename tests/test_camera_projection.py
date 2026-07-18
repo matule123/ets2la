@@ -1,9 +1,11 @@
 import math
+import io
 import multiprocessing as mp
 import struct
 import threading
 import time
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -18,6 +20,7 @@ from core.ipc.shared_state import SharedState
 from core.navigation.runtime_preflight import build_runtime_preflight
 from core.sdk.scs_sdk import SCSTelemetry
 from core.sdk.game_utils import install_game_dlls
+from core import update_check
 from sdk.plugin_sdk import CTL_BRAKE, CTL_STEERING, CTL_THROTTLE
 from plugins.autopilot.main import lane_authority_rejection_reason
 from tests.test_lane_authority_integration import Controller, State
@@ -45,6 +48,55 @@ def snapshot(raw=None, view=None, now=None, render_time=1_000_000):
 
 
 class CameraSnapshotTests(unittest.TestCase):
+    def test_zip_updater_transfers_new_modules_and_preserves_user_data(self):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.writestr("ets2la-main/core/camera.py", "camera")
+            bundle.writestr(
+                "ets2la-main/core/navigation/runtime_preflight.py",
+                "preflight")
+            bundle.writestr("ets2la-main/routes/user.json", "overwrite")
+            bundle.writestr("ets2la-main/../escape.py", "escape")
+        response = mock.Mock(status_code=200, content=archive.getvalue())
+        written, removed = {}, []
+
+        class Writer:
+            def __init__(self, path):
+                self.path = path
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def write(self, data):
+                written[self.path] = data
+
+        root = r"C:\UltraPilot"
+        with (mock.patch.object(update_check, "_app_dir", return_value=root),
+              mock.patch("requests.get", return_value=response),
+              mock.patch("builtins.open",
+                         side_effect=lambda path, *_args, **_kwargs: Writer(path)),
+              mock.patch.object(update_check.os, "makedirs"),
+              mock.patch.object(update_check.os.path, "isfile", return_value=True),
+              mock.patch.object(update_check.os, "remove",
+                                side_effect=removed.append)):
+            self.assertTrue(update_check._zip_update(
+                target_commit="abcdef0"))
+
+        camera = str(Path(root, "core", "camera.py"))
+        preflight = str(Path(root, "core", "navigation",
+                             "runtime_preflight.py"))
+        self.assertEqual(written[camera], b"camera")
+        self.assertEqual(written[preflight], b"preflight")
+        self.assertNotIn(str(Path(root, "routes", "user.json")), written)
+        self.assertFalse(any("escape.py" in path for path in written))
+        expected_removed = {
+            str(Path(root, *name.split("/")))
+            for name in update_check._OBSOLETE}
+        self.assertEqual(set(removed), expected_removed)
+
     def test_scs_reader_exposes_render_time_from_zone_one_offset_24(self):
         reader = SCSTelemetry()
         reader.mm = bytearray(reader.mmap_size)

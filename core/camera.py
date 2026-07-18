@@ -383,13 +383,9 @@ def camera_snapshot_reason(snapshot: object, *, now: Optional[float] = None,
     return ""
 
 
-def project_world_point(snapshot: dict, point: Sequence[float], *,
-                        now: Optional[float] = None,
-                        telemetry_timestamp: Optional[float] = None) -> Optional[tuple[float, float, float]]:
-    """Project ETS2 X/Y/Z to viewport-local pixel X/Y and positive depth."""
-    if camera_snapshot_reason(snapshot, now=now,
-                              telemetry_timestamp=telemetry_timestamp):
-        return None
+def _project_validated_world_point(
+        snapshot: dict,
+        point: Sequence[float]) -> Optional[tuple[float, float, float]]:
     try:
         x, y, z = map(float, point[:3])
         if not _finite((x, y, z)):
@@ -411,3 +407,26 @@ def project_world_point(snapshot: dict, point: Sequence[float], *,
                 float(clip[3]))
     except (KeyError, TypeError, ValueError, IndexError, OverflowError):
         return None
+
+
+def project_world_point(snapshot: dict, point: Sequence[float], *,
+                        now: Optional[float] = None,
+                        telemetry_timestamp: Optional[float] = None) -> Optional[tuple[float, float, float]]:
+    """Project ETS2 X/Y/Z to viewport-local pixel X/Y and positive depth."""
+    if camera_snapshot_reason(snapshot, now=now,
+                              telemetry_timestamp=telemetry_timestamp):
+        return None
+    return _project_validated_world_point(snapshot, point)
+
+
+def project_world_points(snapshot: dict, points: Sequence[Sequence[float]], *,
+                         now: Optional[float] = None,
+                         telemetry_timestamp: Optional[float] = None
+                         ) -> tuple[list[Optional[tuple[float, float, float]]], str]:
+    """Project one immutable camera frame after a single safety validation."""
+    reason = camera_snapshot_reason(
+        snapshot, now=now, telemetry_timestamp=telemetry_timestamp)
+    if reason:
+        return [], reason
+    return ([_project_validated_world_point(snapshot, point)
+             for point in points], "")

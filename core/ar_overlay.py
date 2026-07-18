@@ -13,7 +13,7 @@ from PyQt6.QtCore import QPointF, QTimer, Qt
 from PyQt6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PyQt6.QtWidgets import QApplication, QWidget
 
-from core.camera import camera_snapshot_reason, project_world_point
+from core.camera import project_world_point, project_world_points
 
 
 class AROverlay(QWidget):
@@ -54,12 +54,6 @@ class AROverlay(QWidget):
         current = (self.x(), self.y(), self.width(), self.height())
         if geometry != current:
             self.setGeometry(*geometry)
-
-    def _camera_reason(self):
-        snapshot = self.state.get("camera_snapshot", {}) or {}
-        return camera_snapshot_reason(
-            snapshot, telemetry_timestamp=float(self.state.get(
-                "telemetry_timestamp", 0.0) or 0.0))
 
     def _project_world(self, point):
         snapshot = self.state.get("camera_snapshot", {}) or {}
@@ -106,13 +100,19 @@ class AROverlay(QWidget):
             self.state.set("ar_lane_revision", -1)
             self._publish_status(False, route_reason or "lane trajectory is unavailable")
             return
-        camera_reason = self._camera_reason()
+        camera_snapshot = self.state.get("camera_snapshot", {}) or {}
+        telemetry_timestamp = float(self.state.get(
+            "telemetry_timestamp", 0.0) or 0.0)
+        projected_values, camera_reason = project_world_points(
+            camera_snapshot, world,
+            telemetry_timestamp=telemetry_timestamp)
         if camera_reason:
             self.state.set("ar_lane_revision", -1)
             self._publish_status(False, camera_reason, current_revision)
             return
 
-        projected = [self._project_world(point) for point in world]
+        projected = [None if point is None else QPointF(point[0], point[1])
+                     for point in projected_values]
         strips, current = [], []
         for point in projected:
             if point is None:

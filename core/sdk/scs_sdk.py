@@ -2,7 +2,7 @@ import mmap
 import struct
 import logging
 import os
-from typing import Any, Dict, Tuple, List
+from typing import Any, Dict, Tuple
 
 class SCSTelemetry:
     """

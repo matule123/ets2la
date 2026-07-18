@@ -1,8 +1,5 @@
 import os
-import json
-import subprocess
 import logging
-from pathlib import Path
 
 try:
     import winreg
