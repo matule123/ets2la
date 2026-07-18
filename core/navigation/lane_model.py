@@ -38,6 +38,8 @@ class LanePoint:
     s: float = 0.0
     heading: float = 0.0
     curvature: float = 0.0
+    lane_id: Optional[LaneId] = None
+    segment_index: int = -1
 
 
 @dataclass(frozen=True, slots=True)
