@@ -10,10 +10,26 @@ import math
 import time
 
 from PyQt6.QtCore import QPointF, QTimer, Qt
-from PyQt6.QtGui import QColor, QPainter, QPen, QPolygonF
+from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import QApplication, QWidget
 
 from core.camera import project_world_point, project_world_points
+
+
+def _perspective_route_widths(depth_m):
+    """Return halo/core pixel widths for a road-bound perspective trace.
+
+    A constant screen-space pen stays equally thick at the horizon and reads
+    as a vertical cable.  Scale it by camera depth: deliberately substantial
+    near the cab, but narrow in the distance like a marking painted on the
+    road.  This changes presentation only; world X/Y/Z remain authoritative.
+    """
+    try:
+        depth = max(0.1, float(depth_m))
+    except (TypeError, ValueError, OverflowError):
+        depth = 1000.0
+    scale = max(0.16, min(1.0, 12.0 / depth))
+    return 4.0 + 24.0 * scale, 2.0 + 11.0 * scale
 
 
 class AROverlay(QWidget):
@@ -111,7 +127,8 @@ class AROverlay(QWidget):
             self._publish_status(False, camera_reason, current_revision)
             return
 
-        projected = [None if point is None else QPointF(point[0], point[1])
+        projected = [None if point is None else
+                     (QPointF(point[0], point[1]), float(point[2]))
                      for point in projected_values]
         strips, current = [], []
         for point in projected:
@@ -133,17 +150,24 @@ class AROverlay(QWidget):
         self._publish_status(True, "", current_revision)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        for points in strips:
-            painter.setPen(QPen(QColor(45, 142, 255, 90), 18,
-                                Qt.PenStyle.SolidLine,
-                                Qt.PenCapStyle.RoundCap,
-                                Qt.PenJoinStyle.RoundJoin))
-            painter.drawPolyline(QPolygonF(points))
-            painter.setPen(QPen(QColor(45, 142, 255, 235), 7,
-                                Qt.PenStyle.SolidLine,
-                                Qt.PenCapStyle.RoundCap,
-                                Qt.PenJoinStyle.RoundJoin))
-            painter.drawPolyline(QPolygonF(points))
+        # Paint far segments first, then the near ones.  Per-segment depth
+        # scaling makes the trace lie visually on the road while round caps
+        # keep adjacent samples continuous.
+        segments = []
+        for strip in strips:
+            for first, second in zip(strip, strip[1:]):
+                depth = (first[1] + second[1]) * 0.5
+                segments.append((depth, first[0], second[0]))
+        segments.sort(key=lambda item: item[0], reverse=True)
+        for halo in (True, False):
+            for depth, first, second in segments:
+                halo_width, core_width = _perspective_route_widths(depth)
+                painter.setPen(QPen(
+                    QColor(45, 142, 255, 95 if halo else 240),
+                    halo_width if halo else core_width,
+                    Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                    Qt.PenJoinStyle.RoundJoin))
+                painter.drawLine(first, second)
 
     def _current_display_points(self):
         """Backward-compatible two-value reader used by integration checks."""
