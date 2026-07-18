@@ -9,6 +9,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from core.ar_overlay import _perspective_route_widths, _segment_is_occluded
+from core.hud import HUD_CAMERA_BACK_M, HUD_EGO_AHEAD_M, UltraPilotHUD
 from plugins.autopilot.main import Plugin as AutopilotPlugin
 from plugins.lanecontrol.main import Plugin as LaneControlPlugin
 
@@ -100,6 +101,22 @@ class ControlSafetyRegressionTests(unittest.TestCase):
             QPointF(45.0, 50.0), QPointF(55.0, 50.0), 20.0, rects))
         self.assertFalse(_segment_is_occluded(
             QPointF(45.0, 50.0), QPointF(55.0, 50.0), 5.0, rects))
+
+    def test_hud_ego_and_road_share_the_telemetry_origin(self):
+        self.assertEqual(HUD_EGO_AHEAD_M, 0.0)
+        self.assertGreater(HUD_CAMERA_BACK_M, 40.0)
+        hud = UltraPilotHUD.__new__(UltraPilotHUD)
+        hud._view_yaw = 0.0
+
+        class View:
+            def height(self): return 500.0
+            def top(self): return 0.0
+            def center(self): return QPointF(400.0, 250.0)
+
+        road_origin = UltraPilotHUD._project(hud, 0.0, 0.0, View())
+        ego_origin = UltraPilotHUD._project(
+            hud, HUD_EGO_AHEAD_M, 0.0, View())
+        self.assertEqual(road_origin, ego_origin)
 
 
 if __name__ == "__main__":

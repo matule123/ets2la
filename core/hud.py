@@ -71,6 +71,12 @@ _CAR_PALETTE = [
     ("#EC4899", "#9D174D"),  # pink
 ]
 
+# One authoritative world origin for the road mesh, route, traffic and ego.
+# The former +12.2 m display offset put the model ahead of its telemetry pose;
+# on bends it therefore appeared beside the correctly transformed road.
+HUD_EGO_AHEAD_M = 0.0
+HUD_CAMERA_BACK_M = 48.0
+
 
 def _car_colour(v):
     """Stable (body, roof) colour pair for a vehicle, keyed on its id."""
@@ -380,7 +386,7 @@ class UltraPilotHUD(QWidget):
         # controls must rotate roads, bridges, traffic and the rig together;
         # rotating only the truck made it appear detached from its lane.
         if abs(self._view_yaw) > 1e-6:
-            pivot_a, pivot_l = 12.2, 0.0
+            pivot_a, pivot_l = HUD_EGO_AHEAD_M, 0.0
             da, dl = ahead - pivot_a, lateral - pivot_l
             cosine, sine = math.cos(self._view_yaw), math.sin(self._view_yaw)
             ahead = pivot_a + da * cosine - dl * sine
@@ -389,7 +395,9 @@ class UltraPilotHUD(QWidget):
         # top-down perspective: junction shapes remain legible instead of
         # collapsing into a dense horizontal bundle in the distance.
         H = 17.0          # high bird's-eye camera, like ETS2LA visualisation
-        cam_back = 33.0   # slightly closer rig while retaining some rear space
+        # Preserve roughly the old apparent rig size without lying about its
+        # world position: move the camera back, not the vehicle forward.
+        cam_back = HUD_CAMERA_BACK_M
         f = view.height() * 0.96
         # Put the horizon directly against the top of the scene. The old 15%
         # empty band looked like a gap between the game road and HUD geometry.
@@ -941,7 +949,7 @@ class UltraPilotHUD(QWidget):
         angle = 0.0
         ua, ul = math.cos(angle), -math.sin(angle)
         pa, pl = -ul, ua
-        centre = (12.2, float(road_lateral))
+        centre = (HUD_EGO_AHEAD_M, float(road_lateral))
 
         def along(distance):
             return (centre[0] + ua * distance, centre[1] + ul * distance)
