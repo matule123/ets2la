@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
-from typing import Literal, Optional, Sequence
+from typing import Any, Literal, Optional, Sequence
 
 
 DataSource = Literal["dataset", "derived"]
@@ -65,6 +65,7 @@ class LaneSegment:
     left_neighbor: Optional[LaneId] = None
     right_neighbor: Optional[LaneId] = None
     successors: tuple[LaneConnection, ...] = ()
+    connector_curve_indices: tuple[int, ...] = ()
     gps_uids: frozenset[int] = field(default_factory=frozenset)
 
 
@@ -78,6 +79,24 @@ class LanePath:
     valid: bool = False
     failure_reason: str = ""
     revision: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class GpsCorridorEdge:
+    start_uid: int
+    end_uid: int
+    kind: Literal["road", "prefab", "graph"]
+    gps_pair_index: int
+    segment_index: Optional[int] = None
+    prefab_instance: Any = None
+
+
+@dataclass(frozen=True, slots=True)
+class GpsCorridor:
+    gps_uids: tuple[int, ...]
+    edges: tuple[GpsCorridorEdge, ...]
+    valid: bool
+    failure_reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)

@@ -20,10 +20,14 @@ import math
 import logging
 import heapq
 import time
+from dataclasses import replace
 
-from core.navigation.lane_model import LaneId, LanePoint, LaneSegment
+from core.navigation.lane_model import (
+    GpsCorridor, GpsCorridorEdge, LaneConnection, LaneId, LaneLocator,
+    LanePath, LanePoint, LaneSegment,
+)
 
-CACHE_VERSION = 6  # lane metadata + lane-level spatial index
+CACHE_VERSION = 7  # lane metadata + prefab lane graph/path identity
 
 
 def _uid(value):
@@ -131,6 +135,7 @@ class RoadNetwork:
         self._prefab_lane_data = {}  # token -> dataset lane/curve connectivity
         self._lane_cache = {}    # segment index -> tuple[LaneSegment, ...]
         self._lane_id_index = {} # LaneId -> LaneSegment (populated lazily)
+        self._lane_path_revision = 0
         self.loaded = False
 
     # --- Loading --------------------------------------------------------------
@@ -391,6 +396,7 @@ class RoadNetwork:
                 self._prefab_desc[str(raw.get("token", ""))] = (
                     nodes, tuple(curves), tuple(nav_nodes))
                 self._prefab_lane_data[str(raw.get("token", ""))] = {
+                    "path": str(raw.get("path", "")),
                     "nodes": tuple({
                         "input_lanes": tuple(int(i) for i in node.get("inputLanes", ())),
                         "output_lanes": tuple(int(i) for i in node.get("outputLanes", ())),
@@ -682,6 +688,420 @@ class RoadNetwork:
         return [(a, b, kind, lanes, divided, dash_on, pillar, rail_post)
                 for _, a, b, kind, lanes, divided, dash_on, pillar, rail_post
                 in ranked[:limit]]
+
+    # --- Authoritative lane-level GPS route ---------------------------------
+    def _road_pair_index(self):
+        index = getattr(self, "_road_pair_index_cache", None)
+        if index is None:
+            index = {}
+            for segment_index, (start, end) in enumerate(self._seg_uids):
+                index.setdefault((min(start, end), max(start, end)), []).append(
+                    segment_index)
+            self._road_pair_index_cache = index
+        return index
+
+    def _classify_corridor_edge(self, start, end, gps_pair_index):
+        pair = (min(start, end), max(start, end))
+        prefab_instances = tuple(self._prefab_pairs.get(pair, ()))
+        if prefab_instances:
+            return GpsCorridorEdge(start, end, "prefab", gps_pair_index,
+                                   prefab_instance=prefab_instances)
+        road_indices = self._road_pair_index().get(pair, ())
+        if len(road_indices) == 1:
+            return GpsCorridorEdge(start, end, "road", gps_pair_index,
+                                   segment_index=road_indices[0])
+        if len(road_indices) > 1:
+            return None
+        # Only the directed extracted graph can prove an otherwise geometry-
+        # less edge. It may be densified later, but never invented by distance.
+        if (end in self.fwd.get(start, ())
+                or end in self.bwd.get(start, ())):
+            return GpsCorridorEdge(start, end, "graph", gps_pair_index)
+        return None
+
+    def resolve_gps_corridor(self, gps_uids):
+        """Resolve sparse SDK UIDs without changing their authoritative order."""
+        uids = tuple(_uid(value) for value in gps_uids if _uid(value))
+        if len(uids) < 2:
+            return GpsCorridor(uids, (), False,
+                               "GPS corridor requires at least two non-zero UIDs")
+        missing = [uid for uid in uids if uid not in self.nodes]
+        if missing:
+            return GpsCorridor(uids, (), False,
+                               f"GPS UID {missing[0]} is absent from the active map")
+        edges = []
+        for pair_index, (start, goal) in enumerate(zip(uids, uids[1:])):
+            if start == goal:
+                continue
+            direct = self._classify_corridor_edge(start, goal, pair_index)
+            if direct is not None:
+                edges.append(direct)
+                continue
+            bridge = self._route_bridge(start, goal)
+            if len(bridge) < 2:
+                return GpsCorridor(
+                    uids, tuple(edges), False,
+                    f"no directed topological path for GPS UID pair "
+                    f"{start} -> {goal} at index {pair_index}")
+            if bridge[0] != start or bridge[-1] != goal:
+                return GpsCorridor(
+                    uids, tuple(edges), False,
+                    f"topological bridge changed authoritative GPS UID order "
+                    f"{start} -> {goal}")
+            for edge_start, edge_end in zip(bridge, bridge[1:]):
+                edge = self._classify_corridor_edge(
+                    edge_start, edge_end, pair_index)
+                if edge is None:
+                    return GpsCorridor(
+                        uids, tuple(edges), False,
+                        f"directed graph path contains unproven edge "
+                        f"{edge_start} -> {edge_end}")
+                edges.append(edge)
+        if not edges:
+            return GpsCorridor(uids, (), False, "GPS corridor contains no edges")
+        return GpsCorridor(uids, tuple(edges), True)
+
+    @staticmethod
+    def _curve_chain_is_valid(lane_data, indices):
+        curves = lane_data.get("curves", ())
+        if not indices or any(not (0 <= index < len(curves)) for index in indices):
+            return False
+        for first, second in zip(indices, indices[1:]):
+            a, b = curves[first], curves[second]
+            if (second not in a["next_lines"]
+                    or first not in b["prev_lines"]):
+                return False
+            if a["nav_node_index"] < 0 or b["nav_node_index"] < 0:
+                return False
+        return curves[indices[0]]["nav_node_index"] >= 0
+
+    def _prefab_connector_options(self, instance, start_uid, end_uid):
+        token, uids, _origin = instance
+        try:
+            start_item, end_item = uids.index(start_uid), uids.index(end_uid)
+        except ValueError:
+            return []
+        desc = self._prefab_desc.get(token)
+        lane_data = self._prefab_lane_data.get(token)
+        if not desc or not lane_data:
+            return []
+        nav_nodes = desc[2]
+        start_nav = next((i for i, node in enumerate(nav_nodes)
+                          if node[0] == "physical" and node[1] == start_item), None)
+        end_nav = next((i for i, node in enumerate(nav_nodes)
+                        if node[0] == "physical" and node[1] == end_item), None)
+        if start_nav is None or end_nav is None:
+            return []
+        options = []
+
+        def walk(nav_index, curve_indices, visited):
+            if len(visited) > len(nav_nodes) + 1:
+                return
+            if nav_index == end_nav:
+                if self._curve_chain_is_valid(lane_data, curve_indices):
+                    options.append(tuple(curve_indices))
+                return
+            for target, indices in nav_nodes[nav_index][2]:
+                if target in visited or not indices:
+                    continue
+                combined = tuple(curve_indices) + tuple(indices)
+                if curve_indices:
+                    curves = lane_data["curves"]
+                    if (indices[0] not in curves[curve_indices[-1]]["next_lines"]
+                            or curve_indices[-1] not in curves[indices[0]]["prev_lines"]):
+                        continue
+                walk(target, combined, visited | {target})
+
+        walk(start_nav, (), {start_nav})
+        start_lanes = tuple(lane_data["nodes"][start_item]["input_lanes"])
+        end_lanes = tuple(lane_data["nodes"][end_item]["output_lanes"])
+        filtered = [indices for indices in options
+                    if (not start_lanes or indices[0] in start_lanes)
+                    and (not end_lanes or indices[-1] in end_lanes)]
+        return sorted(set(filtered))
+
+    def _prefab_curve_chain_3d(self, instance, indices):
+        token, uids, origin_index = instance
+        desc = self._prefab_desc[token]
+        lane_data = self._prefab_lane_data[token]
+        if not uids or not desc[0]:
+            return ()
+        origin_index = max(0, min(origin_index, len(desc[0]) - 1))
+        anchor = self.nodes.get(uids[0])
+        if anchor is None:
+            return ()
+        ox, oz, local_rotation = desc[0][origin_index]
+        origin_y = lane_data["nodes"][origin_index]["y"]
+        rotation = self.node_rot.get(uids[0], 0.0) - local_rotation
+        c, s = math.cos(rotation), math.sin(rotation)
+        anchor_y = self.node_alt.get(uids[0], 0.0)
+        result = []
+        for curve_index in indices:
+            curve = desc[1][curve_index]
+            local_points = self._hermite_curve(curve, spacing=2.25)
+            curve_meta = lane_data["curves"][curve_index]
+            count = max(1, len(local_points) - 1)
+            piece = []
+            for point_index, (x, z) in enumerate(local_points):
+                fraction = point_index / count
+                local_y = (curve_meta["start_y"]
+                           + (curve_meta["end_y"] - curve_meta["start_y"])
+                           * fraction)
+                piece.append((
+                    anchor[0] + (x - ox) * c - (z - oz) * s,
+                    anchor_y + local_y - origin_y,
+                    anchor[1] + (x - ox) * s + (z - oz) * c,
+                ))
+            if result and piece:
+                if math.dist(result[-1], piece[0]) > 0.5:
+                    return ()
+                result.extend(piece[1:])
+            else:
+                result.extend(piece)
+        lane_points, travelled = [], 0.0
+        for index, point in enumerate(result):
+            before = result[max(0, index - 1)]
+            after = result[min(len(result) - 1, index + 1)]
+            dx, dz = after[0] - before[0], after[2] - before[2]
+            if lane_points:
+                travelled += math.dist(point, result[index - 1])
+            heading = (math.atan2(-dx, -dz)
+                       if math.hypot(dx, dz) > 1e-8
+                       else (lane_points[-1].heading if lane_points else 0.0))
+            lane_points.append(LanePoint(point[0], point[1], point[2],
+                                         travelled, heading))
+        return tuple(lane_points)
+
+    def _prefab_lane_segment(self, edge, lane_index):
+        candidates = []
+        for instance in edge.prefab_instance or ():
+            token = instance[0]
+            lane_data = self._prefab_lane_data.get(token) or {}
+            try:
+                start_item = instance[1].index(edge.start_uid)
+            except ValueError:
+                continue
+            input_lanes = tuple((lane_data.get("nodes") or ())[start_item]
+                                ["input_lanes"])
+            options = self._prefab_connector_options(
+                instance, edge.start_uid, edge.end_uid)
+            preferred_curve = (input_lanes[min(lane_index, len(input_lanes)-1)]
+                               if input_lanes else None)
+            preferred = [option for option in options
+                         if preferred_curve is not None
+                         and option[0] == preferred_curve]
+            chosen_options = preferred or (options if len(options) == 1 else [])
+            for indices in chosen_options:
+                points = self._prefab_curve_chain_3d(instance, indices)
+                if len(points) >= 2:
+                    candidates.append((instance, indices, points))
+        if len(candidates) != 1:
+            return None, ("ambiguous prefab lane connector"
+                          if candidates else "missing prefab lane connector")
+        instance, indices, points = candidates[0]
+        lane_id = LaneId(min(instance[1]), 1, lane_index,
+                         instance[0], indices[0])
+        prefab_path = str(lane_data.get("path", "")).lower()
+        segment = LaneSegment(
+            lane_id, edge.start_uid, edge.end_uid, 1, lane_index, 1,
+            4.5, "derived", int(round(points[len(points)//2].y / 3.0)),
+            None, ("roundabout" if "roundabout" in prefab_path else "prefab"),
+            points, connector_curve_indices=tuple(indices),
+            gps_uids=frozenset((edge.start_uid, edge.end_uid)))
+        self._lane_id_index[lane_id] = segment
+        return segment, ""
+
+    def _graph_lane_segment(self, edge, previous):
+        if previous is None:
+            return None
+        start = self.nodes[edge.start_uid]
+        end = self.nodes[edge.end_uid]
+        start_y = self.node_alt.get(edge.start_uid, 0.0)
+        end_y = self.node_alt.get(edge.end_uid, start_y)
+        anchor = previous.centerline[-1]
+        offset_x, offset_z = anchor.x - start[0], anchor.z - start[1]
+        distance = math.dist(start, end)
+        steps = max(2, int(math.ceil(distance / 3.0)) + 1)
+        raw = []
+        for index in range(steps):
+            fraction = index / (steps - 1)
+            raw.append((start[0] + (end[0]-start[0])*fraction + offset_x,
+                        start_y + (end_y-start_y)*fraction,
+                        start[1] + (end[1]-start[1])*fraction + offset_z))
+        points, travelled = [], 0.0
+        for index, point in enumerate(raw):
+            if points:
+                travelled += math.dist(raw[index-1], point)
+            before, after = raw[max(0, index-1)], raw[min(len(raw)-1, index+1)]
+            heading = math.atan2(-(after[0]-before[0]), -(after[2]-before[2]))
+            points.append(LanePoint(*point, travelled, heading))
+        lane_id = LaneId(edge.start_uid ^ edge.end_uid, 1,
+                         previous.lane_index, "graph", edge.gps_pair_index)
+        segment = LaneSegment(
+            lane_id, edge.start_uid, edge.end_uid, 1, previous.lane_index, 1,
+            previous.width_m, "derived",
+            int(round(points[len(points)//2].y / 3.0)), None, "graph",
+            tuple(points), gps_uids=frozenset((edge.start_uid, edge.end_uid)))
+        self._lane_id_index[lane_id] = segment
+        return segment
+
+    @staticmethod
+    def _lane_connection(first, second):
+        if first.end_uid != second.start_uid:
+            return None
+        if first.lane_type == "roundabout" or second.lane_type == "roundabout":
+            kind = "roundabout"
+        elif first.lane_id.prefab_token or second.lane_id.prefab_token:
+            kind = "prefab"
+        elif second.lane_count > first.lane_count:
+            kind = "split"
+        elif second.lane_count < first.lane_count:
+            kind = "merge"
+        else:
+            kind = "road"
+        curves = (second.connector_curve_indices
+                  if kind in ("prefab", "roundabout") else ())
+        return LaneConnection(second.lane_id, kind, curves,
+                              gps_exit_uid=second.end_uid)
+
+    def select_lane_sequence(self, corridor, start_match):
+        """Select one continuous lane for every authoritative corridor edge."""
+        if not isinstance(corridor, GpsCorridor) or not corridor.valid:
+            return (), (getattr(corridor, "failure_reason", "invalid corridor")
+                        or "invalid corridor")
+        if start_match is None:
+            return (), "LaneLocator did not confirm a starting lane"
+        selected = []
+        lane_index = start_match.lane_id.lane_index
+        for edge_number, edge in enumerate(corridor.edges):
+            current = None
+            if edge.kind == "road":
+                lanes = [lane for lane in self._build_lane_segments(edge.segment_index)
+                         if lane.start_uid == edge.start_uid
+                         and lane.end_uid == edge.end_uid]
+                if not lanes:
+                    return tuple(selected), (
+                        f"no lane geometry for directed road edge "
+                        f"{edge.start_uid} -> {edge.end_uid}")
+                by_index = {lane.lane_index: lane for lane in lanes}
+                if lane_index in by_index:
+                    current = by_index[lane_index]
+                elif selected and lane_index >= len(lanes):
+                    # A disappearing outer lane is a confirmed merge at the
+                    # shared road node. Clamp only to the adjacent edge lane.
+                    lane_index = max(by_index)
+                    current = by_index[lane_index]
+                else:
+                    return tuple(selected), (
+                        f"starting lane {lane_index} is unavailable on road edge "
+                        f"{edge.start_uid} -> {edge.end_uid}")
+            elif edge.kind == "prefab":
+                current, reason = self._prefab_lane_segment(edge, lane_index)
+                if current is None:
+                    return tuple(selected), (
+                        f"{reason} for prefab {edge.start_uid} -> {edge.end_uid}")
+            else:
+                current = self._graph_lane_segment(
+                    edge, selected[-1] if selected else None)
+                if current is None:
+                    return tuple(selected), (
+                        f"graph-only edge {edge.start_uid} -> {edge.end_uid} "
+                        "cannot establish an initial lane")
+            if selected:
+                connection = self._lane_connection(selected[-1], current)
+                if connection is None:
+                    return tuple(selected), (
+                        f"no LaneConnection from {selected[-1].end_uid} to "
+                        f"{current.start_uid} at corridor edge {edge_number}")
+                selected[-1] = replace(selected[-1],
+                                       successors=(connection,))
+            selected.append(current)
+            lane_index = current.lane_index
+        return tuple(selected), ""
+
+    def connect_lane_sequence(self, segments, gps_uids):
+        """Join only confirmed lane connections into an unsmoothed 3-D path."""
+        segments = tuple(segments)
+        uids = tuple(_uid(value) for value in gps_uids if _uid(value))
+        if not segments:
+            return LanePath((), (), uids, valid=False,
+                            failure_reason="lane sequence is empty")
+        points = []
+        for index, segment in enumerate(segments):
+            if len(segment.centerline) < 2:
+                return LanePath(segments, tuple(points), uids, valid=False,
+                    failure_reason=f"LaneSegment {segment.lane_id} has no geometry")
+            if index:
+                previous = segments[index - 1]
+                if not any(connection.target == segment.lane_id
+                           for connection in previous.successors):
+                    return LanePath(segments, tuple(points), uids, valid=False,
+                        failure_reason=(f"unconfirmed lane transition "
+                                        f"{previous.lane_id} -> {segment.lane_id}"))
+                gap = math.dist((points[-1].x, points[-1].y, points[-1].z),
+                                (segment.centerline[0].x,
+                                 segment.centerline[0].y,
+                                 segment.centerline[0].z))
+                if gap > 6.0:
+                    return LanePath(segments, tuple(points), uids, valid=False,
+                        failure_reason=(f"confirmed lane transition has {gap:.1f} m "
+                                        f"geometry gap at UID {segment.start_uid}"))
+                if gap > 0.35:
+                    # This only densifies an already confirmed LaneConnection.
+                    start, end = points[-1], segment.centerline[0]
+                    steps = max(2, int(math.ceil(gap / 2.0)))
+                    for step in range(1, steps):
+                        fraction = step / steps
+                        points.append(LanePoint(
+                            start.x + (end.x-start.x)*fraction,
+                            start.y + (end.y-start.y)*fraction,
+                            start.z + (end.z-start.z)*fraction))
+            points.extend(segment.centerline[1:] if points and
+                          math.dist((points[-1].x, points[-1].y, points[-1].z),
+                                    (segment.centerline[0].x,
+                                     segment.centerline[0].y,
+                                     segment.centerline[0].z)) <= 0.35
+                          else segment.centerline)
+        rebuilt, distance = [], 0.0
+        for index, point in enumerate(points):
+            if rebuilt:
+                distance += math.dist((rebuilt[-1].x, rebuilt[-1].y, rebuilt[-1].z),
+                                      (point.x, point.y, point.z))
+            before = points[max(0, index-1)]
+            after = points[min(len(points)-1, index+1)]
+            dx, dz = after.x-before.x, after.z-before.z
+            heading = (math.atan2(-dx, -dz) if math.hypot(dx, dz) > 1e-8
+                       else (rebuilt[-1].heading if rebuilt else point.heading))
+            rebuilt.append(LanePoint(point.x, point.y, point.z,
+                                     distance, heading, point.curvature))
+        prefab_count = sum(segment.lane_id.prefab_token not in (None, "graph")
+                           for segment in segments)
+        graph_count = sum(segment.lane_id.prefab_token == "graph"
+                          for segment in segments)
+        confidence = max(0.0, 0.98 - prefab_count * 0.01 - graph_count * 0.08)
+        self._lane_path_revision += 1
+        return LanePath(segments, tuple(rebuilt), uids, distance, confidence,
+                        True, "", self._lane_path_revision)
+
+    def build_lane_path(self, gps_uids, position, heading, altitude=None,
+                        previous_match=None):
+        """Convenience pipeline used by tests and the future map-plugin switch."""
+        corridor = self.resolve_gps_corridor(gps_uids)
+        if not corridor.valid:
+            return LanePath((), (), corridor.gps_uids, valid=False,
+                            failure_reason=corridor.failure_reason), None
+        if altitude is None:
+            locator_position = tuple(position[:2])
+        else:
+            locator_position = (float(position[0]), float(altitude),
+                                float(position[1]))
+        match = LaneLocator(self).locate(locator_position, heading,
+                                         corridor.gps_uids, previous_match)
+        segments, reason = self.select_lane_sequence(corridor, match)
+        if reason:
+            return LanePath(segments, (), corridor.gps_uids, valid=False,
+                            failure_reason=reason), match
+        return self.connect_lane_sequence(segments, corridor.gps_uids), match
 
     def refine_route(self, uids, progress=None):
         """Replace prefab entrance chords in a GPS UID route with nav curves."""

@@ -19,13 +19,21 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 
-def load_fresh():
+def local_dataset_dir():
+    """Prefer an installed local map so this test remains genuinely offline."""
+    explicit = os.path.join(ROOT, "map-cache", "promods-1.59")
+    if os.path.isdir(explicit):
+        return explicit
     from core.navigation import map_data
+    datasets = [d for d in map_data.list_datasets() if d["downloaded"]]
+    assert datasets, "No map dataset downloaded — download one first."
+    return map_data.dataset_dir(datasets[0]["key"])
+
+
+def load_fresh():
     from core.navigation.road_network import RoadNetwork
-    ds = [d for d in map_data.list_datasets() if d["downloaded"]]
-    assert ds, "No map dataset downloaded — download one first."
     net = RoadNetwork()
-    assert net.load(map_data.dataset_dir(ds[0]["key"])), "load() returned False"
+    assert net.load(local_dataset_dir()), "load() returned False"
     return net
 
 
@@ -74,10 +82,8 @@ def run_path_ahead():
 
 def run_cache_speedup():
     print("\n=== pickle cache speed ===")
-    from core.navigation import map_data
     from core.navigation.road_network import RoadNetwork
-    ddir = map_data.dataset_dir([d["key"] for d in map_data.list_datasets()
-                                 if d["downloaded"]][0])
+    ddir = local_dataset_dir()
     # Delete cache, time a cold build, then time the warm load.
     cache = os.path.join(ddir, ".roadnet.cache")
     if os.path.exists(cache):
@@ -95,7 +101,11 @@ def run_steering_smooth():
     print("\n=== steering along the computed path ===")
     from core.navigation.route import Route
     net = load_fresh()
-    uid = next(iter(net.fwd))
+    # Use a verified straight ProMods road. ``next(iter(net.fwd))`` is not a
+    # stable scenario: in the current extraction it starts inside a junction,
+    # while the loop below deliberately drives with one constant heading.
+    straight_uid = 3387693062566003376
+    uid = straight_uid if straight_uid in net.fwd else next(iter(net.fwd))
     x, z = net.nodes[uid]
     nb = net.fwd[uid][0]
     nx, nz = net.nodes[nb]
@@ -121,4 +131,4 @@ if __name__ == "__main__":
     run_path_ahead()
     run_cache_speedup()
     run_steering_smooth()
-    print("\nAll Phase 2 map tests passed. ✅")
+    print("\nAll Phase 2 map tests passed. OK")
