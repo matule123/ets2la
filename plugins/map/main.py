@@ -49,6 +49,8 @@ class Plugin(BasePlugin):
         self._lane_revision = int(self.sdk.get(
             "lane_trajectory_revision", 0) or 0)
         self._lane_diag_t = 0.0
+        self._lane_failure_signature = None
+        self._lane_retry_at = 0.0
         os.makedirs(ROUTES_DIR, exist_ok=True)
         self._publish_route_list()
 
@@ -114,7 +116,13 @@ class Plugin(BasePlugin):
         self.sdk.set("navigation_unreliable", True)
         self.sdk.set("navigation_failure_reason", snapshot["failure_reason"])
         if status:
-            self.sdk.set("navigation_status", status)
+            technical = str(status)
+            friendly = ("Trasu sa nepodarilo bezpečne zostaviť"
+                        if any(word in technical.lower() for word in
+                               ("geometry gap", "lane transition", "laneconnection",
+                                "topology", "corridor edge"))
+                        else technical)
+            self.sdk.set("navigation_status", friendly)
         self._lane_path = None
         self._lane_route = None
         return snapshot
@@ -127,6 +135,8 @@ class Plugin(BasePlugin):
         if signature != self._lane_signature:
             self._lane_signature = signature
             self._lane_match = None
+            self._lane_failure_signature = None
+            self._lane_retry_at = 0.0
             locator = getattr(self.road_net, "_runtime_lane_locator", None)
             if locator is not None:
                 locator.previous = None
@@ -144,6 +154,10 @@ class Plugin(BasePlugin):
             "lane_trajectory_revision", -1) or -1)
         build_request = self.sdk.get("nav_recalc_request")
         needs_build = not bool(current.get("valid", False))
+        failure_signature = (uids, str(current.get("failure_reason", "")))
+        if (needs_build and self._lane_failure_signature == failure_signature
+                and time.monotonic() < self._lane_retry_at):
+            return None
         # Re-localise on the authoritative lane each tick. A confirmed lane
         # transition triggers a fresh trajectory revision, never a shifted copy.
         altitude = float(self.sdk.get("truck_altitude", 0.0) or 0.0)
@@ -189,14 +203,20 @@ class Plugin(BasePlugin):
         if not self._build_is_current(uids, build_revision, build_request):
             return None
         if not lane_path.valid:
-            self._publish_invalid_lane_trajectory(
+            snapshot = self._publish_invalid_lane_trajectory(
                 lane_path.failure_reason, uids, lane_path.failure_reason)
+            self._lane_failure_signature = (
+                uids, str(snapshot.get("failure_reason", "")))
+            self._lane_retry_at = time.monotonic() + 1.0
             return None
         self.sdk.set("navigation_status", "Vytváram trajektóriu")
         trajectory = build_lane_trajectory(lane_path, spacing_m=2.0)
         if not trajectory.valid:
-            self._publish_invalid_lane_trajectory(
+            snapshot = self._publish_invalid_lane_trajectory(
                 trajectory.failure_reason, uids, trajectory.failure_reason)
+            self._lane_failure_signature = (
+                uids, str(snapshot.get("failure_reason", "")))
+            self._lane_retry_at = time.monotonic() + 1.0
             return None
         if not self._build_is_current(uids, build_revision, build_request):
             return None
@@ -251,6 +271,8 @@ class Plugin(BasePlugin):
         self.sdk.set("navigation_status", "Navigácia pripravená")
         self._lane_path = trajectory
         self._lane_route = Route(control_points, name="gps-lane-trajectory")
+        self._lane_failure_signature = None
+        self._lane_retry_at = 0.0
         return trajectory
 
     # --- Helpers --------------------------------------------------------------

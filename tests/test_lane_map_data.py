@@ -147,6 +147,29 @@ class RealMapLaneDataTests(unittest.TestCase):
         self.assertEqual(len(segments), 11)
         self.assertGreater(path.distance_m, 500.0)
 
+    def test_confirmed_prefab_approaches_do_not_leave_geometry_gaps(self):
+        gps = (
+            3808772981329690624, 3808774081340440578,
+            3808588792760303618, 3808812646816481282,
+            3808775487350833152, 3808777359876882432,
+            3764330771381420034,
+        )
+        match = LaneLocator(self.net).locate(
+            (-90092.1956, 22.1638, 48571.8930), 2.004394, gps)
+        self.assertIsNotNone(match)
+        corridor = self.net.resolve_gps_corridor(gps)
+        segments, reason = self.net.select_lane_sequence(corridor, match)
+        self.assertEqual(reason, "")
+        path = self.net.connect_lane_sequence(segments, gps)
+        self.assertTrue(path.valid, path.failure_reason)
+        # The SDK buffer is a rolling local horizon; its distance-to-go field
+        # can be kilometres while the currently published lane geometry is a
+        # few hundred metres long.
+        self.assertGreater(path.distance_m, 300.0)
+        self.assertLessEqual(max(
+            math.dist((a.x, a.y, a.z), (b.x, b.y, b.z))
+            for a, b in zip(path.points, path.points[1:])), 3.2)
+
 
 if __name__ == "__main__":
     unittest.main()

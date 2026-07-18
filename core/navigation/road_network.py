@@ -1036,11 +1036,61 @@ class RoadNetwork:
 
     def connect_lane_sequence(self, segments, gps_uids):
         """Join only confirmed lane connections into an unsmoothed 3-D path."""
-        segments = tuple(segments)
+        segments = list(segments)
         uids = tuple(_uid(value) for value in gps_uids if _uid(value))
         if not segments:
             return LanePath((), (), uids, valid=False,
                             failure_reason="lane sequence is empty")
+        # Placed SCS prefab graph anchors can lie outside the compact local
+        # nav-curve footprint. Fit only an already confirmed prefab transition
+        # to its adjacent lane centres; never bridge an unconfirmed graph gap.
+        for index, segment in enumerate(tuple(segments)):
+            if segment.lane_id.prefab_token in (None, "graph"):
+                continue
+            previous = segments[index - 1] if index else None
+            following = segments[index + 1] if index + 1 < len(segments) else None
+            original_start, original_end = segment.centerline[0], segment.centerline[-1]
+            start = previous.centerline[-1] if previous is not None else original_start
+            end = following.centerline[0] if following is not None else original_end
+            start_gap = math.dist((original_start.x, original_start.y, original_start.z),
+                                  (start.x, start.y, start.z))
+            end_gap = math.dist((original_end.x, original_end.y, original_end.z),
+                                (end.x, end.y, end.z))
+            if max(start_gap, end_gap) <= 6.0:
+                continue
+            if (max(start_gap, end_gap) > 45.0
+                    or abs(start.y - end.y) > 6.0
+                    or (previous is None and following is None)):
+                continue
+            start_heading = (previous.centerline[-1].heading if previous is not None
+                             else following.centerline[0].heading)
+            end_heading = (following.centerline[0].heading if following is not None
+                           else previous.centerline[-1].heading)
+            distance = math.dist((start.x, start.y, start.z),
+                                 (end.x, end.y, end.z))
+            if distance < 1.0 or distance > 90.0:
+                continue
+            tangent = min(18.0, distance * 0.38)
+            count = max(5, int(math.ceil(distance / 2.0)) + 1)
+            fitted = []
+            for point_index in range(count):
+                t = point_index / (count - 1)
+                t2, t3 = t*t, t*t*t
+                h00, h10 = 2*t3 - 3*t2 + 1, t3 - 2*t2 + t
+                h01, h11 = -2*t3 + 3*t2, t3 - t2
+                sdx, sdz = -math.sin(start_heading), -math.cos(start_heading)
+                edx, edz = -math.sin(end_heading), -math.cos(end_heading)
+                fitted.append(LanePoint(
+                    h00*start.x + h10*tangent*sdx
+                    + h01*end.x + h11*tangent*edx,
+                    start.y + (end.y-start.y)*t,
+                    h00*start.z + h10*tangent*sdz
+                    + h01*end.z + h11*tangent*edz,
+                    lane_id=segment.lane_id, segment_index=index,
+                ))
+            segments[index] = replace(segment, centerline=tuple(fitted))
+
+        segments = tuple(segments)
         points = []
         for index, segment in enumerate(segments):
             if len(segment.centerline) < 2:
