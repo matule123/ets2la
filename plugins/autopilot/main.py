@@ -7,12 +7,12 @@ from core.navigation.runtime_preflight import CONFIDENCE_THRESHOLD
 
 
 # --- Tuning (kept here, mirrored into settings under "autopilot" section) -----
-STEER_RATE_LIMIT = 0.075     # max steering change per second (smooth, no jerk)
+STEER_RATE_LIMIT = 0.16      # enough authority to hold the confirmed lane
 MIN_LANE_TRAJECTORY_CONFIDENCE = CONFIDENCE_THRESHOLD
 # 0.72 rejects ambiguous/off-route matches while retaining a wide margin below
 # ProMods-1.59 centre samples (min 0.895, p05 0.950, median 0.966) and
 # validated built trajectories (0.970-0.980). Exactly 0.72 is accepted.
-STEER_FOLLOW_BLEND = 0.38    # suppress single-frame route/vision target jumps
+STEER_FOLLOW_BLEND = 0.72    # follow lane authority without a second slow integrator
                              # (low = smooth/laggy, high = snappy/jittery)
 VISION_DEADZONE = 0.03       # ignore vision lane offset noise below this
 BRAKE_RAMP_UP = 2.5          # brake can rise this fast per second (anti-jerk)
@@ -82,9 +82,9 @@ def lane_authority_rejection_reason(state, snapshot, now=None):
             return "live lane localisation belongs to a stale trajectory"
         lateral = abs(float(live_match.get("lateral_error_m", 0.0) or 0.0))
         heading = abs(float(live_match.get("heading_error_rad", 0.0) or 0.0))
-        if not math.isfinite(lateral) or lateral > 3.25:
+        if not math.isfinite(lateral) or lateral > 1.80:
             return f"truck is {lateral:.2f} m outside the confirmed GPS lane"
-        if not math.isfinite(heading) or heading > math.radians(42.0):
+        if not math.isfinite(heading) or heading > math.radians(28.0):
             return (f"truck heading differs from the GPS lane by "
                     f"{math.degrees(heading):.1f} degrees")
     except (TypeError, ValueError, OverflowError):
@@ -129,6 +129,7 @@ class Plugin(BasePlugin):
         self._diag_t = 0.0              # throttle for diagnostic logging
         self._reverse_recovery = False
         self._drive_request_t = 0.0
+        self._lane_lock_acquired = False
 
     def on_stop(self):
         logging.info("Autopilot Plugin stopped.")
@@ -188,6 +189,37 @@ class Plugin(BasePlugin):
             or game_route_distance > 25.0)
         authority_reason = lane_authority_rejection_reason(
             self.sdk.shared_state, snapshot)
+        active_requested = bool(self.sdk.shared_state.get(
+            "autopilot_active", False))
+        # Starting steering on a boundary or while facing a neighbouring arm
+        # caused the initial pull into the oncoming carriageway. Engagement is
+        # therefore stricter than continued driving; afterwards the normal
+        # fail-closed lane corridor above is checked on every tick.
+        if not active_requested:
+            self._lane_lock_acquired = False
+        elif not authority_reason and not self._lane_lock_acquired:
+            live_match = (self.sdk.shared_state.get("lane_match")
+                          or snapshot.get("lane_match"))
+            # Legacy/offline consumers can exercise confidence handling
+            # without runtime localisation. In the game, map always publishes
+            # lane_match and the strict engagement gate below is mandatory.
+            if not live_match:
+                self._lane_lock_acquired = True
+                live_match = {}
+            try:
+                engage_lateral = abs(float(
+                    live_match.get("lateral_error_m", float("inf"))))
+                engage_heading = abs(float(
+                    live_match.get("heading_error_rad", float("inf"))))
+            except (TypeError, ValueError, OverflowError):
+                engage_lateral = engage_heading = float("inf")
+            if (not self._lane_lock_acquired
+                    and (engage_lateral > 1.10
+                         or engage_heading > math.radians(18.0))):
+                authority_reason = (
+                    "truck is not centred and aligned in the confirmed GPS lane")
+            elif not self._lane_lock_acquired:
+                self._lane_lock_acquired = True
         lane_authority_safe = not authority_reason
         self.sdk.shared_state.set(
             "autopilot_lane_revision",

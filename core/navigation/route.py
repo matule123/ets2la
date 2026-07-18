@@ -31,7 +31,7 @@ Point = Tuple[float, float]
 # tracks curves far better than the old ANGLE_GAIN·h + CTE_GAIN·cte sum,
 # which oscillated in S-bends because the two terms fought each other.
 K_HEADING = 1.0           # heading-error weight (Stanley keeps this at 1.0)
-K_CTE = 0.55              # cross-track gain (Stanley: how hard we steer back)
+K_CTE = 1.15              # firm lane-centre recovery without boundary wandering
 K_SOFT = 1.0              # softening constant → CTE term never explodes at v=0
 MIN_LOOKAHEAD = 22.0
 MAX_LOOKAHEAD = 75.0

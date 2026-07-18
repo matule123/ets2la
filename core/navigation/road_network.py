@@ -1087,7 +1087,13 @@ class RoadNetwork:
                 if source_chord_xz < 1.0 or target_chord < 1.0:
                     continue
                 scale = target_chord / source_chord_xz
-                if not 0.35 <= scale <= 5.0:
+                # A large similarity scale turns a compact roundabout arc into
+                # a shortcut across its island. Roundabout nav-curves must be
+                # close to their placed prefab scale or fail closed.
+                scale_valid = (0.72 <= scale <= 1.38
+                               if segment.lane_type == "roundabout"
+                               else 0.35 <= scale <= 5.0)
+                if not scale_valid:
                     continue
                 source_angle = math.atan2(source_dz, source_dx)
                 target_angle = math.atan2(target_dz, target_dx)
@@ -1158,6 +1164,38 @@ class RoadNetwork:
             segments[index] = replace(segment, centerline=tuple(fitted))
 
         segments = tuple(segments)
+        # Topology alone is not permission to steer through a reversed prefab
+        # arm. Confirm that its entry and exit tangents agree with the adjacent
+        # lanes before publishing the blue line or steering authority.
+        for index, segment in enumerate(segments):
+            if segment.lane_id.prefab_token in (None, "graph"):
+                continue
+            points = segment.centerline
+            checks = []
+            if index and len(points) >= 2:
+                previous = segments[index - 1].centerline
+                if len(previous) >= 2:
+                    checks.append((previous[-2], previous[-1],
+                                   points[0], points[1], "entry"))
+            if index + 1 < len(segments) and len(points) >= 2:
+                following = segments[index + 1].centerline
+                if len(following) >= 2:
+                    checks.append((points[-2], points[-1],
+                                   following[0], following[1], "exit"))
+            for a, b, c, d, boundary in checks:
+                first = math.atan2(-(b.x-a.x), -(b.z-a.z))
+                second = math.atan2(-(d.x-c.x), -(d.z-c.z))
+                jump = abs((second-first+math.pi) % (2*math.pi)-math.pi)
+                # Prefab boundary samples can legitimately turn sharply at a
+                # compact city junction.  More than 75 degrees, however, is a
+                # reversed/crossing arm and must never become lane authority.
+                if jump > math.radians(75.0):
+                    return LanePath(
+                        segments, (), uids, valid=False,
+                        failure_reason=(
+                            f"prefab {boundary} direction jump is "
+                            f"{math.degrees(jump):.1f} degrees at UID "
+                            f"{segment.start_uid}"))
         points = []
         for index, segment in enumerate(segments):
             if len(segment.centerline) < 2:
