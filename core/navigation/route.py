@@ -60,7 +60,12 @@ def speed_gain(speed_ms: float) -> float:
 
 class Route:
     def __init__(self, points: Optional[Sequence[Point]] = None, name: str = "route"):
-        self.points: List[Point] = [tuple(p) for p in (points or [])]
+        self.world_points = [tuple(p) for p in (points or [])]
+        # Lane trajectories are world (X,Y,Z); steering remains strictly X/Z.
+        self.points: List[Point] = [
+            (float(p[0]), float(p[2])) if len(p) >= 3
+            else (float(p[0]), float(p[1]))
+            for p in self.world_points]
         self.name = name
 
     # --- Construction / persistence ------------------------------------------
@@ -69,17 +74,19 @@ class Route:
         p = (float(x), float(z))
         if not self.points:
             self.points.append(p)
+            self.world_points.append(p)
             return True
         lx, lz = self.points[-1]
         if math.hypot(p[0] - lx, p[1] - lz) >= min_spacing:
             self.points.append(p)
+            self.world_points.append(p)
             return True
         return False
 
     def save(self, path: str):
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w") as f:
-            json.dump({"name": self.name, "points": self.points}, f)
+            json.dump({"name": self.name, "points": self.world_points}, f)
 
     @classmethod
     def load(cls, path: str) -> "Route":

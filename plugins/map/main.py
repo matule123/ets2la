@@ -4,6 +4,9 @@ import math
 import time
 from sdk.base_plugin import BasePlugin
 from core.navigation.route import Route
+from core.navigation.lane_trajectory import (
+    build_lane_trajectory, derive_display_points,
+)
 from core.paths import app_dir
 
 # routes/ lives next to the app (works both from source and when frozen).
@@ -55,6 +58,13 @@ class Plugin(BasePlugin):
         self._resolved_route_cache = []
         self._failed_route_signature = None
         self._vision_lane_m = 0.0
+        self._lane_signature = None
+        self._lane_path = None
+        self._lane_route = None
+        self._lane_match = None
+        self._lane_revision = int(self.sdk.get(
+            "lane_trajectory_revision", 0) or 0)
+        self._lane_diag_t = 0.0
         os.makedirs(ROUTES_DIR, exist_ok=True)
         self._publish_route_list()
 
@@ -62,6 +72,162 @@ class Plugin(BasePlugin):
         logging.info("Map (navigation) plugin stopped.")
         self.sdk.set("nav_active", False)
         self.sdk.set("nav_steering", 0.0)
+        self.sdk.set("nav_trajectory_revision", -1)
+
+    @staticmethod
+    def _lane_id_payload(lane_id):
+        if lane_id is None:
+            return None
+        return {
+            "road_uid": int(lane_id.road_uid),
+            "direction": int(lane_id.direction),
+            "lane_index": int(lane_id.lane_index),
+            "prefab_token": lane_id.prefab_token,
+            "connector_index": lane_id.connector_index,
+        }
+
+    def _next_lane_revision(self):
+        shared_revision = int(self.sdk.get(
+            "lane_trajectory_revision", 0) or 0)
+        self._lane_revision = max(self._lane_revision, shared_revision) + 1
+        self.sdk.set("lane_trajectory_revision", self._lane_revision)
+        return self._lane_revision
+
+    def _publish_invalid_lane_trajectory(self, reason, uids=(), status=None):
+        revision = self._next_lane_revision()
+        snapshot = {
+            "revision": revision, "valid": False, "confidence": 0.0,
+            "active_lane_id": None, "lane_match": None,
+            "points": [], "display_points": [], "distance_m": 0.0,
+            "failure_reason": str(reason or "Navigačná trajektória nie je platná"),
+            "source_gps_uids": [int(uid) for uid in uids],
+        }
+        self.sdk.set("lane_trajectory", snapshot)
+        self.sdk.set("nav_path", [])
+        self.sdk.set("map_path", [])
+        self.sdk.set("nav_active", False)
+        self.sdk.set("nav_steering", 0.0)
+        self.sdk.set("nav_trajectory_revision", -1)
+        self.sdk.set("navigation_unreliable", True)
+        self.sdk.set("navigation_failure_reason", snapshot["failure_reason"])
+        if status:
+            self.sdk.set("navigation_status", status)
+        self._lane_path = None
+        self._lane_route = None
+        return snapshot
+
+    def _update_lane_trajectory(self, pos, heading):
+        """Build and atomically publish the sole GPS lane trajectory snapshot."""
+        raw_uids = self.sdk.get("game_route_node_uids", []) or []
+        try:
+            from core.navigation.road_network import _uid
+            uids = tuple(_uid(uid) for uid in raw_uids if _uid(uid))
+        except Exception:
+            uids = ()
+        signature = uids
+        if signature != self._lane_signature:
+            self._lane_signature = signature
+            self._lane_match = None
+            self._publish_invalid_lane_trajectory(
+                "Načítavam GPS trasu", uids, "Načítavam GPS trasu")
+            self.sdk.set("navigation_recalculating", bool(len(uids) >= 2))
+        if len(uids) < 2:
+            return None
+        if self.road_net is None or not self.road_net.loaded:
+            self.sdk.set("navigation_status", "Načítavam GPS trasu")
+            return None
+
+        current = self.sdk.get("lane_trajectory", {}) or {}
+        needs_build = not bool(current.get("valid", False))
+        # Re-localise on the authoritative lane each tick. A confirmed lane
+        # transition triggers a fresh trajectory revision, never a shifted copy.
+        altitude = float(self.sdk.get("truck_altitude", 0.0) or 0.0)
+        locator = getattr(self.road_net, "_runtime_lane_locator", None)
+        if locator is None:
+            from core.navigation.lane_model import LaneLocator
+            locator = self.road_net._runtime_lane_locator = LaneLocator(self.road_net)
+        match = locator.locate((pos[0], altitude, pos[1]), heading, uids,
+                               self._lane_match)
+        if match is None:
+            self._publish_invalid_lane_trajectory(
+                "Kamión sa nepodarilo spoľahlivo lokalizovať na GPS pruhu",
+                uids, "Kamión nie je na potvrdenom jazdnom pruhu")
+            return None
+        if (self._lane_match is not None
+                and match.lane_id != self._lane_match.lane_id):
+            needs_build = True
+        self._lane_match = match
+        if not needs_build and self._lane_path is not None:
+            # Diagnostics may change while immutable geometry/revision remains.
+            updated = dict(current)
+            updated["active_lane_id"] = self._lane_id_payload(match.lane_id)
+            updated["lane_match"] = {
+                "lateral_error_m": float(match.lateral_error_m),
+                "heading_error_rad": float(match.heading_error_rad),
+                "vertical_error_m": float(match.vertical_error_m),
+                "switch_reason": match.switch_reason,
+            }
+            self.sdk.set("lane_trajectory", updated)
+            return self._lane_path
+
+        self.sdk.set("navigation_status", "Vyberám jazdné pruhy")
+        corridor = self.road_net.resolve_gps_corridor(uids)
+        if not corridor.valid:
+            self._publish_invalid_lane_trajectory(
+                corridor.failure_reason, uids, corridor.failure_reason)
+            return None
+        segments, reason = self.road_net.select_lane_sequence(corridor, match)
+        if reason:
+            self._publish_invalid_lane_trajectory(reason, uids, reason)
+            return None
+        lane_path = self.road_net.connect_lane_sequence(segments, uids)
+        if not lane_path.valid:
+            self._publish_invalid_lane_trajectory(
+                lane_path.failure_reason, uids, lane_path.failure_reason)
+            return None
+        self.sdk.set("navigation_status", "Vytváram trajektóriu")
+        trajectory = build_lane_trajectory(lane_path, spacing_m=2.0)
+        if not trajectory.valid:
+            self._publish_invalid_lane_trajectory(
+                trajectory.failure_reason, uids, trajectory.failure_reason)
+            return None
+        display = derive_display_points(trajectory, spacing_m=4.0)
+        if len(display) < 2:
+            self._publish_invalid_lane_trajectory(
+                "Trajektória nemá bezpečné display body", uids,
+                "Trajektória nemá bezpečné display body")
+            return None
+        revision = self._next_lane_revision()
+        control_points = [[float(p.x), float(p.y), float(p.z)]
+                          for p in trajectory.points]
+        display_points = [[float(p.x), float(p.y), float(p.z)]
+                          for p in display]
+        snapshot = {
+            "revision": revision, "valid": True,
+            "confidence": float(min(trajectory.confidence, match.confidence)),
+            "active_lane_id": self._lane_id_payload(match.lane_id),
+            "lane_match": {
+                "lateral_error_m": float(match.lateral_error_m),
+                "heading_error_rad": float(match.heading_error_rad),
+                "vertical_error_m": float(match.vertical_error_m),
+                "switch_reason": match.switch_reason,
+            },
+            "points": control_points, "display_points": display_points,
+            "distance_m": float(trajectory.distance_m), "failure_reason": "",
+            "source_gps_uids": [int(uid) for uid in uids],
+        }
+        # One shared-state assignment publishes one coherent geometry revision.
+        self.sdk.set("lane_trajectory", snapshot)
+        self.sdk.set("nav_path", display_points)  # compatibility, same snapshot
+        self.sdk.set("map_path", control_points)
+        self.sdk.set("nav_trajectory_revision", revision)
+        self.sdk.set("navigation_unreliable", False)
+        self.sdk.set("navigation_failure_reason", "")
+        self.sdk.set("navigation_recalculating", False)
+        self.sdk.set("navigation_status", "Navigácia pripravená")
+        self._lane_path = trajectory
+        self._lane_route = Route(control_points, name="gps-lane-trajectory")
+        return trajectory
 
     # --- Helpers --------------------------------------------------------------
     def _publish_route_list(self):
@@ -948,11 +1114,10 @@ class Plugin(BasePlugin):
         if not pos:
             return
 
-        self._update_recalculation(pos, heading)
-
         # Lazily load the downloaded road network (engine process) the first
         # time we have a position. Cheap no-op once attempted.
         self._load_road_net()
+        self._update_lane_trajectory(pos, heading)
 
         # Display-only local road geometry. It is deliberately separate from
         # nav_path and therefore cannot influence autopilot steering.
@@ -1038,22 +1203,25 @@ class Plugin(BasePlugin):
         else:
             # No recorded route: drive by the downloaded MAP. This is automatic
             # map-based driving — no recording needed.
-            map_path = self._ensure_map_path(pos, heading)
-            if len(map_path) >= 2:
-                route = Route([tuple(p) for p in map_path])
+            snapshot = self.sdk.get("lane_trajectory", {}) or {}
+            route = self._lane_route
+            if (route is not None and len(route) >= 2
+                    and bool(snapshot.get("valid", False))
+                    and int(snapshot.get("revision", -1)) == self._lane_revision):
                 # The native planned-route buffer is lane-specific geometry.
                 # Applying the generic road-centre offset once more moved the
                 # target towards the median (and made HUD and steering disagree
                 # with the truck's actual lane).
-                gps_lane_offset = 0.0
                 steer = route.steering(pos, heading, speed,
-                                       lane_offset_m=gps_lane_offset)
+                                       lane_offset_m=0.0)
                 # Safety: if the truck is far from the snapped path (wrong map
                 # dataset, or we're off-road on a ferry / car park), the CTE is
                 # huge and Stanley saturates to full-lock. Detect that and
                 # disable nav steering instead of yanking the wheel — the
                 # autopilot then falls back to vision lane-keeping.
-                off_dist = math.hypot(pos[0] - map_path[0][0], pos[1] - map_path[0][1])
+                idx = route.tracking_index(pos, heading)
+                nearest = route.points[min(idx, len(route.points)-1)]
+                off_dist = math.hypot(pos[0] - nearest[0], pos[1] - nearest[1])
                 if off_dist > 50.0:
                     self.sdk.set("nav_active", False)
                     self.sdk.set("nav_steering", 0.0)
@@ -1064,9 +1232,6 @@ class Plugin(BasePlugin):
                 else:
                     self.sdk.set("nav_steering", float(steer))
                     self.sdk.set("nav_active", True)
-                    upcoming = self._distance_window(map_path, 220.0)
-                    visible = self._driving_line(upcoming, gps_lane_offset)
-                    self.sdk.set("nav_path", [list(p) for p in visible])
                 # Curvature radius (m) of the road ahead — lets the autopilot
                 # anticipate bends (brake before, not during).
                 self.sdk.set("path_curvature_radius",
@@ -1074,4 +1239,26 @@ class Plugin(BasePlugin):
                 self.tags.nav_steering = round(steer, 3)
             else:
                 self.sdk.set("nav_active", False)
-                self.sdk.set("nav_path", [])
+                self.sdk.set("nav_steering", 0.0)
+
+        self._lane_diag_t += delta_time
+        if self._lane_diag_t >= 1.0:
+            self._lane_diag_t = 0.0
+            snapshot = self.sdk.get("lane_trajectory", {}) or {}
+            match = snapshot.get("lane_match") or {}
+            logging.info(
+                "lane-trajectory: revision=%s valid=%s confidence=%.3f lane=%s "
+                "lateral=%.3f heading=%.3f vertical=%.3f control=%d display=%d "
+                "gps_distance=%.1f lane_distance=%.1f switch=%s failure=%s",
+                snapshot.get("revision", 0), bool(snapshot.get("valid", False)),
+                float(snapshot.get("confidence", 0.0) or 0.0),
+                snapshot.get("active_lane_id"),
+                float(match.get("lateral_error_m", 0.0) or 0.0),
+                float(match.get("heading_error_rad", 0.0) or 0.0),
+                float(match.get("vertical_error_m", 0.0) or 0.0),
+                len(snapshot.get("points", ()) or ()),
+                len(snapshot.get("display_points", ()) or ()),
+                float(self.sdk.get("game_route_distance", 0.0) or 0.0),
+                float(snapshot.get("distance_m", 0.0) or 0.0),
+                match.get("switch_reason", ""),
+                snapshot.get("failure_reason", ""))

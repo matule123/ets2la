@@ -502,6 +502,17 @@ class UltraPilotEngine:
                             ("map_path", []), ("nav_path", [])):
                         self.shared_state.set(key, value)
                     self.shared_state.set("nav_active", False)
+                    old_lane = self.shared_state.get("lane_trajectory", {}) or {}
+                    lane_revision = int(old_lane.get("revision", 0) or 0) + 1
+                    self.shared_state.set("lane_trajectory_revision", lane_revision)
+                    self.shared_state.set("lane_trajectory", {
+                        "revision": lane_revision, "valid": False,
+                        "confidence": 0.0, "active_lane_id": None,
+                        "lane_match": None, "points": [], "display_points": [],
+                        "distance_m": 0.0,
+                        "failure_reason": "V hernom GPS nie je zvolený cieľ",
+                        "source_gps_uids": [],
+                    })
                     self.shared_state.set("navigation_recalculating", False)
                     self.shared_state.set("navigation_progress", 0.0)
                     self.shared_state.set("navigation_status", "V hernom GPS nie je zvolený cieľ")
@@ -599,6 +610,19 @@ class UltraPilotEngine:
                         self.shared_state.set("game_route_meta", [])
                     self.shared_state.set("map_path", [])
                     self.shared_state.set("nav_path", [])
+                    self.shared_state.set("nav_active", False)
+                    self.shared_state.set("nav_steering", 0.0)
+                    old_lane = self.shared_state.get("lane_trajectory", {}) or {}
+                    lane_revision = int(old_lane.get("revision", 0) or 0) + 1
+                    self.shared_state.set("lane_trajectory_revision", lane_revision)
+                    self.shared_state.set("lane_trajectory", {
+                        "revision": lane_revision, "valid": False,
+                        "confidence": 0.0, "active_lane_id": None,
+                        "lane_match": None, "points": [], "display_points": [],
+                        "distance_m": 0.0,
+                        "failure_reason": "Načítavam GPS trasu",
+                        "source_gps_uids": list(planned_uids),
+                    })
                     request = f"{time.time():.3f}:{dest_city}:{route_distance:.0f}"
                     self.shared_state.set("nav_recalc_request", request)
                     self.shared_state.set("nav_destination", dest_city or "nový cieľ")

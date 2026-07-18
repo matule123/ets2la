@@ -6,6 +6,9 @@ from sdk.base_plugin import BasePlugin
 
 # --- Tuning (kept here, mirrored into settings under "autopilot" section) -----
 STEER_RATE_LIMIT = 0.075     # max steering change per second (smooth, no jerk)
+MIN_LANE_TRAJECTORY_CONFIDENCE = 0.72
+# 0.72 rejects ambiguous/off-route matches while retaining a wide margin below
+# the 0.96-0.98 confidence measured on validated ProMods trajectories.
 STEER_FOLLOW_BLEND = 0.38    # suppress single-frame route/vision target jumps
                              # (low = smooth/laggy, high = snappy/jittery)
 VISION_DEADZONE = 0.03       # ignore vision lane offset noise below this
@@ -101,8 +104,25 @@ class Plugin(BasePlugin):
         # Real traffic available? If so, down-weight the noisy vision signal.
         traffic = self.sdk.shared_state.get("traffic", []) or []
         have_real_traffic = len(traffic) > 0
+        snapshot = self.sdk.shared_state.get("lane_trajectory", {}) or {}
+        snapshot_revision = int(snapshot.get("revision", -1) or -1)
+        current_revision = int(self.sdk.shared_state.get(
+            "lane_trajectory_revision", -2) or -2)
+        gps_navigation_present = bool(
+            len(snapshot.get("source_gps_uids", ()) or ()) >= 2
+            or float(self.sdk.shared_state.get("game_route_distance", 0.0) or 0.0) > 25.0)
+        lane_authority_safe = bool(
+            snapshot.get("valid", False)
+            and float(snapshot.get("confidence", 0.0) or 0.0)
+                >= MIN_LANE_TRAJECTORY_CONFIDENCE
+            and snapshot_revision == current_revision
+            and not self.sdk.shared_state.get("navigation_recalculating", False))
+        self.sdk.shared_state.set(
+            "autopilot_lane_revision",
+            snapshot_revision if lane_authority_safe else -1)
         navigation_unreliable = bool(
-            self.sdk.shared_state.get("navigation_unreliable", False))
+            self.sdk.shared_state.get("navigation_unreliable", False)
+            or (gps_navigation_present and not lane_authority_safe))
 
         # 2. Safety states — these still brake hard, but through the ramp so
         #    the truck doesn't lock up and spin.
@@ -197,7 +217,8 @@ class Plugin(BasePlugin):
         self._apply_throttle(target_throttle, dt)
 
         # 5. Lateral control.
-        nav_active = bool(self.sdk.shared_state.get("nav_active", False))
+        nav_active = bool(self.sdk.shared_state.get("nav_active", False)
+                          and lane_authority_safe)
 
         # Soft-start: detect the rising edge of autopilot_active and fade the
         # steering authority in from 0 → 1 over ~1.2 s. This kills the jerk that
@@ -221,7 +242,7 @@ class Plugin(BasePlugin):
             target = STEER_FOLLOW_BLEND * nav_steering + (1 - STEER_FOLLOW_BLEND) * self._last_steering
             target = float(np.clip(target, -1.0, 1.0))
             self._last_steering = self._ramp_steering(target, dt)
-        else:
+        elif not gps_navigation_present:
             # Vision lane-keeping (no map/route): gentle proportional law on the
             # smoothed lane offset.  lane_offset is +when the lane centre is to
             # our left, so steer = -offset. Eased with speed so it never
@@ -235,6 +256,11 @@ class Plugin(BasePlugin):
             target = STEER_FOLLOW_BLEND * raw + (1 - STEER_FOLLOW_BLEND) * self._last_steering
             target = float(np.clip(target, -1.0, 1.0))
             self._last_steering = self._ramp_steering(target, dt)
+        else:
+            # Never substitute camera lane keeping for an invalid GPS lane at
+            # an intersection. Steering returns to zero through the existing
+            # rate limiter; the brake/throttle safety path above handles stop.
+            self._last_steering = self._ramp_steering(0.0, dt)
 
         # Apply the soft-start engagement ramp so we never slam the wheel over
         # the moment the autopilot is switched on.

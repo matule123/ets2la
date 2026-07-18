@@ -64,6 +64,29 @@ class AROverlay(QWidget):
         sy = h / 2 + ((y_world / d) * f) + math.tan(pitch) * f
         return QPointF(sx, sy)
 
+    def _project_world(self, point):
+        """Project X/Y/Z through the current row-major game camera matrix."""
+        matrix = self.state.get("game_camera_view_projection")
+        if not isinstance(matrix, (list, tuple)) or len(matrix) != 16:
+            return None
+        try:
+            x, y, z = float(point[0]), float(point[1]), float(point[2])
+            values = [float(value) for value in matrix]
+        except (TypeError, ValueError, IndexError):
+            return None
+        vector = (x, y, z, 1.0)
+        clip = [sum(values[row*4+column] * vector[column]
+                    for column in range(4)) for row in range(4)]
+        if clip[3] <= 1e-6:
+            return None
+        ndc_x, ndc_y, ndc_z = (clip[index] / clip[3]
+                               for index in range(3))
+        if not (-1.05 <= ndc_x <= 1.05 and -1.05 <= ndc_y <= 1.05
+                and -1.05 <= ndc_z <= 1.05):
+            return None
+        return QPointF((ndc_x * 0.5 + 0.5) * self.width(),
+                       (1.0 - (ndc_y * 0.5 + 0.5)) * self.height())
+
     @staticmethod
     def _road_height_at(px, pz, road_segments, truck_altitude):
         """Return the nearby road surface height relative to the truck.
@@ -102,6 +125,51 @@ class AROverlay(QWidget):
         return best[2] if best is not None and best[1] <= 10.0 ** 2 else None
 
     def paintEvent(self, event):
+        if (not self.state.get("ar_enabled", True)
+                or not self.state.get("game_in_truck", False)
+                or self.state.get("navigation_recalculating", False)):
+            return
+        current_revision, world = self._current_display_points()
+        if len(world) < 2:
+            return
+        self.state.set("ar_lane_revision", current_revision)
+        projected = [self._project_world(point) for point in world]
+        strips, current = [], []
+        for point in projected:
+            if point is None:
+                if len(current) >= 2:
+                    strips.append(current)
+                current = []
+                continue
+            current.append(point)
+        if len(current) >= 2:
+            strips.append(current)
+        if not strips:
+            return
+        qp = QPainter(self)
+        qp.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for points in strips:
+            qp.setPen(QPen(QColor(45, 142, 255, 90), 18,
+                           Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                           Qt.PenJoinStyle.RoundJoin))
+            qp.drawPolyline(QPolygonF(points))
+            qp.setPen(QPen(QColor(45, 142, 255, 235), 7,
+                           Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                           Qt.PenJoinStyle.RoundJoin))
+            qp.drawPolyline(QPolygonF(points))
+
+    def _current_display_points(self):
+        """Return an unmodified current-revision display path, or no path."""
+        snapshot = self.state.get("lane_trajectory", {}) or {}
+        current_revision = int(self.state.get(
+            "lane_trajectory_revision", -1) or -1)
+        if (not snapshot.get("valid", False)
+                or int(snapshot.get("revision", -2) or -2) != current_revision
+                or self.state.get("navigation_recalculating", False)):
+            return -1, []
+        return current_revision, snapshot.get("display_points", []) or []
+
+    def _paint_legacy_disabled(self, event):
         if (not self.state.get("ar_enabled", True)
                 or not self.state.get("game_in_truck", False)):
             return

@@ -170,17 +170,15 @@ class UltraPilotHUD(QWidget):
         except (TypeError, ValueError):
             speed = 0.0
         truck = (s.get("telemetry", {}) or {}).get("truck", {}) or {}
-        live_path = (s.get("nav_path", []) or s.get("game_route_points", []) or [])
         now = time.monotonic()
-        if len(live_path) >= 2:
-            self._last_nav_path = [list(point) for point in live_path]
-            self._last_nav_path_at = now
-        elif self._last_nav_path and now - self._last_nav_path_at <= 3.0:
-            # Keep the previous valid route through brief shared-memory gaps;
-            # this removes the visible blue-line flicker.
-            live_path = self._last_nav_path
-        else:
-            live_path = []
+        trajectory = s.get("lane_trajectory", {}) or {}
+        current_revision = int(s.get("lane_trajectory_revision", -1) or -1)
+        trajectory_current = bool(
+            trajectory.get("valid", False)
+            and int(trajectory.get("revision", -2) or -2) == current_revision
+            and not s.get("navigation_recalculating", False))
+        live_path = (trajectory.get("display_points", []) or []
+                     if trajectory_current else [])
         raw_blinker = s.get("active_blinker") or "off"
         explicit_rear = bool(s.get("rear_cam", False))
         if raw_blinker in ("left", "right"):
@@ -207,6 +205,11 @@ class UltraPilotHUD(QWidget):
             "light": s.get("traffic_light"),
             # The route to draw: active navigation, else the map road ahead.
             "nav_path": live_path,
+            "lane_revision": current_revision if trajectory_current else -1,
+            "active_lane_id": (trajectory.get("active_lane_id")
+                               if trajectory_current else None),
+            "lane_match": (trajectory.get("lane_match") or {}
+                           if trajectory_current else {}),
             "road_segments": s.get("map_road_segments", []) or [],
             "limit_ms": truck.get("speedLimit", 0.0) or 0.0,
             # Rear-view camera: shown when a turn signal is active (left/right)
@@ -712,41 +715,35 @@ class UltraPilotHUD(QWidget):
                             qp.drawLine(ma, mb)
 
             path = d["nav_path"]
-            transformed = [to_truck(px, pz, align_road=False) for px, pz in path]
+            transformed = []
+            for point in path:
+                if len(point) < 3:
+                    continue
+                ahead, lateral = to_truck(
+                    float(point[0]), float(point[2]), align_road=False)
+                transformed.append((ahead, lateral,
+                                    float(point[1]) - d["altitude"]))
             # Start at the route point nearest to the truck. Never force a line
             # from (0, 0) to a distant/stale GPS node: that created the giant
             # horizontal/diagonal blue strokes in the screenshot.
             local_path = []
             if transformed:
                 closest = min(range(len(transformed)),
-                              key=lambda i: math.hypot(*transformed[i]))
+                              key=lambda i: math.hypot(transformed[i][0],
+                                                       transformed[i][1]))
                 candidate = transformed[closest:]
-                if candidate and math.hypot(*candidate[0]) <= 8.0:
-                    local_path.append((0.0, 0.0))
-                elif not candidate or math.hypot(*candidate[0]) > 12.0:
+                if (not candidate or math.hypot(candidate[0][0],
+                                                candidate[0][1]) > 12.0):
                     candidate = []
                 for point in candidate:
                     if point[0] < -2.0:
                         continue
                     if local_path:
-                        gap = math.hypot(point[0] - local_path[-1][0],
-                                         point[1] - local_path[-1][1])
+                        gap = math.dist(point, local_path[-1])
                         if gap > 40.0:
                             break
-                        if gap < 1.0:
-                            continue
                     local_path.append(point)
-            dense = []
-            for start, end in zip(local_path, local_path[1:]):
-                distance = math.hypot(end[0] - start[0], end[1] - start[1])
-                samples = max(1, int(distance / 4.0))
-                for index in range(samples):
-                    fraction = index / samples
-                    dense.append((start[0] + (end[0] - start[0]) * fraction,
-                                  start[1] + (end[1] - start[1]) * fraction))
-            if local_path:
-                dense.append(local_path[-1])
-            raw = [point for point in dense if 0.5 <= point[0] <= 210.0]
+            raw = [point for point in local_path if 0.5 <= point[0] <= 210.0]
             # Prefab routes are already densely sampled from their exact
             # Hermite curves.  Re-running Catmull-Rom here can overshoot the
             # circle and visually cut across the middle of a roundabout.
@@ -768,7 +765,8 @@ class UltraPilotHUD(QWidget):
                 #    reads as moving, driven by the _tick animation clock.
                 # 4) Anticipated route (blue) glow on the road.
                 # Height zero pins the route to the asphalt plane.
-                pts = [self._project(a, l, view, 0.0) for a, l in al]
+                pts = [self._project(a, l, view, height)
+                       for a, l, height in al]
                 pts = [p for p in pts if p is not None]
                 if len(pts) >= 2:
                     qp.setPen(QPen(QColor(59, 130, 246, 85), 14,
