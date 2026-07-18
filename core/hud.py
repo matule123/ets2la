@@ -110,6 +110,12 @@ class UltraPilotHUD(QWidget):
         self._view_yaw = 0.0
         self._ego_road_lateral = 0.0
         self._road_scene_shift = 0.0
+        # Display pose is deliberately separate from authoritative telemetry.
+        # SDK coordinates can alternate by a few centimetres (and heading by a
+        # fraction of a degree) while the truck is visually stationary.  If
+        # used raw, the fixed ego model appears to swim between lane lines.
+        self._display_truck_pos = None
+        self._display_truck_heading = None
         self._camera_key_down = False
         self.init_ui()
 
@@ -428,6 +434,55 @@ class UltraPilotHUD(QWidget):
         out.append(pts[-1])
         return out
 
+    def _stabilize_display_pose(self, pos, heading, speed_kmh):
+        """Remove SDK pose chatter without snapping the truck to a lane.
+
+        The ego model stays at truck-space origin. We stabilize the origin
+        used for the complete road scene, preserving the real signed lateral
+        position. A dead band removes noise without the visual lag of a
+        conventional low-pass filter.
+        """
+        if not pos or len(pos) < 2:
+            self._display_truck_pos = None
+            self._display_truck_heading = None
+            return pos, heading
+
+        raw = (float(pos[0]), float(pos[1]))
+        raw_h = float(heading or 0.0)
+        if self._display_truck_pos is None or self._display_truck_heading is None:
+            self._display_truck_pos = raw
+            self._display_truck_heading = raw_h
+            return raw, raw_h
+
+        old_x, old_z = self._display_truck_pos
+        dx, dz = raw[0] - old_x, raw[1] - old_z
+        distance = math.hypot(dx, dz)
+        position_band = 0.18 if speed_kmh < 1.5 else 0.06
+        if distance > 4.0:
+            # Teleport, ferry, garage load or a newly joined game session.
+            new_x, new_z = raw
+        elif distance > position_band:
+            follow = (distance - position_band) / distance
+            new_x, new_z = old_x + dx * follow, old_z + dz * follow
+        else:
+            new_x, new_z = old_x, old_z
+
+        old_h = self._display_truck_heading
+        angle_error = (raw_h - old_h + math.pi) % (2.0 * math.pi) - math.pi
+        heading_band = math.radians(0.35 if speed_kmh < 1.5 else 0.12)
+        if abs(angle_error) > math.radians(35.0):
+            new_h = raw_h
+        elif abs(angle_error) > heading_band:
+            new_h = old_h + math.copysign(abs(angle_error) - heading_band,
+                                          angle_error)
+        else:
+            new_h = old_h
+        new_h = (new_h + math.pi) % (2.0 * math.pi) - math.pi
+
+        self._display_truck_pos = (new_x, new_z)
+        self._display_truck_heading = new_h
+        return self._display_truck_pos, new_h
+
     def _draw_driving_view(self, qp, view, d):
         # Slightly darker ground band below the horizon for depth.
         horizon_y = view.top() + view.height() * 0.025
@@ -456,6 +511,10 @@ class UltraPilotHUD(QWidget):
                 {"id": 2, "x": 3.0, "z": -62.0, "type": "truck", "width": 2.5, "length": 12.5},
                 {"id": 3, "x": -1.0, "z": -88.0, "type": "car", "width": 1.9, "length": 4.7},
             ]
+
+        if not demo:
+            pos, h = self._stabilize_display_pose(
+                pos, h, float(d.get("speed_kmh", 0.0) or 0.0))
 
         # Camera perception is the only source that knows the truck's position
         # *inside* the visible lane. Align display-only road/traffic geometry
