@@ -21,7 +21,9 @@ import logging
 import heapq
 import time
 
-CACHE_VERSION = 5  # exact road curves + elevation-aware HUD geometry
+from core.navigation.lane_model import LaneId, LanePoint, LaneSegment
+
+CACHE_VERSION = 6  # lane metadata + lane-level spatial index
 
 
 def _uid(value):
@@ -116,6 +118,8 @@ class RoadNetwork:
         self._ngrid = {}         # (cx,cz) -> [uid, ...]  (node spatial index)
         self.segments = []       # [((x1,z1),(x2,z2)), ...]
         self._seg_uids = []      # [(start_uid, end_uid), ...]  parallel to segments
+        self._seg_road_uids = [] # road item uid parallel to segments
+        self._seg_look_tokens = []  # exact road-look token parallel to segments
         self._grid = {}          # (cx,cz) -> [segment_index, ...]  (legacy, endpoint-based)
         self._seg_grid = {}      # (cx,cz) -> [segment_index, ...]  (both endpoints)
         self.road_looks = {}     # token -> type, lane counts and direction split
@@ -124,6 +128,9 @@ class RoadNetwork:
         self._prefab_desc = {}   # token -> compact detailed prefab description
         self._prefab_grid = {}   # spatial index of placed prefab instances
         self._prefab_pairs = {}  # unordered endpoint UID pair -> prefab instances
+        self._prefab_lane_data = {}  # token -> dataset lane/curve connectivity
+        self._lane_cache = {}    # segment index -> tuple[LaneSegment, ...]
+        self._lane_id_index = {} # LaneId -> LaneSegment (populated lazily)
         self.loaded = False
 
     # --- Loading --------------------------------------------------------------
@@ -179,6 +186,8 @@ class RoadNetwork:
                     # Remember the endpoint uids alongside the geometry so that
                     # segment-snapping can recover graph nodes to walk from.
                     self._seg_uids.append((su, eu))
+                    self._seg_road_uids.append(_uid(r.get("uid")))
+                    self._seg_look_tokens.append(str(r.get("roadLookToken") or ""))
                     self._seg_grid.setdefault(self._cell(*a), []).append(len(self.segments))
                     if self._cell(*a) != self._cell(*b):
                         self._seg_grid.setdefault(self._cell(*b), []).append(len(self.segments))
@@ -251,9 +260,10 @@ class RoadNetwork:
             data = payload["data"]
             for k in ("nodes", "node_rot", "node_alt", "node_forward",
                       "adj", "fwd", "bwd", "_ngrid", "segments",
-                      "_seg_uids", "_grid", "_seg_grid", "_road_look_token",
+                      "_seg_uids", "_seg_road_uids", "_seg_look_tokens",
+                      "_grid", "_seg_grid", "_road_look_token",
                       "_road_length", "road_looks", "_prefab_desc", "_prefab_grid",
-                      "_prefab_pairs", "loaded"):
+                      "_prefab_pairs", "_prefab_lane_data", "loaded"):
                 setattr(self, k, data.get(k, getattr(self, k)))
             self.loaded = bool(data.get("loaded", True))
             logging.info("road_network: loaded from cache (%d nodes, %d fwd).",
@@ -274,13 +284,17 @@ class RoadNetwork:
                     "node_alt": self.node_alt, "node_forward": self.node_forward,
                     "adj": self.adj, "fwd": self.fwd,
                     "bwd": self.bwd, "_ngrid": self._ngrid, "segments": self.segments,
-                    "_seg_uids": self._seg_uids, "_grid": self._grid,
+                    "_seg_uids": self._seg_uids,
+                    "_seg_road_uids": self._seg_road_uids,
+                    "_seg_look_tokens": self._seg_look_tokens,
+                    "_grid": self._grid,
                     "_seg_grid": self._seg_grid, "_road_look_token": self._road_look_token,
                     "_road_length": self._road_length,
                     "road_looks": self.road_looks,
                     "_prefab_desc": self._prefab_desc,
                     "_prefab_grid": self._prefab_grid,
                     "_prefab_pairs": self._prefab_pairs,
+                    "_prefab_lane_data": self._prefab_lane_data,
                     "loaded": self.loaded,
                 },
             }
@@ -344,6 +358,7 @@ class RoadNetwork:
 
             for raw in _loadf(desc_path):
                 curves = []
+                lane_curves = []
                 for curve in raw.get("navCurves", ()):
                     start, end = curve.get("start", {}), curve.get("end", {})
                     start_forward = forward(start)
@@ -354,6 +369,13 @@ class RoadNetwork:
                         start_forward[0], start_forward[1],
                         end_forward[0], end_forward[1],
                     ))
+                    lane_curves.append({
+                        "nav_node_index": int(curve.get("navNodeIndex", -1)),
+                        "next_lines": tuple(int(i) for i in curve.get("nextLines", ())),
+                        "prev_lines": tuple(int(i) for i in curve.get("prevLines", ())),
+                        "start_y": float(start.get("z", 0.0) or 0.0),
+                        "end_y": float(end.get("z", 0.0) or 0.0),
+                    })
                 nodes = tuple((float(node.get("x", 0)),
                                float(node.get("y", 0)),
                                float(node.get("rotation", 0)))
@@ -368,6 +390,14 @@ class RoadNetwork:
                                       int(node.get("endIndex", -1)), connections))
                 self._prefab_desc[str(raw.get("token", ""))] = (
                     nodes, tuple(curves), tuple(nav_nodes))
+                self._prefab_lane_data[str(raw.get("token", ""))] = {
+                    "nodes": tuple({
+                        "input_lanes": tuple(int(i) for i in node.get("inputLanes", ())),
+                        "output_lanes": tuple(int(i) for i in node.get("outputLanes", ())),
+                        "y": float(node.get("z", 0.0) or 0.0),
+                    } for node in raw.get("nodes", ())),
+                    "curves": tuple(lane_curves),
+                }
 
             for raw in _loadf(inst_path):
                 token = str(raw.get("token", ""))
@@ -391,6 +421,7 @@ class RoadNetwork:
             self._prefab_desc.clear()
             self._prefab_grid.clear()
             self._prefab_pairs.clear()
+            self._prefab_lane_data.clear()
 
     @staticmethod
     def _hermite_curve(curve, spacing=2.25):
@@ -954,6 +985,16 @@ class RoadNetwork:
                 self.road_looks[tok] = {
                     "type": rtype, "lanes": max(1, lanes),
                     "lanes_left": len(lanes_l), "lanes_right": len(lanes_r),
+                    # These are the lane facts actually present in the map.
+                    # Width is absent and is therefore deliberately not stored
+                    # as a dataset value (lane construction marks it derived).
+                    "lane_types_left": tuple(str(value) for value in lanes_l),
+                    "lane_types_right": tuple(str(value) for value in lanes_r),
+                    "offset_m": float(r.get("offset", 0.0) or 0.0),
+                    "lane_offset_m": (float(r["laneOffset"])
+                                      if r.get("laneOffset") is not None else None),
+                    "shoulder_left_m": float(r.get("shoulderSpaceLeft", 0.0) or 0.0),
+                    "shoulder_right_m": float(r.get("shoulderSpaceRight", 0.0) or 0.0),
                 }
             logging.info("road_network: %d road-looks classified.", len(self.road_looks))
         except Exception as e:
@@ -1007,6 +1048,160 @@ class RoadNetwork:
         # Register in every grid cell the endpoints fall into.
         for p in (a, b):
             self._grid.setdefault(self._cell(*p), []).append(idx)
+
+    # --- Lane-level geometry -------------------------------------------------
+    @staticmethod
+    def _drivable_lane_type(lane_type):
+        value = str(lane_type or "").lower()
+        return ("road" in value
+                and "no_vehicles" not in value
+                and ".rail." not in value
+                and not value.startswith("traffic_lane.rail"))
+
+    @staticmethod
+    def _offset_curve(curve, lateral_m, reverse=False):
+        """Offset a sampled road spline and return direction-correct 3-D points."""
+        if reverse:
+            curve = list(reversed(curve))
+            lateral_m = -lateral_m
+        result, travelled = [], 0.0
+        for index, point in enumerate(curve):
+            before = curve[max(0, index - 1)]
+            after = curve[min(len(curve) - 1, index + 1)]
+            dx, dz = after[0] - before[0], after[1] - before[1]
+            length = math.hypot(dx, dz)
+            if length < 1e-8:
+                ox = oz = 0.0
+                heading = result[-1].heading if result else 0.0
+            else:
+                # Right normal of the direction of travel.
+                ox, oz = dz / length * lateral_m, -dx / length * lateral_m
+                heading = math.atan2(-dx, -dz)
+            if result:
+                travelled += math.hypot(
+                    point[0] + ox - result[-1].x,
+                    point[1] + oz - result[-1].z)
+            result.append(LanePoint(point[0] + ox, point[2], point[1] + oz,
+                                    travelled, heading))
+        return tuple(result)
+
+    def _build_lane_segments(self, segment_index):
+        """Lazily derive lane centres for one ordinary road map item.
+
+        The dataset supplies lane order/type but no width.  SCS prefab lane
+        centres are spaced 4.5 m apart, so 4.5 m is used as an explicitly
+        derived width. ``roadLook.offset`` is the gap between direction groups.
+        """
+        if segment_index in self._lane_cache:
+            return self._lane_cache[segment_index]
+        if not (0 <= segment_index < len(self._seg_uids)):
+            return ()
+        start_uid, end_uid = self._seg_uids[segment_index]
+        road_uid = (self._seg_road_uids[segment_index]
+                    if segment_index < len(self._seg_road_uids) else 0)
+        token = (self._seg_look_tokens[segment_index]
+                 if segment_index < len(self._seg_look_tokens) else
+                 self._road_look_token.get(start_uid, ""))
+        look = self.road_looks.get(token) or {}
+        curve = self._road_curve_3d(start_uid, end_uid, spacing=3.0)
+        if len(curve) < 2:
+            self._lane_cache[segment_index] = ()
+            return ()
+        width = 4.5
+        separation = max(0.0, float(look.get("offset_m", 0.0) or 0.0))
+        groups = ((1, tuple(look.get("lane_types_right", ()))),
+                  (-1, tuple(look.get("lane_types_left", ()))))
+        built = []
+        for direction, lane_types in groups:
+            drivable = [(raw_index, lane_type)
+                        for raw_index, lane_type in enumerate(lane_types)
+                        if self._drivable_lane_type(lane_type)]
+            for lane_index, (raw_index, lane_type) in enumerate(drivable):
+                fixed_side_offset = separation * 0.5 + width * (raw_index + 0.5)
+                # Right lanes lie right of start->end. Left lanes lie left and
+                # travel end->start; _offset_curve handles the reversal sign.
+                lateral = fixed_side_offset if direction > 0 else -fixed_side_offset
+                lane_id = LaneId(road_uid, direction, lane_index)
+                left = (LaneId(road_uid, direction, lane_index + 1)
+                        if lane_index + 1 < len(drivable) else None)
+                right = (LaneId(road_uid, direction, lane_index - 1)
+                         if lane_index > 0 else None)
+                centerline = self._offset_curve(curve, lateral,
+                                                reverse=direction < 0)
+                mid_y = centerline[len(centerline) // 2].y
+                lane = LaneSegment(
+                    lane_id=lane_id,
+                    start_uid=start_uid if direction > 0 else end_uid,
+                    end_uid=end_uid if direction > 0 else start_uid,
+                    direction=direction,
+                    lane_index=lane_index,
+                    lane_count=len(drivable),
+                    width_m=width,
+                    width_source="derived",
+                    elevation_layer=int(round(mid_y / 3.0)),
+                    road_look_token=token or None,
+                    lane_type=lane_type,
+                    centerline=centerline,
+                    left_neighbor=left,
+                    right_neighbor=right,
+                    gps_uids=frozenset((start_uid, end_uid)),
+                )
+                built.append(lane)
+                self._lane_id_index[lane_id] = lane
+        result = tuple(built)
+        self._lane_cache[segment_index] = result
+        return result
+
+    def lane_segments_near(self, pos, radius=28.0):
+        """Return lazily built lane centres whose road items are near ``pos``."""
+        if not self.loaded or not pos:
+            return []
+        px, pz = pos
+        cx, cz = self._cell(px, pz)
+        rings = int(radius // self.GRID) + 1
+        seen, result = set(), []
+        generous = radius + 18.0
+        for dx in range(-rings, rings + 1):
+            for dz in range(-rings, rings + 1):
+                for index in self._seg_grid.get((cx + dx, cz + dz), ()):
+                    if index in seen:
+                        continue
+                    seen.add(index)
+                    (ax, az), (bx, bz) = self.segments[index]
+                    vx, vz = bx - ax, bz - az
+                    length2 = vx * vx + vz * vz
+                    t = (0.0 if length2 < 1e-8 else max(0.0, min(1.0,
+                         ((px - ax) * vx + (pz - az) * vz) / length2)))
+                    qx, qz = ax + vx * t, az + vz * t
+                    if math.hypot(px - qx, pz - qz) <= generous:
+                        result.extend(self._build_lane_segments(index))
+        return result
+
+    def altitude_near(self, pos):
+        index = self._nearest_segment_index(pos, radius=80.0)
+        if index is None:
+            return None
+        first, second = self._seg_uids[index]
+        return (self.node_alt.get(first, 0.0)
+                + self.node_alt.get(second, 0.0)) * 0.5
+
+    def lanes_connected(self, first, second):
+        """Conservative ordinary-road topology check used by hysteresis."""
+        if first == second:
+            return True
+        if (first.road_uid == second.road_uid
+                and first.direction == second.direction
+                and abs(first.lane_index - second.lane_index) == 1):
+            return True
+        a = self._lane_id_index.get(first)
+        b = self._lane_id_index.get(second)
+        if a is None or b is None or a.direction != b.direction:
+            return False
+        if a.end_uid != b.start_uid:
+            return False
+        graph = self.fwd if a.direction > 0 else self.bwd
+        return (b.end_uid in graph.get(a.end_uid, ())
+                or b.start_uid == a.end_uid)
 
     # --- Queries --------------------------------------------------------------
     def segments_near(self, pos, radius: float = 800.0):
