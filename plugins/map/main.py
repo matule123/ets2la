@@ -52,6 +52,7 @@ class Plugin(BasePlugin):
         self._navigation_log_seq = int(self.sdk.get(
             "navigation_log_seq", 0) or 0)
         self._lane_failure_signature = None
+        self._last_logged_lane_failure = None
         self._lane_retry_at = 0.0
         os.makedirs(ROUTES_DIR, exist_ok=True)
         self._publish_route_list()
@@ -97,7 +98,8 @@ class Plugin(BasePlugin):
                 == int(revision)
             and self.sdk.get("nav_recalc_request") == request_id)
 
-    def _publish_invalid_lane_trajectory(self, reason, uids=(), status=None):
+    def _publish_invalid_lane_trajectory(self, reason, uids=(), status=None,
+                                         log_failure=True):
         revision = self._next_lane_revision()
         snapshot = {
             "revision": revision, "valid": False, "confidence": 0.0,
@@ -125,6 +127,23 @@ class Plugin(BasePlugin):
                                 "topology", "corridor edge"))
                         else technical)
             self.sdk.set("navigation_status", friendly)
+        technical_reason = snapshot["failure_reason"]
+        if log_failure:
+            failure_signature = (tuple(int(uid) for uid in uids), technical_reason)
+            if getattr(self, "_last_logged_lane_failure", None) != failure_signature:
+                self._last_logged_lane_failure = failure_signature
+                logging.error(
+                    "Navigation calculation failed: %s (GPS UID count=%d, revision=%d)",
+                    technical_reason, len(tuple(uids)), revision)
+                self._navigation_log_seq += 1
+                self.sdk.shared_state.update_batch({
+                    "navigation_log_seq": self._navigation_log_seq,
+                    "navigation_log_event": {
+                        "seq": self._navigation_log_seq,
+                        "level": "ERROR",
+                        "message": f"Výpočet navigácie zlyhal: {technical_reason}",
+                    },
+                })
         self._lane_path = None
         self._lane_route = None
         return snapshot
@@ -143,7 +162,8 @@ class Plugin(BasePlugin):
             if locator is not None:
                 locator.previous = None
             self._publish_invalid_lane_trajectory(
-                "Načítavam GPS trasu", uids, "Načítavam GPS trasu")
+                "Načítavam GPS trasu", uids, "Načítavam GPS trasu",
+                log_failure=False)
             self.sdk.set("navigation_recalculating", bool(len(uids) >= 2))
         if len(uids) < 2:
             return None
@@ -286,6 +306,7 @@ class Plugin(BasePlugin):
         self._lane_path = trajectory
         self._lane_route = Route(control_points, name="gps-lane-trajectory")
         self._lane_failure_signature = None
+        self._last_logged_lane_failure = None
         self._lane_retry_at = 0.0
         return trajectory
 

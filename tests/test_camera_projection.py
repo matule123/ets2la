@@ -286,6 +286,31 @@ class CameraSnapshotTests(unittest.TestCase):
 
 
 class CameraConsumerAndPreflightTests(unittest.TestCase):
+    def test_autopilot_rejects_opposing_or_distant_live_lane_match(self):
+        now = time.monotonic()
+        route = {
+            "revision": 8, "valid": True, "confidence": 0.95,
+            "request_id": "r8", "source_gps_uids": [10, 11],
+            "points": [[0, 0, 0], [0, 0, -20]],
+            "display_points": [[0, 0, 0], [0, 0, -20]],
+            "lane_match": {"lateral_error_m": 0.2,
+                           "heading_error_rad": 0.0},
+        }
+        state = State({
+            "lane_trajectory_revision": 8,
+            "lane_trajectory_heartbeat": now,
+            "game_route_node_uids": [10, 11],
+            "nav_recalc_request": "r8", "telemetry_valid": True,
+            "lane_match": {"revision": 8, "lateral_error_m": 0.2,
+                           "heading_error_rad": math.radians(150)},
+        })
+        self.assertIn("heading differs",
+                      lane_authority_rejection_reason(state, route, now))
+        state.set("lane_match", {"revision": 8, "lateral_error_m": 4.0,
+                                 "heading_error_rad": 0.0})
+        self.assertIn("outside the confirmed GPS lane",
+                      lane_authority_rejection_reason(state, route, now))
+
     def test_nonfinite_runtime_points_are_rejected_by_hud_ar_and_autopilot(self):
         now = time.monotonic()
         route = {

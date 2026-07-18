@@ -125,9 +125,15 @@ class LaneMatch:
 @dataclass(frozen=True, slots=True)
 class LaneLocatorConfig:
     search_radius_m: float = 28.0
-    max_lateral_m: float = 11.0
+    # A different carriageway at a junction can be only 6-10 m away.  It is
+    # not a valid fallback for the truck's lane and must never become steering
+    # authority merely because it is geometrically nearby.
+    max_lateral_m: float = 5.0
     max_vertical_m: float = 4.0
-    max_heading_rad: float = math.radians(100.0)
+    # More than 65 degrees means an intersecting/opposing arm, not the lane the
+    # truck is currently travelling on.  The former 100 degree allowance could
+    # initialise navigation on the oncoming carriageway.
+    max_heading_rad: float = math.radians(65.0)
     heading_weight: float = 5.5
     vertical_weight: float = 3.0
     off_route_penalty: float = 7.0

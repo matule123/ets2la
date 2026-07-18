@@ -1058,6 +1058,73 @@ class RoadNetwork:
                                 (end.x, end.y, end.z))
             if max(start_gap, end_gap) <= 6.0:
                 continue
+            # Never replace a curved prefab/roundabout connector with a single
+            # endpoint fit.  That construction cuts across the island even
+            # though the prefab nav-curves correctly travel around it.  A
+            # misplaced curved connector must fail closed at the geometry-gap
+            # check below rather than becoming an unsafe shortcut.
+            source_length = sum(math.dist(
+                (a.x, a.y, a.z), (b.x, b.y, b.z))
+                for a, b in zip(segment.centerline, segment.centerline[1:]))
+            source_chord = math.dist(
+                (original_start.x, original_start.y, original_start.z),
+                (original_end.x, original_end.y, original_end.z))
+            source_turn = sum(abs(
+                (b.heading - a.heading + math.pi) % (2.0 * math.pi) - math.pi)
+                              for a, b in zip(segment.centerline,
+                                              segment.centerline[1:]))
+            curved_connector = bool(
+                segment.lane_type == "roundabout"
+                or source_turn > math.radians(35.0)
+                or (source_chord > 1.0
+                    and source_length / source_chord > 1.10))
+            if curved_connector:
+                target_dx, target_dz = end.x - start.x, end.z - start.z
+                target_chord = math.hypot(target_dx, target_dz)
+                source_dx = original_end.x - original_start.x
+                source_dz = original_end.z - original_start.z
+                source_chord_xz = math.hypot(source_dx, source_dz)
+                if source_chord_xz < 1.0 or target_chord < 1.0:
+                    continue
+                scale = target_chord / source_chord_xz
+                if not 0.35 <= scale <= 5.0:
+                    continue
+                source_angle = math.atan2(source_dz, source_dx)
+                target_angle = math.atan2(target_dz, target_dx)
+                rotation = target_angle - source_angle
+                cosine, sine = math.cos(rotation), math.sin(rotation)
+                fitted = []
+                count = max(1, len(segment.centerline) - 1)
+                for point_index, point in enumerate(segment.centerline):
+                    local_x = (point.x - original_start.x) * scale
+                    local_z = (point.z - original_start.z) * scale
+                    fraction = point_index / count
+                    # Preserve the complete prefab curve instead of replacing
+                    # it with an endpoint chord. Endpoint correction in Y is
+                    # linear; X/Z undergo one shape-preserving similarity fit.
+                    fitted.append(LanePoint(
+                        start.x + local_x * cosine - local_z * sine,
+                        point.y + (start.y - original_start.y) * (1.0-fraction)
+                        + (end.y - original_end.y) * fraction,
+                        start.z + local_x * sine + local_z * cosine,
+                        lane_id=segment.lane_id, segment_index=index,
+                    ))
+                dense = [fitted[0]]
+                for first_point, second_point in zip(fitted, fitted[1:]):
+                    gap = math.dist(
+                        (first_point.x, first_point.y, first_point.z),
+                        (second_point.x, second_point.y, second_point.z))
+                    steps = max(1, int(math.ceil(gap / 2.25)))
+                    for step in range(1, steps + 1):
+                        fraction = step / steps
+                        dense.append(LanePoint(
+                            first_point.x + (second_point.x-first_point.x)*fraction,
+                            first_point.y + (second_point.y-first_point.y)*fraction,
+                            first_point.z + (second_point.z-first_point.z)*fraction,
+                            lane_id=segment.lane_id, segment_index=index,
+                        ))
+                segments[index] = replace(segment, centerline=tuple(dense))
+                continue
             if (max(start_gap, end_gap) > 45.0
                     or abs(start.y - end.y) > 6.0
                     or (previous is None and following is None)):

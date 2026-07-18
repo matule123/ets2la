@@ -71,6 +71,22 @@ def lane_authority_rejection_reason(state, snapshot, now=None):
             if (not isinstance(point, (list, tuple)) or len(point) < 3
                     or not all(math.isfinite(float(value)) for value in point[:3])):
                 return "lane trajectory contains malformed or non-finite 3D points"
+        # Use the live localisation for this revision, not only the match that
+        # existed when the immutable geometry snapshot was built.  This blocks
+        # initial full-left pulls and driving an otherwise valid route in the
+        # opposite direction after the truck changes arm at a junction.
+        live_match = state.get("lane_match") or snapshot.get("lane_match") or {}
+        match_revision = int(live_match.get("revision", snapshot_revision)
+                             or snapshot_revision)
+        if match_revision != snapshot_revision:
+            return "live lane localisation belongs to a stale trajectory"
+        lateral = abs(float(live_match.get("lateral_error_m", 0.0) or 0.0))
+        heading = abs(float(live_match.get("heading_error_rad", 0.0) or 0.0))
+        if not math.isfinite(lateral) or lateral > 3.25:
+            return f"truck is {lateral:.2f} m outside the confirmed GPS lane"
+        if not math.isfinite(heading) or heading > math.radians(42.0):
+            return (f"truck heading differs from the GPS lane by "
+                    f"{math.degrees(heading):.1f} degrees")
     except (TypeError, ValueError, OverflowError):
         return "lane trajectory metadata is malformed"
     return ""
