@@ -399,7 +399,7 @@ class UltraPilotEngine:
         logging.info("Autopilot %s (command acknowledged).",
                      "enabled" if desired else "disabled")
 
-    def _camera_diagnostic(self, snapshot):
+    def _camera_diagnostic(self, snapshot, game_active=True):
         """Publish/log camera readiness at most once per second."""
         now = time.monotonic()
         if now - self._last_camera_diagnostic < 1.0:
@@ -418,6 +418,11 @@ class UltraPilotEngine:
             "timestamp": now,
         }
         self.shared_state.set("camera_diagnostics", diagnostic)
+        # Missing viewport/camera data is an expected idle state while the
+        # game is closed or the player is not in a truck.  Keep it available
+        # to the UI preflight, but do not present it as a runtime warning.
+        if not game_active:
+            return
         message = (
             "camera: revision=%s valid=%s source=%s mode=%s renderTime=%s "
             "viewport=%sx%s@(%s,%s) hfov=%s failure=%s")
@@ -592,9 +597,9 @@ class UltraPilotEngine:
                 # frame, before any route processing can introduce skew.
                 camera_snapshot = self.camera_snapshot_producer.read(
                     raw.get("renderTime", 0), telemetry_timestamp)
-                self._camera_diagnostic(camera_snapshot)
-                self.shared_state.set(
-                    "game_in_truck", bool(raw.get("sdkActive", bool(truck))))
+                game_active = bool(raw.get("sdkActive", bool(truck)))
+                self._camera_diagnostic(camera_snapshot, game_active)
+                self.shared_state.set("game_in_truck", game_active)
                 self._autostart_truck(truck)
                 dest_city = self.telemetry.get("dest_city", "") or ""
                 try:
@@ -850,7 +855,7 @@ class UltraPilotEngine:
                 telemetry_timestamp = time.monotonic()
                 camera_snapshot = self.camera_snapshot_producer.read(
                     0, telemetry_timestamp)
-                self._camera_diagnostic(camera_snapshot)
+                self._camera_diagnostic(camera_snapshot, False)
                 self.shared_state.update_batch({
                     "game_in_truck": False,
                     "telemetry_valid": False,

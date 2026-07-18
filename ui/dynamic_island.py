@@ -27,6 +27,8 @@ _TECHNICAL_LOG_MARKERS = (
     "system transitioning", "follow_lane", "follow lane", "cruise ->",
     "camera: revision=", "rendertime=", "viewport=", "hfov=",
     "active_lane_id", "lane_match", "locator_score", "trajectory_score",
+    "autopilot: active=", "lane_off=", "nav_steer=", "steer_out=",
+    "lane_revision=", "confidence=", "reject=",
 )
 
 
