@@ -132,7 +132,8 @@ class CameraSnapshotTests(unittest.TestCase):
         self.assertEqual(snap["source"], CAMERA_MAPPING)
         self.assertEqual(snap["position"], [1034.0, 3.0, -492.0])
         self.assertEqual(snap["tile"], [2, -1])
-        self.assertEqual(snap["fov_convention"], "horizontal-degrees")
+        self.assertEqual(snap["fov_convention"],
+                         "ets2la-4:3-reference-horizontal-degrees")
         self.assertEqual(snap["matrix_layout"], "row-major")
         self.assertEqual(snap["camera_axes"], "+X right, +Y up, -Z forward")
         self.assertEqual(len(snap["view_matrix"]), 16)
@@ -161,7 +162,7 @@ class CameraSnapshotTests(unittest.TestCase):
         self.assertLess(up[1], center[1]); self.assertGreater(down[1], center[1])
         self.assertIsNone(behind)
 
-    def test_4_3_16_9_and_21_9_use_real_aspect_without_fixed_4_3(self):
+    def test_4_3_reference_fov_matches_ets2la_on_wide_viewports(self):
         positions = []
         for width, height in ((1600, 1200), (1920, 1080), (2520, 1080)):
             now = time.monotonic()
@@ -171,14 +172,15 @@ class CameraSnapshotTests(unittest.TestCase):
                 snap, (cx + 5, cy + 2, cz - 20), now=now,
                 telemetry_timestamp=now)
             positions.append((projected[0] / width, projected[1] / height))
+        # ETS2LA keeps a 4:3 reference focal distance based on viewport height.
+        # Vertical normalized displacement is therefore stable; horizontal
+        # displacement shrinks as the viewport becomes wider.
         for position in positions[1:]:
-            self.assertAlmostEqual(position[0], positions[0][0], places=6)
-        # Horizontal FOV is fixed, therefore vertical normalized displacement
-        # grows with aspect instead of pretending every viewport is 4:3.
-        self.assertGreater(abs(positions[2][1] - 0.5),
-                           abs(positions[1][1] - 0.5))
-        self.assertGreater(abs(positions[1][1] - 0.5),
-                           abs(positions[0][1] - 0.5))
+            self.assertAlmostEqual(position[1], positions[0][1], places=6)
+        self.assertLess(abs(positions[1][0] - 0.5),
+                        abs(positions[0][0] - 0.5))
+        self.assertLess(abs(positions[2][0] - 0.5),
+                        abs(positions[1][0] - 0.5))
 
     def test_yaw_pitch_and_roll_follow_camera_quaternion(self):
         angle = math.radians(30.0)
@@ -228,7 +230,8 @@ class CameraSnapshotTests(unittest.TestCase):
         cos_roll, sin_roll = math.cos(-roll), math.sin(-roll)
         final_x = new_x * cos_roll - new_y * sin_roll
         final_y = new_y * cos_roll + new_x * sin_roll
-        focal = 960.0 / math.tan(math.radians(snap["fov_horizontal_deg"]) / 2)
+        focal = (1080.0 * (4.0 / 3.0) / 2.0
+                 / math.tan(math.radians(snap["fov_horizontal_deg"]) / 2))
         expected_x = 1920.0 - ((final_x / final_z) * focal + 960.0)
         expected_y = (final_y / final_z) * focal + 540.0
         self.assertAlmostEqual(actual[0], expected_x, places=5)

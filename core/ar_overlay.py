@@ -127,7 +127,10 @@ class AROverlay(QWidget):
             self._publish_status(False, camera_reason, current_revision)
             return
 
-        projected = [None if point is None else
+        # The overlay has no access to the game's depth buffer.  Suppress the
+        # first metres that are physically hidden by the cab/dashboard rather
+        # than painting the road trace over the interior.
+        projected = [None if point is None or float(point[2]) < 8.0 else
                      (QPointF(point[0], point[1]), float(point[2]))
                      for point in projected_values]
         strips, current = [], []

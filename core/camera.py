@@ -123,8 +123,14 @@ def build_camera_matrices(position: Sequence[float],
                               + rotation[row * 4 + 2] * pz)
 
     tangent = math.tan(math.radians(float(horizontal_fov_deg)) * 0.5)
-    fx = 1.0 / tangent
-    fy = float(aspect) / tangent
+    # CameraProps FOV follows SCS/ETS2LA's 4:3 reference viewport.  Treating
+    # it as a native widescreen horizontal FOV enlarged both axes by 4/3 on a
+    # 16:9 client: road points then projected onto the dashboard and distant
+    # bends appeared in the sky.  This is the focal-distance calculation used
+    # by ETS2LA's ConvertToScreenCoordinate, expressed in normalized units.
+    reference_aspect = 4.0 / 3.0
+    fx = reference_aspect / float(aspect) / tangent
+    fy = reference_aspect / tangent
     projection = [
         fx, 0.0, 0.0, 0.0,
         0.0, fy, 0.0, 0.0,
@@ -333,7 +339,7 @@ class CameraSnapshotProducer:
             "quaternion": list(quaternion),
             "quaternion_raw": [float(qw), float(qx), float(qy), float(qz)],
             "fov_horizontal_deg": float(fov),
-            "fov_convention": "horizontal-degrees",
+            "fov_convention": "ets2la-4:3-reference-horizontal-degrees",
             "viewport": dict(viewport, width=width, height=height, aspect=aspect),
             "aspect": aspect,
             "timestamp": now, "telemetry_timestamp": telemetry_timestamp,
