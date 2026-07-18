@@ -21,13 +21,19 @@ def wrap_angle(value: float) -> float:
     return (float(value) + math.pi) % (2.0 * math.pi) - math.pi
 
 
-@dataclass(frozen=True, slots=True, order=True)
+@dataclass(frozen=True, slots=True)
 class LaneId:
     road_uid: int
     direction: int
     lane_index: int
     prefab_token: Optional[str] = None
     connector_index: Optional[int] = None
+    connector_path: tuple[int, ...] = ()
+
+    def sort_key(self):
+        return (self.road_uid, self.direction, self.lane_index,
+                self.prefab_token or "", self.connector_index or -1,
+                self.connector_path)
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +133,7 @@ class LaneLocatorConfig:
     discontinuity_penalty: float = 4.0
     derived_width_penalty: float = 0.6
     switch_margin: float = 1.5
+    ambiguity_margin: float = 0.25
 
 
 class LaneLocator:
@@ -189,11 +196,14 @@ class LaneLocator:
                           or lane.lane_id == previous.lane_id
                           or self.network.lanes_connected(
                               previous.lane_id, lane.lane_id))
+            if previous is not None and not continuous:
+                # Hysteresis is not permission to teleport to a nearby road.
+                # A transition must be topologically confirmed by the network.
+                continue
             score = (distance
                      + heading_error * self.config.heading_weight
                      + vertical * self.config.vertical_weight
                      + (0.0 if on_route else self.config.off_route_penalty)
-                     + (0.0 if continuous else self.config.discontinuity_penalty)
                      + (self.config.derived_width_penalty
                         if lane.width_source == "derived" else 0.0))
             confidence = max(0.0, min(1.0, 1.0 - score / 18.0))
@@ -202,7 +212,14 @@ class LaneLocator:
         if not ranked:
             self.previous = None
             return None
-        ranked.sort(key=lambda item: (item[0], item[1].lane_id))
+        ranked.sort(key=lambda item: (item[0], item[1].lane_id.sort_key()))
+        # An initial exact/near tie is not a reliable lane match. Silently
+        # breaking it by LaneId can select a parallel road or carriageway.
+        if (previous is None and len(ranked) > 1
+                and ranked[1][0] - ranked[0][0]
+                    <= self.config.ambiguity_margin):
+            self.previous = None
+            return None
         chosen = ranked[0]
         reason = "best_score" if previous is None else "better_lane"
         if previous is not None:

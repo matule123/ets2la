@@ -84,14 +84,30 @@ class Plugin(BasePlugin):
             "lane_index": int(lane_id.lane_index),
             "prefab_token": lane_id.prefab_token,
             "connector_index": lane_id.connector_index,
+            "connector_path": list(lane_id.connector_path),
         }
 
     def _next_lane_revision(self):
         shared_revision = int(self.sdk.get(
             "lane_trajectory_revision", 0) or 0)
         self._lane_revision = max(self._lane_revision, shared_revision) + 1
-        self.sdk.set("lane_trajectory_revision", self._lane_revision)
         return self._lane_revision
+
+    @staticmethod
+    def _normalise_gps_uids(raw_uids):
+        try:
+            from core.navigation.road_network import _uid
+            return tuple(_uid(uid) for uid in (raw_uids or ()) if _uid(uid))
+        except Exception:
+            return ()
+
+    def _build_is_current(self, uids, revision, request_id=None):
+        return bool(
+            self._normalise_gps_uids(
+                self.sdk.get("game_route_node_uids", []) or []) == tuple(uids)
+            and int(self.sdk.get("lane_trajectory_revision", -1) or -1)
+                == int(revision)
+            and self.sdk.get("nav_recalc_request") == request_id)
 
     def _publish_invalid_lane_trajectory(self, reason, uids=(), status=None):
         revision = self._next_lane_revision()
@@ -102,7 +118,10 @@ class Plugin(BasePlugin):
             "failure_reason": str(reason or "Navigačná trajektória nie je platná"),
             "source_gps_uids": [int(uid) for uid in uids],
         }
-        self.sdk.set("lane_trajectory", snapshot)
+        self.sdk.shared_state.update_batch({
+            "lane_trajectory_revision": revision,
+            "lane_trajectory": snapshot,
+        })
         self.sdk.set("nav_path", [])
         self.sdk.set("map_path", [])
         self.sdk.set("nav_active", False)
@@ -119,15 +138,14 @@ class Plugin(BasePlugin):
     def _update_lane_trajectory(self, pos, heading):
         """Build and atomically publish the sole GPS lane trajectory snapshot."""
         raw_uids = self.sdk.get("game_route_node_uids", []) or []
-        try:
-            from core.navigation.road_network import _uid
-            uids = tuple(_uid(uid) for uid in raw_uids if _uid(uid))
-        except Exception:
-            uids = ()
+        uids = self._normalise_gps_uids(raw_uids)
         signature = uids
         if signature != self._lane_signature:
             self._lane_signature = signature
             self._lane_match = None
+            locator = getattr(self.road_net, "_runtime_lane_locator", None)
+            if locator is not None:
+                locator.previous = None
             self._publish_invalid_lane_trajectory(
                 "Načítavam GPS trasu", uids, "Načítavam GPS trasu")
             self.sdk.set("navigation_recalculating", bool(len(uids) >= 2))
@@ -138,6 +156,9 @@ class Plugin(BasePlugin):
             return None
 
         current = self.sdk.get("lane_trajectory", {}) or {}
+        build_revision = int(self.sdk.get(
+            "lane_trajectory_revision", -1) or -1)
+        build_request = self.sdk.get("nav_recalc_request")
         needs_build = not bool(current.get("valid", False))
         # Re-localise on the authoritative lane each tick. A confirmed lane
         # transition triggers a fresh trajectory revision, never a shifted copy.
@@ -148,6 +169,8 @@ class Plugin(BasePlugin):
             locator = self.road_net._runtime_lane_locator = LaneLocator(self.road_net)
         match = locator.locate((pos[0], altitude, pos[1]), heading, uids,
                                self._lane_match)
+        if not self._build_is_current(uids, build_revision, build_request):
+            return None
         if match is None:
             self._publish_invalid_lane_trajectory(
                 "Kamión sa nepodarilo spoľahlivo lokalizovať na GPS pruhu",
@@ -158,29 +181,26 @@ class Plugin(BasePlugin):
             needs_build = True
         self._lane_match = match
         if not needs_build and self._lane_path is not None:
-            # Diagnostics may change while immutable geometry/revision remains.
-            updated = dict(current)
-            updated["active_lane_id"] = self._lane_id_payload(match.lane_id)
-            updated["lane_match"] = {
+            # Keep the geometry snapshot immutable. Runtime localization and
+            # liveness are published separately under the same revision.
+            self.sdk.set("lane_match", {
+                "revision": self._lane_revision,
+                "active_lane_id": self._lane_id_payload(match.lane_id),
+                "point": [float(match.point.x), float(match.point.y),
+                          float(match.point.z)],
                 "lateral_error_m": float(match.lateral_error_m),
                 "heading_error_rad": float(match.heading_error_rad),
                 "vertical_error_m": float(match.vertical_error_m),
                 "switch_reason": match.switch_reason,
-            }
-            self.sdk.set("lane_trajectory", updated)
+            })
+            self.sdk.set("lane_trajectory_heartbeat", time.monotonic())
             return self._lane_path
 
         self.sdk.set("navigation_status", "Vyberám jazdné pruhy")
-        corridor = self.road_net.resolve_gps_corridor(uids)
-        if not corridor.valid:
-            self._publish_invalid_lane_trajectory(
-                corridor.failure_reason, uids, corridor.failure_reason)
+        lane_path, _ = self.road_net.build_lane_path(
+            uids, pos, heading, altitude=altitude, start_match=match)
+        if not self._build_is_current(uids, build_revision, build_request):
             return None
-        segments, reason = self.road_net.select_lane_sequence(corridor, match)
-        if reason:
-            self._publish_invalid_lane_trajectory(reason, uids, reason)
-            return None
-        lane_path = self.road_net.connect_lane_sequence(segments, uids)
         if not lane_path.valid:
             self._publish_invalid_lane_trajectory(
                 lane_path.failure_reason, uids, lane_path.failure_reason)
@@ -197,16 +217,24 @@ class Plugin(BasePlugin):
                 "Trajektória nemá bezpečné display body", uids,
                 "Trajektória nemá bezpečné display body")
             return None
+        if not self._build_is_current(uids, build_revision, build_request):
+            return None
         revision = self._next_lane_revision()
         control_points = [[float(p.x), float(p.y), float(p.z)]
                           for p in trajectory.points]
-        display_points = [[float(p.x), float(p.y), float(p.z)]
-                          for p in display]
+        # Phase 4 requires controller, HUD and AR to consume geometrically
+        # identical authoritative points. A redrawn 4 m chord can deviate from
+        # a curved 2 m polyline, so publish the validated control samples to all
+        # three consumers. ``derive_display_points`` remains an offline/API
+        # facility but is not a second runtime geometry.
+        display_points = [list(point) for point in control_points]
         snapshot = {
             "revision": revision, "valid": True,
             "confidence": float(min(trajectory.confidence, match.confidence)),
             "active_lane_id": self._lane_id_payload(match.lane_id),
             "lane_match": {
+                "point": [float(match.point.x), float(match.point.y),
+                          float(match.point.z)],
                 "lateral_error_m": float(match.lateral_error_m),
                 "heading_error_rad": float(match.heading_error_rad),
                 "vertical_error_m": float(match.vertical_error_m),
@@ -215,12 +243,17 @@ class Plugin(BasePlugin):
             "points": control_points, "display_points": display_points,
             "distance_m": float(trajectory.distance_m), "failure_reason": "",
             "source_gps_uids": [int(uid) for uid in uids],
+            "request_id": build_request,
         }
         # One shared-state assignment publishes one coherent geometry revision.
-        self.sdk.set("lane_trajectory", snapshot)
-        self.sdk.set("nav_path", display_points)  # compatibility, same snapshot
-        self.sdk.set("map_path", control_points)
-        self.sdk.set("nav_trajectory_revision", revision)
+        self.sdk.shared_state.update_batch({
+            "lane_trajectory_revision": revision,
+            "lane_trajectory": snapshot,
+            "nav_path": display_points,
+            "map_path": control_points,
+            "nav_trajectory_revision": revision,
+            "lane_trajectory_heartbeat": time.monotonic(),
+        })
         self.sdk.set("navigation_unreliable", False)
         self.sdk.set("navigation_failure_reason", "")
         self.sdk.set("navigation_recalculating", False)
@@ -1111,6 +1144,18 @@ class Plugin(BasePlugin):
 
         self._handle_command(pos)
 
+        if self.sdk.get("telemetry_valid", True) is False:
+            current = self.sdk.get("lane_trajectory", {}) or {}
+            if current.get("valid", False):
+                self._publish_invalid_lane_trajectory(
+                    "Telemetria vozidla nie je dostupná",
+                    self.sdk.get("game_route_node_uids", []) or (),
+                    "Telemetria vozidla nie je dostupná")
+            else:
+                self.sdk.set("nav_active", False)
+                self.sdk.set("nav_steering", 0.0)
+            return
+
         if not pos:
             return
 
@@ -1173,8 +1218,13 @@ class Plugin(BasePlugin):
             if self.recording.add_point(pos[0], pos[1]):
                 self.tags.nav_recording_points = len(self.recording)
 
-        # Replay: follow the active route.
-        if self.active_route is not None and len(self.active_route) >= 2:
+        # A live game-GPS route always wins over legacy recorded-route replay.
+        # Otherwise replay could overwrite nav_steering/nav_path while HUD and
+        # AR still displayed a valid lane snapshot from a different route.
+        gps_lane_requested = len(self._normalise_gps_uids(
+            self.sdk.get("game_route_node_uids", []) or [])) >= 2
+        if (not gps_lane_requested and self.active_route is not None
+                and len(self.active_route) >= 2):
             if self.active_route.is_finished(pos):
                 self.sdk.set("nav_active", False)
                 self.sdk.set("nav_steering", 0.0)
@@ -1207,7 +1257,10 @@ class Plugin(BasePlugin):
             route = self._lane_route
             if (route is not None and len(route) >= 2
                     and bool(snapshot.get("valid", False))
-                    and int(snapshot.get("revision", -1)) == self._lane_revision):
+                    and int(snapshot.get("revision", -1)) == self._lane_revision
+                    and tuple(snapshot.get("source_gps_uids", ()) or ())
+                        == self._normalise_gps_uids(
+                            self.sdk.get("game_route_node_uids", []) or [])):
                 # The native planned-route buffer is lane-specific geometry.
                 # Applying the generic road-centre offset once more moved the
                 # target towards the median (and made HUD and steering disagree

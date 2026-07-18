@@ -1,5 +1,6 @@
 import logging
 import math
+import time
 import numpy as np
 from sdk.base_plugin import BasePlugin
 
@@ -92,6 +93,7 @@ class Plugin(BasePlugin):
 
     def on_tick(self, delta_time: float):
         dt = max(delta_time, 1e-3)
+        self.sdk.shared_state.set("autopilot_control_heartbeat", time.monotonic())
 
         # 1. Telemetry & state
         truck = self.sdk.telemetry.get("truck", {}) or {}
@@ -108,6 +110,14 @@ class Plugin(BasePlugin):
         snapshot_revision = int(snapshot.get("revision", -1) or -1)
         current_revision = int(self.sdk.shared_state.get(
             "lane_trajectory_revision", -2) or -2)
+        game_uids = tuple(int(uid) for uid in (
+            self.sdk.shared_state.get("game_route_node_uids", []) or []))
+        snapshot_uids = tuple(int(uid) for uid in (
+            snapshot.get("source_gps_uids", ()) or ()))
+        heartbeat = float(self.sdk.shared_state.get(
+            "lane_trajectory_heartbeat", 0.0) or 0.0)
+        heartbeat_current = bool(
+            heartbeat > 0.0 and time.monotonic() - heartbeat <= 0.5)
         gps_navigation_present = bool(
             len(snapshot.get("source_gps_uids", ()) or ()) >= 2
             or float(self.sdk.shared_state.get("game_route_distance", 0.0) or 0.0) > 25.0)
@@ -116,6 +126,11 @@ class Plugin(BasePlugin):
             and float(snapshot.get("confidence", 0.0) or 0.0)
                 >= MIN_LANE_TRAJECTORY_CONFIDENCE
             and snapshot_revision == current_revision
+            and snapshot_uids == game_uids
+            and snapshot.get("request_id")
+                == self.sdk.shared_state.get("nav_recalc_request")
+            and heartbeat_current
+            and self.sdk.shared_state.get("telemetry_valid", True) is not False
             and not self.sdk.shared_state.get("navigation_recalculating", False))
         self.sdk.shared_state.set(
             "autopilot_lane_revision",

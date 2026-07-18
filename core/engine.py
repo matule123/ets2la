@@ -383,6 +383,25 @@ class UltraPilotEngine:
                 self.controller.release_all()
                 self._was_active = False
             return
+        if self.shared_state.get("telemetry_valid", True) is False:
+            # Never keep flushing the last acceleration/steering intent after
+            # the telemetry producer disappears. The autopilot process will
+            # normally request its ramped stop within one 100 Hz tick; this is
+            # the engine-owned fail-safe for process scheduling or plugin loss.
+            self._was_active = True
+            self.controller.set_steering(0.0)
+            self.controller.set_throttle(0.0)
+            self.controller.set_brake(0.70)
+            return
+        control_heartbeat = float(self.shared_state.get(
+            "autopilot_control_heartbeat", 0.0) or 0.0)
+        if (control_heartbeat <= 0.0
+                or time.monotonic() - control_heartbeat > 0.5):
+            self._was_active = True
+            self.controller.set_steering(0.0)
+            self.controller.set_throttle(0.0)
+            self.controller.set_brake(0.70)
+            return
         self._was_active = True
 
         steering = self.shared_state.get(CTL_STEERING, 0.0)
@@ -503,15 +522,21 @@ class UltraPilotEngine:
                         self.shared_state.set(key, value)
                     self.shared_state.set("nav_active", False)
                     old_lane = self.shared_state.get("lane_trajectory", {}) or {}
-                    lane_revision = int(old_lane.get("revision", 0) or 0) + 1
-                    self.shared_state.set("lane_trajectory_revision", lane_revision)
-                    self.shared_state.set("lane_trajectory", {
+                    lane_revision = max(
+                        int(old_lane.get("revision", 0) or 0),
+                        int(self.shared_state.get(
+                            "lane_trajectory_revision", 0) or 0)) + 1
+                    invalid_lane = {
                         "revision": lane_revision, "valid": False,
                         "confidence": 0.0, "active_lane_id": None,
                         "lane_match": None, "points": [], "display_points": [],
                         "distance_m": 0.0,
                         "failure_reason": "V hernom GPS nie je zvolený cieľ",
                         "source_gps_uids": [],
+                    }
+                    self.shared_state.update_batch({
+                        "lane_trajectory_revision": lane_revision,
+                        "lane_trajectory": invalid_lane,
                     })
                     self.shared_state.set("navigation_recalculating", False)
                     self.shared_state.set("navigation_progress", 0.0)
@@ -613,15 +638,21 @@ class UltraPilotEngine:
                     self.shared_state.set("nav_active", False)
                     self.shared_state.set("nav_steering", 0.0)
                     old_lane = self.shared_state.get("lane_trajectory", {}) or {}
-                    lane_revision = int(old_lane.get("revision", 0) or 0) + 1
-                    self.shared_state.set("lane_trajectory_revision", lane_revision)
-                    self.shared_state.set("lane_trajectory", {
+                    lane_revision = max(
+                        int(old_lane.get("revision", 0) or 0),
+                        int(self.shared_state.get(
+                            "lane_trajectory_revision", 0) or 0)) + 1
+                    invalid_lane = {
                         "revision": lane_revision, "valid": False,
                         "confidence": 0.0, "active_lane_id": None,
                         "lane_match": None, "points": [], "display_points": [],
                         "distance_m": 0.0,
                         "failure_reason": "Načítavam GPS trasu",
                         "source_gps_uids": list(planned_uids),
+                    }
+                    self.shared_state.update_batch({
+                        "lane_trajectory_revision": lane_revision,
+                        "lane_trajectory": invalid_lane,
                     })
                     request = f"{time.time():.3f}:{dest_city}:{route_distance:.0f}"
                     self.shared_state.set("nav_recalc_request", request)
@@ -648,6 +679,8 @@ class UltraPilotEngine:
                 self._had_game_destination = has_game_destination
                 self.shared_state.update_batch({
                     "telemetry": self.telemetry.data,
+                    "telemetry_valid": bool(truck.get("pose_valid", False)),
+                    "telemetry_timestamp": time.monotonic(),
                     "speed": truck.get("speed", 0),
                     # World pose for coordinate-based navigation (map plugin).
                     "truck_world_pos": (truck.get("x", 0.0), truck.get("z", 0.0)),
@@ -704,6 +737,7 @@ class UltraPilotEngine:
                     pass
             else:
                 self.shared_state.set("game_in_truck", False)
+                self.shared_state.set("telemetry_valid", False)
 
             # A transient error in any one frame must NOT kill the engine — log
             # it and keep looping (self-healing). The bootloader also restarts

@@ -80,6 +80,9 @@ class Telemetry:
             "x": tp.get("coordinateX", 0.0),
             "y": tp.get("coordinateY", 0.0),
             "z": tp.get("coordinateZ", 0.0),
+            "pose_valid": all(key in tp for key in
+                              ("coordinateX", "coordinateY", "coordinateZ",
+                               "rotationX")),
         }
         pos = (tp.get("coordinateX", 0.0), tp.get("coordinateZ", 0.0))
 
@@ -126,6 +129,10 @@ class Telemetry:
             "cruiseControlSpeed": truck.get("cruiseControlSpeed", 0.0),
             "routeDistance": truck.get("routeDistance", 0.0),
             "routeTime": truck.get("routeTime", 0.0),
+            # The legacy HTTP endpoint used by this project does not expose a
+            # verified world-pose contract. Navigation must fail closed rather
+            # than interpreting absent coordinates as world origin.
+            "pose_valid": False,
         }
         return {"raw": payload, "truck": norm}
 

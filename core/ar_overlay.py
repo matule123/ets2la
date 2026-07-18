@@ -1,11 +1,8 @@
 """
-AR overlay (best-effort): a transparent, click-through, always-on-top window
-drawn over the game that projects the anticipated route onto the road.
+AR overlay: a transparent, click-through, always-on-top route projection.
 
-Honest limitation: SCS telemetry does not expose the full game camera matrix,
-so this uses an *approximate* chase-camera model with calibration parameters
-(FOV, height, pitch, behind).  The first alignment will be off — tune the
-ar_* values in shared state (or settings) until the blue line sits on the road.
+Honest limitation: SCS telemetry does not expose the full game camera matrix.
+The active renderer therefore hides the route until a verified producer exists.
 The overlay is click-through, so it never blocks the game.
 """
 
@@ -67,6 +64,18 @@ class AROverlay(QWidget):
     def _project_world(self, point):
         """Project X/Y/Z through the current row-major game camera matrix."""
         matrix = self.state.get("game_camera_view_projection")
+        metadata = self.state.get("game_camera_view_projection_meta") or {}
+        matrix_timestamp = float(metadata.get("timestamp", 0.0) or 0.0)
+        telemetry_timestamp = float(self.state.get(
+            "telemetry_timestamp", 0.0) or 0.0)
+        if (metadata.get("layout") != "row-major"
+                or metadata.get("handedness") != "ets2-left-handed-x-y-z"
+                or metadata.get("clip_space") != "opengl-negative-one-to-one"
+                or matrix_timestamp <= 0.0
+                or time.monotonic() - matrix_timestamp > 0.5
+                or telemetry_timestamp <= 0.0
+                or abs(matrix_timestamp - telemetry_timestamp) > 0.25):
+            return None
         if not isinstance(matrix, (list, tuple)) or len(matrix) != 16:
             return None
         try:
@@ -131,6 +140,7 @@ class AROverlay(QWidget):
             return
         current_revision, world = self._current_display_points()
         if len(world) < 2:
+            self.state.set("ar_lane_revision", -1)
             return
         self.state.set("ar_lane_revision", current_revision)
         projected = [self._project_world(point) for point in world]
@@ -163,8 +173,20 @@ class AROverlay(QWidget):
         snapshot = self.state.get("lane_trajectory", {}) or {}
         current_revision = int(self.state.get(
             "lane_trajectory_revision", -1) or -1)
+        heartbeat = float(self.state.get(
+            "lane_trajectory_heartbeat", 0.0) or 0.0)
+        snapshot_uids = tuple(int(uid) for uid in
+                              (snapshot.get("source_gps_uids", ()) or ()))
+        game_uids = tuple(int(uid) for uid in
+                          (self.state.get("game_route_node_uids", []) or []))
         if (not snapshot.get("valid", False)
                 or int(snapshot.get("revision", -2) or -2) != current_revision
+                or snapshot_uids != game_uids
+                or snapshot.get("request_id")
+                    != self.state.get("nav_recalc_request")
+                or heartbeat <= 0.0
+                or time.monotonic() - heartbeat > 0.5
+                or self.state.get("telemetry_valid", True) is False
                 or self.state.get("navigation_recalculating", False)):
             return -1, []
         return current_revision, snapshot.get("display_points", []) or []

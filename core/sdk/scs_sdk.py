@@ -164,6 +164,14 @@ class SCSTelemetry:
 
         data: Dict[str, Any] = {}
         try:
+            # Zone 1 common frame clock. renderTime is an unsigned 64-bit
+            # microsecond clock written by the SCS telemetry plugin.
+            data["sdkActive"] = self.read_bool(0)[0]
+            data["pause"] = self.read_bool(4)[0]
+            data["time"] = self.read_long_long(8)[0]
+            data["simulatedTime"] = self.read_long_long(16)[0]
+            data["renderTime"] = self.read_long_long(24)[0]
+
             # --- Zone 3: truck ints (gear) ---
             data["truckInt"] = {"gear": self.read_int(504)[0]}
 

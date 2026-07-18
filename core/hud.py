@@ -173,12 +173,24 @@ class UltraPilotHUD(QWidget):
         now = time.monotonic()
         trajectory = s.get("lane_trajectory", {}) or {}
         current_revision = int(s.get("lane_trajectory_revision", -1) or -1)
+        heartbeat = float(s.get("lane_trajectory_heartbeat", 0.0) or 0.0)
+        snapshot_uids = tuple(int(uid) for uid in
+                              (trajectory.get("source_gps_uids", ()) or ()))
+        game_uids = tuple(int(uid) for uid in
+                          (s.get("game_route_node_uids", []) or []))
         trajectory_current = bool(
             trajectory.get("valid", False)
             and int(trajectory.get("revision", -2) or -2) == current_revision
+            and snapshot_uids == game_uids
+            and trajectory.get("request_id") == s.get("nav_recalc_request")
+            and heartbeat > 0.0 and now - heartbeat <= 0.5
+            and s.get("telemetry_valid", True) is not False
             and not s.get("navigation_recalculating", False))
         live_path = (trajectory.get("display_points", []) or []
                      if trajectory_current else [])
+        runtime_match = s.get("lane_match") or {}
+        if int(runtime_match.get("revision", -2) or -2) != current_revision:
+            runtime_match = trajectory.get("lane_match") or {}
         raw_blinker = s.get("active_blinker") or "off"
         explicit_rear = bool(s.get("rear_cam", False))
         if raw_blinker in ("left", "right"):
@@ -208,8 +220,7 @@ class UltraPilotHUD(QWidget):
             "lane_revision": current_revision if trajectory_current else -1,
             "active_lane_id": (trajectory.get("active_lane_id")
                                if trajectory_current else None),
-            "lane_match": (trajectory.get("lane_match") or {}
-                           if trajectory_current else {}),
+            "lane_match": (runtime_match if trajectory_current else {}),
             "road_segments": s.get("map_road_segments", []) or [],
             "limit_ms": truck.get("speedLimit", 0.0) or 0.0,
             # Rear-view camera: shown when a turn signal is active (left/right)
@@ -399,13 +410,18 @@ class UltraPilotHUD(QWidget):
         # Camera perception is the only source that knows the truck's position
         # *inside* the visible lane. Align display-only road/traffic geometry
         # with it; navigation remains in its real world coordinates below.
-        target_road_shift = max(-2.8, min(2.8,
-            -float(d.get("vision_lane_offset", 0.0) or 0.0) * 8.0))
+        target_road_shift = (0.0 if d.get("lane_revision", -1) >= 0 else
+            max(-2.8, min(2.8,
+                -float(d.get("vision_lane_offset", 0.0) or 0.0) * 8.0)))
         shift_error = target_road_shift - self._road_scene_shift
         # A stopped truck has no meaningful optical-flow update. Freeze the
         # established lane alignment so detector noise cannot make the road
         # (and therefore the apparently stationary model) sway side to side.
-        if d.get("speed_kmh", 0.0) >= 1.5 and abs(shift_error) >= 0.16:
+        if d.get("lane_revision", -1) >= 0:
+            # During authoritative GPS navigation the road, truck and blue
+            # trajectory must share the exact telemetry transform immediately.
+            self._road_scene_shift = 0.0
+        elif d.get("speed_kmh", 0.0) >= 1.5 and abs(shift_error) >= 0.16:
             self._road_scene_shift += max(-0.055, min(0.055, shift_error))
         road_scene_shift = self._road_scene_shift
 

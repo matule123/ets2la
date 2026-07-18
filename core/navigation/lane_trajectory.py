@@ -46,6 +46,12 @@ def _xyz(point):
     return (point.x, point.y, point.z)
 
 
+def _finite_point(point):
+    return all(math.isfinite(float(value)) for value in
+               (point.x, point.y, point.z, point.s,
+                point.heading, point.curvature))
+
+
 def _polyline_length(points):
     return sum(math.dist(_xyz(a), _xyz(b))
                for a, b in zip(points, points[1:]))
@@ -220,6 +226,25 @@ def build_lane_trajectory(lane_path: LanePath, spacing_m: float = 2.0) -> LanePa
                         f"control spacing {spacing_m!r} m is outside 0.75..3.0 m")
     if not lane_path.segments:
         return _invalid(lane_path, "input LanePath has no LaneSegments")
+    if any(not _finite_point(point)
+           for segment in lane_path.segments for point in segment.centerline):
+        return _invalid(lane_path, "input LanePath contains non-finite geometry")
+    for segment in lane_path.segments:
+        if any(math.dist(_xyz(first), _xyz(second)) <= 1e-6
+               for first, second in zip(segment.centerline,
+                                        segment.centerline[1:])):
+            return _invalid(lane_path,
+                            f"LaneSegment {segment.lane_id} has duplicate points")
+        vectors = [(second.x-first.x, second.z-first.z)
+                   for first, second in zip(segment.centerline,
+                                            segment.centerline[1:])]
+        for first, second in zip(vectors, vectors[1:]):
+            first_len, second_len = math.hypot(*first), math.hypot(*second)
+            if (first_len > 1e-6 and second_len > 1e-6
+                    and (first[0]*second[0] + first[1]*second[1])
+                        / (first_len*second_len) < -0.5):
+                return _invalid(lane_path,
+                    f"LaneSegment {segment.lane_id} reverses direction")
 
     sampled_segments = []
     for segment_index, segment in enumerate(lane_path.segments):
@@ -283,6 +308,13 @@ def validate_lane_trajectory(lane_path: LanePath) -> TrajectoryValidation:
     points, segments = tuple(lane_path.points), tuple(lane_path.segments)
     if len(points) < 2 or not segments:
         return TrajectoryValidation(False, "trajectory has fewer than two points",
+                                    output_points=len(points))
+    for segment in segments:
+        if any(not _finite_point(point) for point in segment.centerline):
+            return TrajectoryValidation(False,
+                f"LaneSegment {segment.lane_id} contains non-finite geometry")
+    if any(not _finite_point(point) for point in points):
+        return TrajectoryValidation(False, "trajectory contains non-finite geometry",
                                     output_points=len(points))
 
     for index, (first, second) in enumerate(zip(segments, segments[1:])):

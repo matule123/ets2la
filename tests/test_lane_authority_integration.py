@@ -1,4 +1,5 @@
 import unittest
+import time
 
 from core.ar_overlay import AROverlay
 from core.hud import UltraPilotHUD
@@ -17,6 +18,9 @@ class State:
 
     def set(self, key, value):
         self.data[key] = value
+
+    def update_batch(self, values):
+        self.data.update(values)
 
 
 class MapSDK:
@@ -79,6 +83,7 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
         self.assertTrue(snapshot["valid"], snapshot["failure_reason"])
         self.assertEqual(plugin._lane_route.world_points,
                          [tuple(point) for point in snapshot["points"]])
+        self.assertEqual(snapshot["display_points"], snapshot["points"])
         self.assertEqual(sdk.get("nav_path"), snapshot["display_points"])
         self.assertEqual(sdk.get("nav_trajectory_revision"), snapshot["revision"])
 
@@ -117,6 +122,15 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
         self.assertEqual(route.points[0],
                          (snapshot["points"][0][0], snapshot["points"][0][2]))
 
+    def test_legacy_recorded_route_cannot_override_live_gps_snapshot(self):
+        plugin, sdk, point = build_map_plugin()
+        snapshot = sdk.get("lane_trajectory")
+        plugin.tags = Tags()
+        plugin.active_route = Route([[100, 0, 0], [100, 0, 100]], "legacy")
+        plugin.on_tick(0.02)
+        self.assertEqual(sdk.get("nav_path"), snapshot["display_points"])
+        self.assertEqual(sdk.get("nav_trajectory_revision"), snapshot["revision"])
+
     def test_stale_or_invalid_snapshot_hides_hud_and_ar(self):
         plugin, sdk, _ = build_map_plugin()
         sdk.set("lane_trajectory_revision",
@@ -137,6 +151,8 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
                 "nav_steering": 0.7, "acc_throttle": 0.6,
                 "acc_brake": 0.0, "autopilot_active": True,
                 "game_route_distance": 100.0,
+                "game_route_node_uids": [1, 2],
+                "lane_trajectory_heartbeat": time.monotonic(),
                 "lane_trajectory_revision": 7,
                 "lane_trajectory": {
                     "revision": 7, "valid": valid, "confidence": confidence,

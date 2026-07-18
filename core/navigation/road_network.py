@@ -827,14 +827,17 @@ class RoadNetwork:
         if not uids or not desc[0]:
             return ()
         origin_index = max(0, min(origin_index, len(desc[0]) - 1))
-        anchor = self.nodes.get(uids[0])
+        if origin_index >= len(uids):
+            return ()
+        origin_uid = uids[origin_index]
+        anchor = self.nodes.get(origin_uid)
         if anchor is None:
             return ()
         ox, oz, local_rotation = desc[0][origin_index]
         origin_y = lane_data["nodes"][origin_index]["y"]
-        rotation = self.node_rot.get(uids[0], 0.0) - local_rotation
+        rotation = self.node_rot.get(origin_uid, 0.0) - local_rotation
         c, s = math.cos(rotation), math.sin(rotation)
-        anchor_y = self.node_alt.get(uids[0], 0.0)
+        anchor_y = self.node_alt.get(origin_uid, 0.0)
         result = []
         for curve_index in indices:
             curve = desc[1][curve_index]
@@ -883,6 +886,12 @@ class RoadNetwork:
                 continue
             input_lanes = tuple((lane_data.get("nodes") or ())[start_item]
                                 ["input_lanes"])
+            try:
+                end_item = instance[1].index(edge.end_uid)
+                output_lanes = tuple((lane_data.get("nodes") or ())[end_item]
+                                     ["output_lanes"])
+            except (ValueError, IndexError):
+                output_lanes = ()
             options = self._prefab_connector_options(
                 instance, edge.start_uid, edge.end_uid)
             preferred_curve = (input_lanes[min(lane_index, len(input_lanes)-1)]
@@ -894,16 +903,23 @@ class RoadNetwork:
             for indices in chosen_options:
                 points = self._prefab_curve_chain_3d(instance, indices)
                 if len(points) >= 2:
-                    candidates.append((instance, indices, points))
+                    exit_lane_index = (output_lanes.index(indices[-1])
+                                       if indices[-1] in output_lanes
+                                       else lane_index)
+                    candidates.append((instance, indices, points,
+                                       exit_lane_index,
+                                       max(1, len(output_lanes))))
         if len(candidates) != 1:
             return None, ("ambiguous prefab lane connector"
                           if candidates else "missing prefab lane connector")
-        instance, indices, points = candidates[0]
-        lane_id = LaneId(min(instance[1]), 1, lane_index,
-                         instance[0], indices[0])
+        instance, indices, points, exit_lane_index, exit_lane_count = candidates[0]
+        lane_data = self._prefab_lane_data.get(instance[0]) or {}
+        lane_id = LaneId(min(instance[1]), 1, exit_lane_index,
+                         instance[0], indices[0], tuple(indices))
         prefab_path = str(lane_data.get("path", "")).lower()
         segment = LaneSegment(
-            lane_id, edge.start_uid, edge.end_uid, 1, lane_index, 1,
+            lane_id, edge.start_uid, edge.end_uid, 1, exit_lane_index,
+            exit_lane_count,
             4.5, "derived", int(round(points[len(points)//2].y / 3.0)),
             None, ("roundabout" if "roundabout" in prefab_path else "prefab"),
             points, connector_curve_indices=tuple(indices),
@@ -1001,12 +1017,11 @@ class RoadNetwork:
                     return tuple(selected), (
                         f"{reason} for prefab {edge.start_uid} -> {edge.end_uid}")
             else:
-                current = self._graph_lane_segment(
-                    edge, selected[-1] if selected else None)
-                if current is None:
-                    return tuple(selected), (
-                        f"graph-only edge {edge.start_uid} -> {edge.end_uid} "
-                        "cannot establish an initial lane")
+                # A directed graph edge proves node reachability, but it has no
+                # concrete lane centre, width or elevation. Do not invent one.
+                return tuple(selected), (
+                    f"graph-only edge {edge.start_uid} -> {edge.end_uid} "
+                    "has no lane-confirmed geometry")
             if selected:
                 connection = self._lane_connection(selected[-1], current)
                 if connection is None:
@@ -1084,7 +1099,7 @@ class RoadNetwork:
                         True, "", self._lane_path_revision)
 
     def build_lane_path(self, gps_uids, position, heading, altitude=None,
-                        previous_match=None):
+                        previous_match=None, start_match=None):
         """Convenience pipeline used by tests and the future map-plugin switch."""
         corridor = self.resolve_gps_corridor(gps_uids)
         if not corridor.valid:
@@ -1095,8 +1110,10 @@ class RoadNetwork:
         else:
             locator_position = (float(position[0]), float(altitude),
                                 float(position[1]))
-        match = LaneLocator(self).locate(locator_position, heading,
-                                         corridor.gps_uids, previous_match)
+        match = start_match
+        if match is None:
+            match = LaneLocator(self).locate(locator_position, heading,
+                                             corridor.gps_uids, previous_match)
         segments, reason = self.select_lane_sequence(corridor, match)
         if reason:
             return LanePath(segments, (), corridor.gps_uids, valid=False,
@@ -1495,7 +1512,7 @@ class RoadNetwork:
                 heading = result[-1].heading if result else 0.0
             else:
                 # Right normal of the direction of travel.
-                ox, oz = dz / length * lateral_m, -dx / length * lateral_m
+                ox, oz = -dz / length * lateral_m, dx / length * lateral_m
                 heading = math.atan2(-dx, -dz)
             if result:
                 travelled += math.hypot(
@@ -1542,10 +1559,13 @@ class RoadNetwork:
                 # travel end->start; _offset_curve handles the reversal sign.
                 lateral = fixed_side_offset if direction > 0 else -fixed_side_offset
                 lane_id = LaneId(road_uid, direction, lane_index)
-                left = (LaneId(road_uid, direction, lane_index + 1)
-                        if lane_index + 1 < len(drivable) else None)
-                right = (LaneId(road_uid, direction, lane_index - 1)
-                         if lane_index > 0 else None)
+                # Road-look arrays are ordered from the centre outwards.
+                # Therefore index-1 is the physical left neighbour and
+                # index+1 the physical right neighbour in both directions.
+                left = (LaneId(road_uid, direction, lane_index - 1)
+                        if lane_index > 0 else None)
+                right = (LaneId(road_uid, direction, lane_index + 1)
+                         if lane_index + 1 < len(drivable) else None)
                 centerline = self._offset_curve(curve, lateral,
                                                 reverse=direction < 0)
                 mid_y = centerline[len(centerline) // 2].y
@@ -1617,7 +1637,32 @@ class RoadNetwork:
         b = self._lane_id_index.get(second)
         if a is None or b is None or a.direction != b.direction:
             return False
+        if (any(connection.target == second for connection in a.successors)
+                or any(connection.target == first for connection in b.successors)):
+            return True
         if a.end_uid != b.start_uid:
+            pair = (min(a.end_uid, b.start_uid),
+                    max(a.end_uid, b.start_uid))
+            for instance in self._prefab_pairs.get(pair, ()):
+                options = self._prefab_connector_options(
+                    instance, a.end_uid, b.start_uid)
+                lane_data = self._prefab_lane_data.get(instance[0]) or {}
+                try:
+                    start_item = instance[1].index(a.end_uid)
+                    end_item = instance[1].index(b.start_uid)
+                    inputs = lane_data["nodes"][start_item]["input_lanes"]
+                    outputs = lane_data["nodes"][end_item]["output_lanes"]
+                except (ValueError, IndexError, KeyError):
+                    continue
+                for option in options:
+                    input_ok = (not inputs or
+                                inputs[min(a.lane_index, len(inputs)-1)]
+                                == option[0])
+                    output_ok = (not outputs or
+                                 (option[-1] in outputs and
+                                  outputs.index(option[-1]) == b.lane_index))
+                    if input_ok and output_ok:
+                        return True
             return False
         graph = self.fwd if a.direction > 0 else self.bwd
         return (b.end_uid in graph.get(a.end_uid, ())

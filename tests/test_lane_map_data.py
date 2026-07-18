@@ -116,6 +116,10 @@ class RealMapLaneDataTests(unittest.TestCase):
         self.assertNotEqual(
             (paths[0].points[-1].x, paths[0].points[-1].z),
             (paths[1].points[-1].x, paths[1].points[-1].z))
+        self.assertNotEqual(paths[0].segments[-1].lane_id,
+                            paths[1].segments[-1].lane_id)
+        self.assertNotEqual(paths[0].segments[-1].lane_id.connector_path,
+                            paths[1].segments[-1].lane_id.connector_path)
 
     def test_long_real_promods_sequence(self):
         gps = (
