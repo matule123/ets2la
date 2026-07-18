@@ -25,7 +25,34 @@ _TECHNICAL_LOG_MARKERS = (
     "map: truck=", "nearest_seg=", "truckposition", "truck position",
     "truck_world_pos", "coordinatex", "coordinatez", "heading=",
     "system transitioning", "follow_lane", "follow lane", "cruise ->",
+    "camera: revision=", "rendertime=", "viewport=", "hfov=",
+    "active_lane_id", "lane_match", "locator_score", "trajectory_score",
 )
+
+
+def _friendly_activity_message(message):
+    """Return concise user-facing activity text, or ``None`` for diagnostics."""
+    low = message.lower()
+    if any(marker in low for marker in _TECHNICAL_LOG_MARKERS):
+        return None
+    # Reject coordinate dumps even when their exact prefix changes.
+    if (re.search(r"\b[xyz]=[-+]?\d", low)
+            or re.search(r"\b(position|truck|camera)\s*[=:].*[-+]?\d", low)
+            or "failure_reason=" in low):
+        return None
+    friendly = (
+        ("new in-game destination detected", "Načítavam nový cieľ z hernej navigácie"),
+        ("in-game destination cleared", "Cieľ navigácie bol odstránený"),
+        ("road network: loaded", "Mapa ciest je pripravená"),
+        ("road network loaded", "Mapa ciest je pripravená"),
+        ("loading road network", "Načítavam mapu ciest"),
+        ("connected to scs telemetry", "Hra bola pripojená"),
+        ("camera shared memory", "Čakám na údaje z hernej kamery"),
+    )
+    for marker, text in friendly:
+        if marker in low:
+            return text
+    return message
 
 
 class DynamicIsland(QWidget):
@@ -128,8 +155,10 @@ class DynamicIsland(QWidget):
             message = item["msg"]
             low = message.lower()
             if (message.startswith("Logging to ") or "OpenGL_accelerate" in message
-                    or any(marker in low for marker in _TECHNICAL_LOG_MARKERS)
                     or not any(word in low for word in _ACTIVITY)):
+                continue
+            message = _friendly_activity_message(message)
+            if not message:
                 continue
             self.show_record(message, item["level"], item["time"], item["src"])
             break

@@ -253,6 +253,13 @@ class CameraSnapshotTests(unittest.TestCase):
             self.assertFalse(result["valid"])
             self.assertIn(reason, result["failure_reason"])
 
+    def test_missing_render_time_uses_atomic_telemetry_sample(self):
+        now = time.monotonic()
+        snap = producer().read(0, now, now)
+        self.assertTrue(snap["valid"], snap["failure_reason"])
+        self.assertEqual(snap["render_time_us"], 0)
+        self.assertEqual(snap["synchronized_to"], "monotonic telemetry sample")
+
     def test_camera_revision_increases_and_missing_viewport_is_invalid(self):
         p = producer()
         first = p.read(100, 1.0, 1.0)

@@ -276,15 +276,21 @@ class CameraSnapshotProducer:
             telemetry_timestamp = float(telemetry_timestamp or 0.0)
         except (TypeError, ValueError):
             return self._invalid("camera timing metadata is invalid", now, 0)
-        if render_time <= 0:
-            return self._invalid("SCS renderTime is unavailable", now, render_time)
-        if render_time != self._last_render_time:
-            self._last_render_time = render_time
-            self._last_render_change_at = now
-        elif (self._last_render_change_at <= 0.0
-              or now - self._last_render_change_at > CAMERA_MAX_AGE_S):
-            return self._invalid("SCS renderTime is stale or the game is paused",
-                                 now, render_time)
+        # Older builds of the SCS telemetry shared-memory plugin leave
+        # ``renderTime`` at zero.  CameraProps is still sampled immediately
+        # beside this telemetry frame, so the monotonic telemetry timestamp is
+        # a safe synchronization source.  Use the stronger render clock when
+        # it is available, but do not disable AR solely because this optional
+        # field is absent.
+        has_render_clock = render_time > 0
+        if has_render_clock:
+            if render_time != self._last_render_time:
+                self._last_render_time = render_time
+                self._last_render_change_at = now
+            elif (self._last_render_change_at <= 0.0
+                  or now - self._last_render_change_at > CAMERA_MAX_AGE_S):
+                return self._invalid("SCS renderTime is stale or the game is paused",
+                                     now, render_time)
         if (telemetry_timestamp <= 0.0
                 or abs(now - telemetry_timestamp) > TELEMETRY_SYNC_TOLERANCE_S):
             return self._invalid("camera and telemetry timestamps are not synchronized",
@@ -332,7 +338,9 @@ class CameraSnapshotProducer:
             "aspect": aspect,
             "timestamp": now, "telemetry_timestamp": telemetry_timestamp,
             "render_time_us": render_time,
-            "synchronized_to": "SCS renderTime sampled with telemetry",
+            "synchronized_to": ("SCS renderTime sampled with telemetry"
+                                if has_render_clock
+                                else "monotonic telemetry sample"),
             "matrix_layout": "row-major",
             "vector_convention": "column-vector",
             "world_axes": ("ETS2 +X east, +Y up, +Z south; "

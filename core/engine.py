@@ -89,6 +89,8 @@ class UltraPilotEngine:
         self._last_navigation_log_seq = None
         self._last_runtime_preflight = 0.0
         self._last_camera_diagnostic = 0.0
+        self._last_camera_diagnostic_log = 0.0
+        self._last_camera_diagnostic_signature = None
         self._last_control_flush = time.monotonic()
         self._last_output_steering = 0.0
         self._last_output_brake = 0.0
@@ -425,7 +427,19 @@ class UltraPilotEngine:
                 viewport.get("height", 0), viewport.get("x", 0),
                 viewport.get("y", 0), diagnostic["fov_horizontal_deg"],
                 diagnostic["failure_reason"])
-        (logging.info if diagnostic["valid"] else logging.warning)(message, *args)
+        # Keep the detailed record available in shared state, but write it to
+        # the main log only when readiness changes (or every 30 seconds while
+        # a fault persists).  The previous once-per-second warning flooded the
+        # console and the Dynamic Island with internal coordinates/timing.
+        signature = (diagnostic["valid"], diagnostic["failure_reason"],
+                     diagnostic["camera_mode"])
+        should_log = (signature != self._last_camera_diagnostic_signature
+                      or (not diagnostic["valid"]
+                          and now - self._last_camera_diagnostic_log >= 30.0))
+        if should_log:
+            self._last_camera_diagnostic_signature = signature
+            self._last_camera_diagnostic_log = now
+            (logging.info if diagnostic["valid"] else logging.warning)(message, *args)
 
     # --- Control flush --------------------------------------------------------
     def _automatic_safety_stop(self, reason):
