@@ -197,6 +197,16 @@ class MapView(QWidget):
             sy = h / 2 - (cz - p[1]) * scale   # flip Z so north is up
             return QPointF(sx, sy)
 
+        def to_xz(point):
+            """Accept both legacy X/Z and authoritative lane X/Y/Z points."""
+            if not isinstance(point, (list, tuple)):
+                return None
+            if len(point) >= 3:
+                return float(point[0]), float(point[2])
+            if len(point) >= 2:
+                return float(point[0]), float(point[1])
+            return None
+
         # Nearby roads (grey).
         qp.setPen(QPen(QColor("#555B63"), 2, Qt.PenStyle.SolidLine,
                        Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
@@ -205,8 +215,13 @@ class MapView(QWidget):
             qp.drawLine(to_screen(a), to_screen(b))
 
         # Blue is reserved for the route selected in the game's GPS.
-        ahead = (self.state.get("game_route_points", [])
-                 or self.state.get("nav_path", []) or [])
+        snapshot = self.state.get("lane_trajectory", {}) or {}
+        ahead = ((snapshot.get("display_points", [])
+                  if snapshot.get("valid", False) else [])
+                 or self.state.get("nav_path", [])
+                 or self.state.get("game_route_points", []) or [])
+        ahead = [point for point in (to_xz(point) for point in ahead)
+                 if point is not None]
         if len(ahead) >= 2:
             qp.setPen(QPen(QColor("#1597F5"), 6, Qt.PenStyle.SolidLine,
                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))

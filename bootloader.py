@@ -201,6 +201,15 @@ def main():
 
     def shutdown():
         logging.info("Shutting down UltraPilot…")
+        # Keep the Manager alive while the Engine asks every plugin to stop.
+        # Otherwise a normal close produces BrokenPipe/EOF crash reports.
+        try:
+            shared_dict["app_shutdown_requested"] = True
+        except Exception:
+            pass
+        engine = processes.get("Engine")
+        if engine is not None and engine.is_alive():
+            engine.join(timeout=4)
         for proc in processes.values():
             if proc.is_alive():
                 proc.terminate()

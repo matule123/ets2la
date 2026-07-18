@@ -49,6 +49,8 @@ class Plugin(BasePlugin):
         self._lane_revision = int(self.sdk.get(
             "lane_trajectory_revision", 0) or 0)
         self._lane_diag_t = 0.0
+        self._navigation_log_seq = int(self.sdk.get(
+            "navigation_log_seq", 0) or 0)
         self._lane_failure_signature = None
         self._lane_retry_at = 0.0
         os.makedirs(ROUTES_DIR, exist_ok=True)
@@ -269,6 +271,18 @@ class Plugin(BasePlugin):
         self.sdk.set("navigation_failure_reason", "")
         self.sdk.set("navigation_recalculating", False)
         self.sdk.set("navigation_status", "Navigácia pripravená")
+        self._navigation_log_seq += 1
+        self.sdk.shared_state.update_batch({
+            "navigation_log_seq": self._navigation_log_seq,
+            "navigation_log_event": {
+                "seq": self._navigation_log_seq,
+                "level": "INFO",
+                "message": (
+                    f"Navigácia vypočítaná: {len(control_points)} bodov, "
+                    f"{trajectory.distance_m:.1f} m, "
+                    f"spoľahlivosť {snapshot['confidence']:.3f}."),
+            },
+        })
         self._lane_path = trajectory
         self._lane_route = Route(control_points, name="gps-lane-trajectory")
         self._lane_failure_signature = None

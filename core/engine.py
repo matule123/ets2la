@@ -111,7 +111,10 @@ class UltraPilotEngine:
     def start(self):
         self.running = True
         self.plugin_manager.discover_and_load()
-        self.run_loop()
+        try:
+            self.run_loop()
+        finally:
+            self.stop()
 
     def stop(self):
         self.running = False
@@ -566,6 +569,8 @@ class UltraPilotEngine:
     def run_loop(self):
         last_time = time.time()
         while self.running:
+            if self.shared_state.get("app_shutdown_requested", False):
+                break
             current_time = time.time()
             delta_time = current_time - last_time
             last_time = current_time

@@ -10,6 +10,16 @@ from sdk.base_plugin import BasePlugin
 from sdk.plugin_sdk import PluginSDK
 
 
+def _shutdown_transport_error(error):
+    """Return whether Manager/pipe IPC disappeared during normal shutdown."""
+    text = f"{type(error).__name__}: {error}".lower()
+    return any(marker in text for marker in (
+        "brokenpipe", "broken pipe", "eoferror", "pipe has been ended",
+        "pipe is being closed", "winerror 109", "winerror 232",
+        "multiprocessing.managers.remoteerror", "keyerror",
+    ))
+
+
 def plugin_worker(plugin_class: Type[BasePlugin], plugin_name: str,
                   shared_dict: Dict[str, Any], stop_event):
     """
@@ -58,6 +68,8 @@ def plugin_worker(plugin_class: Type[BasePlugin], plugin_name: str,
                 try:
                     plugin.on_tick(delta_time)
                 except Exception as e:
+                    if stop_event.is_set() or _shutdown_transport_error(e):
+                        break
                     # Include the failing source line. A message-only exception
                     # made route failures look like a frozen progress indicator.
                     logging.exception(f"[plugin:{plugin_name}] on_tick error: {e}")
@@ -67,7 +79,11 @@ def plugin_worker(plugin_class: Type[BasePlugin], plugin_name: str,
         plugin.on_stop()
     except Exception as e:
         import traceback
-        logging.error(f"[plugin:{plugin_name}] process crashed: {e}\n{traceback.format_exc()}")
+        if stop_event.is_set() or _shutdown_transport_error(e):
+            logging.info("[plugin:%s] stopped during application shutdown.",
+                         plugin_name)
+        else:
+            logging.error(f"[plugin:{plugin_name}] process crashed: {e}\n{traceback.format_exc()}")
 
 
 class PluginManager:

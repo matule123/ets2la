@@ -3,6 +3,7 @@ import math
 import unittest
 
 from core.navigation.lane_model import LaneLocator, wrap_angle
+from core.navigation.lane_trajectory import build_lane_trajectory
 from core.navigation.road_network import RoadNetwork
 
 
@@ -169,6 +170,21 @@ class RealMapLaneDataTests(unittest.TestCase):
         self.assertLessEqual(max(
             math.dist((a.x, a.y, a.z), (b.x, b.y, b.z))
             for a, b in zip(path.points, path.points[1:])), 3.2)
+
+        runtime_path, _ = self.net.build_lane_path(
+            gps, (-90092.1956, 48571.8930), 2.004394,
+            altitude=22.1638, start_match=match)
+        self.assertTrue(runtime_path.valid, runtime_path.failure_reason)
+        self.assertLess(math.dist(
+            (runtime_path.points[0].x, runtime_path.points[0].y,
+             runtime_path.points[0].z),
+            (match.point.x, match.point.y, match.point.z)), 3.2)
+        trajectory = build_lane_trajectory(runtime_path)
+        self.assertTrue(trajectory.valid, trajectory.failure_reason)
+        self.assertLess(math.dist(
+            (trajectory.points[0].x, trajectory.points[0].y,
+             trajectory.points[0].z),
+            (match.point.x, match.point.y, match.point.z)), 3.2)
 
 
 if __name__ == "__main__":

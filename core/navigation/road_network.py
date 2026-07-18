@@ -1168,7 +1168,63 @@ class RoadNetwork:
         if reason:
             return LanePath(segments, (), corridor.gps_uids, valid=False,
                             failure_reason=reason), match
-        return self.connect_lane_sequence(segments, corridor.gps_uids), match
+        # The rolling SDK route begins at the next GPS anchor. The truck may
+        # still be on the confirmed incoming lane leading to that anchor. Add
+        # this real lane segment before the first corridor edge so HUD, AR and
+        # steering start at the truck instead of 10+ metres across the prefab.
+        active = self._lane_id_index.get(match.lane_id) if match else None
+        if (active is not None and segments
+                and active.lane_id != segments[0].lane_id
+                and active.end_uid == segments[0].start_uid):
+            connection = self._lane_connection(active, segments[0])
+            if connection is not None:
+                active = replace(active, successors=(connection,))
+                segments = (active,) + tuple(segments)
+
+        # Trim the actual first LaneSegment as well as the flattened LanePath.
+        # build_lane_trajectory() deliberately rebuilds its control geometry
+        # from segments, so trimming only LanePath.points resurrected the part
+        # of the incoming road behind the truck and produced a screen-wide AR
+        # chord.  This keeps every consumer on the same forward-only geometry.
+        if match is not None and segments and segments[0].lane_id == match.lane_id:
+            first = segments[0]
+            line = first.centerline
+            if len(line) >= 2:
+                nearest = min(range(len(line)), key=lambda index: math.dist(
+                    (line[index].x, line[index].y, line[index].z),
+                    (match.point.x, match.point.y, match.point.z)))
+                if nearest > 0:
+                    trimmed = tuple(line[nearest:])
+                    if len(trimmed) >= 2:
+                        first = replace(first, centerline=trimmed)
+                        segments = (first,) + tuple(segments[1:])
+        path = self.connect_lane_sequence(segments, corridor.gps_uids)
+        if not path.valid or match is None or len(path.points) < 2:
+            return path, match
+
+        # The native GPS buffer can begin at the entrance of a prefab while
+        # the truck is already part-way through it. Publishing those points
+        # behind the camera made AR draw a giant line across the whole screen.
+        # Trim only to the nearest confirmed point and rebuild arc distance;
+        # never translate or laterally offset the authoritative geometry.
+        nearest = min(range(len(path.points)), key=lambda index: math.dist(
+            (path.points[index].x, path.points[index].y, path.points[index].z),
+            (match.point.x, match.point.y, match.point.z)))
+        nearest_distance = math.dist(
+            (path.points[nearest].x, path.points[nearest].y, path.points[nearest].z),
+            (match.point.x, match.point.y, match.point.z))
+        if nearest > 0 and nearest_distance <= 8.0:
+            source = path.points[nearest:]
+            rebuilt, distance = [], 0.0
+            for index, point in enumerate(source):
+                if rebuilt:
+                    distance += math.dist(
+                        (rebuilt[-1].x, rebuilt[-1].y, rebuilt[-1].z),
+                        (point.x, point.y, point.z))
+                rebuilt.append(replace(point, s=distance))
+            path = replace(path, points=tuple(rebuilt), distance_m=distance,
+                           confidence=min(path.confidence, match.confidence))
+        return path, match
 
     def refine_route(self, uids, progress=None):
         """Replace prefab entrance chords in a GPS UID route with nav curves."""
