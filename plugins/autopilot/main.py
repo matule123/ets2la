@@ -127,6 +127,8 @@ class Plugin(BasePlugin):
         self._engage_blend = 0.0
         self._was_active = False
         self._diag_t = 0.0              # throttle for diagnostic logging
+        self._reverse_recovery = False
+        self._drive_request_t = 0.0
 
     def on_stop(self):
         logging.info("Autopilot Plugin stopped.")
@@ -208,21 +210,52 @@ class Plugin(BasePlugin):
         # immediately and return all automatic commands to a safe neutral.
         autopilot_engaged = bool(self.sdk.shared_state.get(
             "autopilot_active", False))
-        reversing = bool(autopilot_engaged
-                         and (float(speed) < -0.10 or gear < 0))
+        reversing = bool(autopilot_engaged and
+                         (float(speed) < -0.10 or gear < 0
+                          or self._reverse_recovery))
         if reversing:
+            self._reverse_recovery = True
             self.sdk.controller.set_throttle(0.0)
-            self.sdk.controller.set_steering(0.0)
             self._last_throttle = 0.0
-            self._last_steering = 0.0
-            self._set_brake(0.45, dt)
-            self.sdk.shared_state.set("autopilot_active", False)
-            self.sdk.shared_state.set("nav_active", False)
-            self.sdk.shared_state.set(
-                "navigation_status", "Autopilot vypnutý – vozidlo cúva")
-            logging.warning("Autopilot disengaged: reverse motion/gear detected (gear=%s).",
-                            gear)
+            self._last_steering = self._ramp_steering(0.0, dt)
+            self.sdk.controller.set_steering(self._last_steering)
+            now = time.monotonic()
+            if float(speed) < -0.10 or speed_kmh > 0.5:
+                self._set_brake(0.62, dt)
+                self.sdk.shared_state.set(
+                    "navigation_status", "Zastavujem pred zaradením jazdy dopredu")
+            elif gear < 0:
+                self._set_brake(0.18, dt)
+                if now - self._drive_request_t >= 0.7:
+                    self.sdk.controller.select_drive(True)
+                    self._drive_request_t = now
+                self.sdk.shared_state.set(
+                    "navigation_status", "Zaraďujem jazdu dopredu")
+            else:
+                self.sdk.controller.select_drive(False)
+                self.sdk.controller.set_brake(0.0)
+                self._last_brake = 0.0
+                self._reverse_recovery = False
+                self.sdk.shared_state.set(
+                    "navigation_status", "Jazda dopredu pripravená")
             return
+
+        # Prevention comes before recovery: if the autopilot is engaged while
+        # the automatic gearbox is in N, select Drive before any throttle is
+        # allowed. This also covers a fresh engagement after loading the game.
+        if autopilot_engaged and speed_kmh < 0.5 and gear == 0:
+            self.sdk.controller.set_throttle(0.0)
+            self._last_throttle = 0.0
+            self.sdk.controller.set_brake(0.0)
+            self._last_brake = 0.0
+            self.sdk.controller.select_drive(True)
+            self._drive_request_t = time.monotonic()
+            self.sdk.shared_state.set(
+                "navigation_status", "Pripravujem jazdu dopredu")
+            return
+        if gear > 0:
+            # geardrive is a momentary SDK button, never leave it latched.
+            self.sdk.controller.select_drive(False)
 
         arrival_pending = bool(self.sdk.shared_state.get(
             "navigation_arrival_pending", False))
@@ -327,6 +360,11 @@ class Plugin(BasePlugin):
         # 3. Apply braking THROUGH THE RAMP (anti-jerk). This is the key change:
         #    the truck brakes firmly but progressively, never a step to 1.0.
         self._set_brake(requested_brake, dt)
+
+        # While stopped for traffic keep the gearbox in Drive. Holding the
+        # brake must never become ETS2's automatic brake-to-reverse gesture.
+        if autopilot_engaged and speed_kmh < 1.0 and requested_brake > 0.0:
+            self.sdk.controller.select_drive(True)
 
         # 4. Longitudinal control from ACC outputs
         acc_throttle = self.sdk.shared_state.get("acc_throttle", None)

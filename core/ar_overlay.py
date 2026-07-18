@@ -28,19 +28,8 @@ def _perspective_route_widths(depth_m, camera_snapshot=None):
         depth = max(0.1, float(depth_m))
     except (TypeError, ValueError, OverflowError):
         depth = 1000.0
-    snapshot = camera_snapshot or {}
-    try:
-        viewport_width = float((snapshot.get("viewport") or {})["width"])
-        hfov = math.radians(float(snapshot["fov_horizontal_deg"]))
-        focal_px = viewport_width / (2.0 * math.tan(hfov * 0.5))
-        # A normal ETS2 lane is about 3.5 m wide.  The blue core is a 1.75 m
-        # road-bound ribbon: exactly half a lane in world scale.  Clamp only
-        # the extreme near/horizon cases so it remains legible and stable.
-        core = max(7.0, min(150.0, focal_px * 1.75 / depth))
-        return core + max(5.0, core * 0.16), core
-    except (KeyError, TypeError, ValueError, OverflowError, ZeroDivisionError):
-        scale = max(0.16, min(1.0, 12.0 / depth))
-        return 7.0 + 36.0 * scale, 4.0 + 25.0 * scale
+    scale = max(0.16, min(1.0, 12.0 / depth))
+    return 4.0 + 24.0 * scale, 2.0 + 11.0 * scale
 
 
 def _traffic_occluders(camera_snapshot, traffic, telemetry_timestamp=0.0):

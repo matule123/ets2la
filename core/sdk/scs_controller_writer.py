@@ -162,6 +162,26 @@ class SCSControlsWriter:
             logging.error("SCS SDK write %s failed: %s", name, e)
             self.connected = False
 
+    def _write_bool(self, name: str, value: bool):
+        if not self.connected:
+            self._maybe_reconnect()
+            return False
+        try:
+            self._buf.seek(self._offsets[name])
+            self._buf.write(struct.pack("?", bool(value)))
+            self._buf.flush()
+            return True
+        except Exception as e:
+            logging.error("SCS SDK write %s failed: %s", name, e)
+            self.connected = False
+            return False
+
+    def select_drive(self):
+        return self._write_bool("geardrive", True)
+
+    def release_drive(self):
+        return self._write_bool("geardrive", False)
+
     # --- Public API (mirrors the other control backends) ---------------------
     def set_steering(self, value: float):
         v = max(-1.0, min(1.0, value))

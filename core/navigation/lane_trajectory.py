@@ -398,10 +398,21 @@ def validate_lane_trajectory(lane_path: LanePath) -> TrajectoryValidation:
         return TrajectoryValidation(False,
             f"trajectory contains {dense} over-dense gaps below "
             f"{MIN_CONTROL_SPACING_M:.2f} m", **metrics)
-    if metrics["max_heading_jump_deg"] > MAX_HEADING_JUMP_DEG:
+    heading_violation = None
+    for first, second, jump in zip(points, points[1:], heading_jumps):
+        indices = {first.segment_index, second.segment_index}
+        prefab_turn = any(
+                0 <= index < len(segments)
+                and segments[index].lane_type in ("prefab", "roundabout")
+                for index in indices)
+        limit = 55.0 if prefab_turn else MAX_HEADING_JUMP_DEG
+        if jump > limit:
+            heading_violation = (jump, limit)
+            break
+    if heading_violation is not None:
+        jump, limit = heading_violation
         return TrajectoryValidation(False,
-            f"heading jump {metrics['max_heading_jump_deg']:.1f} deg exceeds "
-            f"{MAX_HEADING_JUMP_DEG:.1f} deg", **metrics)
+            f"heading jump {jump:.1f} deg exceeds {limit:.1f} deg", **metrics)
     if metrics["max_curvature"] > MAX_CURVATURE:
         return TrajectoryValidation(False,
             f"curvature {metrics['max_curvature']:.3f} 1/m exceeds "

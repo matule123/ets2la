@@ -1125,7 +1125,7 @@ class RoadNetwork:
                         ))
                 segments[index] = replace(segment, centerline=tuple(dense))
                 continue
-            if (max(start_gap, end_gap) > 45.0
+            if (max(start_gap, end_gap) > 140.0
                     or abs(start.y - end.y) > 6.0
                     or (previous is None and following is None)):
                 continue
@@ -1135,7 +1135,7 @@ class RoadNetwork:
                            else previous.centerline[-1].heading)
             distance = math.dist((start.x, start.y, start.z),
                                  (end.x, end.y, end.z))
-            if distance < 1.0 or distance > 90.0:
+            if distance < 1.0 or distance > 150.0:
                 continue
             tangent = min(18.0, distance * 0.38)
             count = max(5, int(math.ceil(distance / 2.0)) + 1)

@@ -32,6 +32,7 @@ class Controller:
     def set_steering(self, value): self.steering = value
     def set_throttle(self, value): self.throttle = value
     def set_brake(self, value): self.brake = value
+    def select_drive(self, pressed=True): self.drive = pressed; return True
 
 
 class Telemetry:
@@ -66,13 +67,31 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         # Regression for "too many values to unpack (expected 2)".
         self.assertIsInstance(plugin._route_lateral_hint(), (float, type(None)))
 
-    def test_reverse_gear_disengages_without_throttle(self):
+    def test_reverse_gear_is_recovered_without_disengaging(self):
         state = State({"autopilot_active": True})
-        plugin = autopilot({"speed": -0.5, "gear": -1}, state)
+        truck = {"speed": -0.5, "gear": -1}
+        plugin = autopilot(truck, state)
         plugin.on_tick(0.05)
-        self.assertFalse(state.get("autopilot_active"))
+        self.assertTrue(state.get("autopilot_active"))
         self.assertEqual(plugin.sdk.controller.throttle, 0.0)
-        self.assertFalse(state.get("nav_active"))
+        truck["speed"] = 0.0
+        plugin.sdk.telemetry.truck = truck
+        plugin._drive_request_t = -1.0
+        plugin.on_tick(0.05)
+        self.assertTrue(plugin.sdk.controller.drive)
+        truck["gear"] = 1
+        plugin.on_tick(0.05)
+        self.assertFalse(plugin._reverse_recovery)
+        self.assertFalse(plugin.sdk.controller.drive)
+
+    def test_neutral_selects_drive_before_throttle(self):
+        state = State({"autopilot_active": True})
+        plugin = autopilot({"speed": 0.0, "gear": 0}, state)
+        plugin.on_tick(0.05)
+        self.assertTrue(state.get("autopilot_active"))
+        self.assertTrue(plugin.sdk.controller.drive)
+        self.assertEqual(plugin.sdk.controller.throttle, 0.0)
+        self.assertEqual(plugin.sdk.controller.brake, 0.0)
 
     def test_arrival_stops_and_disengages(self):
         state = State({
@@ -87,12 +106,13 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         self.assertEqual(plugin.sdk.controller.brake, 0.0)
         self.assertEqual(state.get("navigation_status"), "Cieľ dosiahnutý")
 
-    def test_ar_width_is_half_lane_in_perspective(self):
+    def test_ar_width_is_compact_original_size(self):
         snapshot = {
             "viewport": {"width": 1920}, "fov_horizontal_deg": 75.0,
         }
         halo, core = _perspective_route_widths(50.0, snapshot)
-        self.assertGreater(core, 35.0)
+        self.assertGreater(core, 4.0)
+        self.assertLess(core, 8.0)
         self.assertGreater(halo, core)
 
     def test_nearer_vehicle_occludes_route_segment(self):

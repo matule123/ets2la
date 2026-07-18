@@ -33,7 +33,7 @@ Point = Tuple[float, float]
 K_HEADING = 1.0           # heading-error weight (Stanley keeps this at 1.0)
 K_CTE = 0.55              # cross-track gain (Stanley: how hard we steer back)
 K_SOFT = 1.0              # softening constant → CTE term never explodes at v=0
-MIN_LOOKAHEAD = 22.0      # look further ahead → smoother, earlier turning
+MIN_LOOKAHEAD = 22.0
 MAX_LOOKAHEAD = 75.0
 # Curvature-aware lookahead: look FAR ahead on straights (anticipate), but
 # TIGHTEN the lookahead in sharp curves (react precisely to the apex). The
@@ -296,6 +296,26 @@ class Route:
             + speed_look * (1.0 - tight),
             TIGHT_CURVE_LOOKAHEAD, MAX_LOOKAHEAD,
         )
+        # Keep the target before a junction corner until the cab reaches the
+        # confirmed connector. A long lookahead otherwise cuts across islands.
+        walked = 0.0
+        base_heading = None
+        for i in range(idx, min(len(self.points) - 1, idx + 80)):
+            ax, az = self.points[i]
+            bx, bz = self.points[i + 1]
+            seg = math.hypot(bx-ax, bz-az)
+            if seg < 1e-5:
+                continue
+            tangent = math.atan2(-(bx-ax), -(bz-az))
+            if base_heading is None:
+                base_heading = tangent
+            change = abs((tangent-base_heading+math.pi) % (2*math.pi)-math.pi)
+            # Only treat a real junction/corner as a gate. Gentle continuous
+            # bends must keep their normal preview or steering changes late.
+            if change > math.radians(25.0) and walked > 4.0:
+                lookahead = min(lookahead, max(MIN_LOOKAHEAD, walked - 3.0))
+                break
+            walked += seg
         tx, tz = self.lookahead_point(idx, pos, lookahead)
 
         # Shift the lookahead + the reference line sideways by lane_offset_m, so

@@ -127,6 +127,13 @@ class Controller:
                 pydirectinput.press(']')
         self.current_blinker = side
 
+    def select_drive(self, pressed: bool = True):
+        """Select Drive explicitly instead of using the brake/reverse gesture."""
+        if self.mode == "SCS_SDK":
+            return (self.scs.select_drive() if pressed
+                    else self.scs.release_drive())
+        return False
+
     def stop_completely(self):
         self.set_throttle(0.0)
         self.set_brake(1.0)
