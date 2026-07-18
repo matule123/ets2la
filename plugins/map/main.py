@@ -7,6 +7,7 @@ from core.navigation.route import Route
 from core.navigation.lane_trajectory import (
     build_lane_trajectory, derive_display_points,
 )
+from core.navigation.runtime_preflight import CONFIDENCE_THRESHOLD
 from core.paths import app_dir
 
 # routes/ lives next to the app (works both from source and when frozen).
@@ -191,6 +192,9 @@ class Plugin(BasePlugin):
                 "lateral_error_m": float(match.lateral_error_m),
                 "heading_error_rad": float(match.heading_error_rad),
                 "vertical_error_m": float(match.vertical_error_m),
+                "score": float(match.score),
+                "confidence": float(match.confidence),
+                "score_components": dict(match.score_components),
                 "switch_reason": match.switch_reason,
             })
             self.sdk.set("lane_trajectory_heartbeat", time.monotonic())
@@ -231,6 +235,13 @@ class Plugin(BasePlugin):
         snapshot = {
             "revision": revision, "valid": True,
             "confidence": float(min(trajectory.confidence, match.confidence)),
+            "confidence_components": {
+                "locator": float(match.confidence),
+                "trajectory": float(trajectory.confidence),
+                "locator_score": float(match.score),
+                "locator_score_components": dict(match.score_components),
+                "threshold": CONFIDENCE_THRESHOLD,
+            },
             "active_lane_id": self._lane_id_payload(match.lane_id),
             "lane_match": {
                 "point": [float(match.point.x), float(match.point.y),
@@ -238,6 +249,9 @@ class Plugin(BasePlugin):
                 "lateral_error_m": float(match.lateral_error_m),
                 "heading_error_rad": float(match.heading_error_rad),
                 "vertical_error_m": float(match.vertical_error_m),
+                "score": float(match.score),
+                "confidence": float(match.confidence),
+                "score_components": dict(match.score_components),
                 "switch_reason": match.switch_reason,
             },
             "points": control_points, "display_points": display_points,
@@ -1298,11 +1312,13 @@ class Plugin(BasePlugin):
         if self._lane_diag_t >= 1.0:
             self._lane_diag_t = 0.0
             snapshot = self.sdk.get("lane_trajectory", {}) or {}
-            match = snapshot.get("lane_match") or {}
+            match = self.sdk.get("lane_match") or snapshot.get("lane_match") or {}
+            confidence_components = snapshot.get("confidence_components") or {}
             logging.info(
                 "lane-trajectory: revision=%s valid=%s confidence=%.3f lane=%s "
                 "lateral=%.3f heading=%.3f vertical=%.3f control=%d display=%d "
-                "gps_distance=%.1f lane_distance=%.1f switch=%s failure=%s",
+                "gps_distance=%.1f lane_distance=%.1f score_components=%s "
+                "confidence_components=%s switch=%s failure=%s",
                 snapshot.get("revision", 0), bool(snapshot.get("valid", False)),
                 float(snapshot.get("confidence", 0.0) or 0.0),
                 snapshot.get("active_lane_id"),
@@ -1313,5 +1329,6 @@ class Plugin(BasePlugin):
                 len(snapshot.get("display_points", ()) or ()),
                 float(self.sdk.get("game_route_distance", 0.0) or 0.0),
                 float(snapshot.get("distance_m", 0.0) or 0.0),
+                match.get("score_components", {}), confidence_components,
                 match.get("switch_reason", ""),
                 snapshot.get("failure_reason", ""))

@@ -258,8 +258,15 @@ class SnapshotAndConsumerAuditTests(unittest.TestCase):
         engine.controller = Controller()
         engine._was_active = True
         engine._flush_controls()
-        self.assertEqual(engine.controller.steering, 0.0)
+        self.assertGreater(engine.controller.steering, 0.0)
+        self.assertLess(engine.controller.steering, 0.8)
         self.assertEqual(engine.controller.throttle, 0.0)
+        self.assertGreater(engine.controller.brake, 0.0)
+        self.assertLess(engine.controller.brake, 0.70)
+        for _ in range(20):
+            engine._last_control_flush -= 0.1
+            engine._flush_controls()
+        self.assertEqual(engine.controller.steering, 0.0)
         self.assertEqual(engine.controller.brake, 0.70)
 
         engine.shared_state = State({
@@ -268,10 +275,15 @@ class SnapshotAndConsumerAuditTests(unittest.TestCase):
             "ctl_steering": 0.8, "ctl_throttle": 1.0, "ctl_brake": 0.0,
         })
         engine.controller = Controller()
+        engine._last_output_steering = 0.8
+        engine._last_output_brake = 0.0
+        engine._last_control_flush = time.monotonic() - 0.02
         engine._flush_controls()
-        self.assertEqual((engine.controller.steering,
-                          engine.controller.throttle,
-                          engine.controller.brake), (0.0, 0.0, 0.70))
+        self.assertGreater(engine.controller.steering, 0.0)
+        self.assertLess(engine.controller.steering, 0.8)
+        self.assertEqual(engine.controller.throttle, 0.0)
+        self.assertGreater(engine.controller.brake, 0.0)
+        self.assertLess(engine.controller.brake, 0.70)
         ap, state = autopilot_state(0.95, telemetry_valid=False)
         ap.on_tick(0.1)
         self.assertEqual(state.get("autopilot_lane_revision"), -1)
@@ -282,6 +294,12 @@ class SnapshotAndConsumerAuditTests(unittest.TestCase):
                 plugin, state = autopilot_state(confidence)
                 plugin.on_tick(0.05)
                 self.assertEqual(state.get("autopilot_lane_revision"), expected)
+                readiness = state.get("autopilot_navigation_readiness")
+                self.assertEqual(readiness["ready"], expected == 7)
+                if confidence < 0.72:
+                    self.assertIn("below 0.72", readiness["reason"])
+                else:
+                    self.assertEqual(readiness["reason"], "")
 
     def test_camera_matrix_requires_proven_metadata_and_time_sync(self):
         now = time.monotonic()
@@ -294,7 +312,7 @@ class SnapshotAndConsumerAuditTests(unittest.TestCase):
         state.update_batch({
             "game_camera_view_projection": [1.0] * 15,
             "game_camera_view_projection_meta": {
-                "layout": "row-major", "handedness": "ets2-left-handed-x-y-z",
+                "layout": "row-major", "handedness": "right-handed",
                 "clip_space": "opengl-negative-one-to-one", "timestamp": now,
             },
         })

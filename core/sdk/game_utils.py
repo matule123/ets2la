@@ -109,6 +109,7 @@ def install_game_dlls(assets_dir: str, names=None) -> list:
     list of plugin folders written to.  Files already locked by a running game
     are skipped quietly (they're usually already the right version).
     """
+    import filecmp
     import shutil
 
     if names is None:
@@ -132,6 +133,14 @@ def install_game_dlls(assets_dir: str, names=None) -> list:
                 continue
             dst = os.path.join(plugins_dir, name)
             try:
+                # Bootloader calls this check on every launch. Do not touch an
+                # installed DLL (mtime, lock or file contents) when it already
+                # matches the shipped asset byte-for-byte.
+                if (os.path.exists(dst)
+                        and filecmp.cmp(src, dst, shallow=False)):
+                    logging.info("Verified existing %s in %s; no copy needed.",
+                                 name, plugins_dir)
+                    continue
                 shutil.copy2(src, dst)
                 logging.info("Installed %s into %s", name, plugins_dir)
             except Exception as e:

@@ -3,13 +3,15 @@ import math
 import time
 import numpy as np
 from sdk.base_plugin import BasePlugin
+from core.navigation.runtime_preflight import CONFIDENCE_THRESHOLD
 
 
 # --- Tuning (kept here, mirrored into settings under "autopilot" section) -----
 STEER_RATE_LIMIT = 0.075     # max steering change per second (smooth, no jerk)
-MIN_LANE_TRAJECTORY_CONFIDENCE = 0.72
+MIN_LANE_TRAJECTORY_CONFIDENCE = CONFIDENCE_THRESHOLD
 # 0.72 rejects ambiguous/off-route matches while retaining a wide margin below
-# the 0.96-0.98 confidence measured on validated ProMods trajectories.
+# ProMods-1.59 centre samples (min 0.895, p05 0.950, median 0.966) and
+# validated built trajectories (0.970-0.980). Exactly 0.72 is accepted.
 STEER_FOLLOW_BLEND = 0.38    # suppress single-frame route/vision target jumps
                              # (low = smooth/laggy, high = snappy/jittery)
 VISION_DEADZONE = 0.03       # ignore vision lane offset noise below this
@@ -27,6 +29,51 @@ THROTTLE_RAMP = 3.0          # throttle slew rate per second
 A_LAT_MAX = 2.5             # comfortable lateral accel (m/s²)
 CURVE_BRAKE_MAX = 0.4       # never brake harder than this for a curve alone
 CURVE_BRAKE_MARGIN_MS = 0.5 # start braking this much before v_safe (hysteresis)
+
+
+def lane_authority_rejection_reason(state, snapshot, now=None):
+    """Explain why a lane snapshot may not drive; empty means accepted."""
+    now = time.monotonic() if now is None else float(now)
+    if not isinstance(snapshot, dict) or not snapshot.get("valid", False):
+        return str((snapshot or {}).get("failure_reason")
+                   or "lane trajectory is invalid")
+    try:
+        confidence = float(snapshot.get("confidence", 0.0) or 0.0)
+        if not math.isfinite(confidence):
+            return "lane trajectory confidence is non-finite"
+        if confidence < MIN_LANE_TRAJECTORY_CONFIDENCE:
+            return (f"lane trajectory confidence {confidence:.6f} is below "
+                    f"{MIN_LANE_TRAJECTORY_CONFIDENCE:.2f}")
+        snapshot_revision = int(snapshot.get("revision", -1) or -1)
+        current_revision = int(state.get("lane_trajectory_revision", -2) or -2)
+        if snapshot_revision != current_revision:
+            return (f"lane trajectory revision {snapshot_revision} is stale; "
+                    f"current revision is {current_revision}")
+        snapshot_uids = tuple(int(uid) for uid in
+                              (snapshot.get("source_gps_uids", ()) or ()))
+        game_uids = tuple(int(uid) for uid in
+                          (state.get("game_route_node_uids", []) or []))
+        if snapshot_uids != game_uids:
+            return "lane trajectory belongs to a different GPS target"
+        if snapshot.get("request_id") != state.get("nav_recalc_request"):
+            return "lane trajectory calculation request is stale"
+        heartbeat = float(state.get("lane_trajectory_heartbeat", 0.0) or 0.0)
+        if heartbeat <= 0.0 or now - heartbeat > 0.5:
+            return "map plugin heartbeat is stale"
+        if state.get("telemetry_valid", True) is False:
+            return "vehicle telemetry is invalid"
+        if state.get("navigation_recalculating", False):
+            return "navigation is recalculating"
+        points = snapshot.get("points", ()) or ()
+        if len(points) < 2:
+            return "lane trajectory has fewer than two control points"
+        for point in points:
+            if (not isinstance(point, (list, tuple)) or len(point) < 3
+                    or not all(math.isfinite(float(value)) for value in point[:3])):
+                return "lane trajectory contains malformed or non-finite 3D points"
+    except (TypeError, ValueError, OverflowError):
+        return "lane trajectory metadata is malformed"
+    return ""
 
 
 class Plugin(BasePlugin):
@@ -107,34 +154,30 @@ class Plugin(BasePlugin):
         traffic = self.sdk.shared_state.get("traffic", []) or []
         have_real_traffic = len(traffic) > 0
         snapshot = self.sdk.shared_state.get("lane_trajectory", {}) or {}
-        snapshot_revision = int(snapshot.get("revision", -1) or -1)
-        current_revision = int(self.sdk.shared_state.get(
-            "lane_trajectory_revision", -2) or -2)
-        game_uids = tuple(int(uid) for uid in (
-            self.sdk.shared_state.get("game_route_node_uids", []) or []))
-        snapshot_uids = tuple(int(uid) for uid in (
-            snapshot.get("source_gps_uids", ()) or ()))
-        heartbeat = float(self.sdk.shared_state.get(
-            "lane_trajectory_heartbeat", 0.0) or 0.0)
-        heartbeat_current = bool(
-            heartbeat > 0.0 and time.monotonic() - heartbeat <= 0.5)
+        try:
+            snapshot_revision = int(snapshot.get("revision", -1) or -1)
+            snapshot_confidence = float(snapshot.get("confidence", 0.0) or 0.0)
+            game_route_distance = float(self.sdk.shared_state.get(
+                "game_route_distance", 0.0) or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            snapshot_revision, snapshot_confidence, game_route_distance = -1, 0.0, 0.0
         gps_navigation_present = bool(
             len(snapshot.get("source_gps_uids", ()) or ()) >= 2
-            or float(self.sdk.shared_state.get("game_route_distance", 0.0) or 0.0) > 25.0)
-        lane_authority_safe = bool(
-            snapshot.get("valid", False)
-            and float(snapshot.get("confidence", 0.0) or 0.0)
-                >= MIN_LANE_TRAJECTORY_CONFIDENCE
-            and snapshot_revision == current_revision
-            and snapshot_uids == game_uids
-            and snapshot.get("request_id")
-                == self.sdk.shared_state.get("nav_recalc_request")
-            and heartbeat_current
-            and self.sdk.shared_state.get("telemetry_valid", True) is not False
-            and not self.sdk.shared_state.get("navigation_recalculating", False))
+            or game_route_distance > 25.0)
+        authority_reason = lane_authority_rejection_reason(
+            self.sdk.shared_state, snapshot)
+        lane_authority_safe = not authority_reason
         self.sdk.shared_state.set(
             "autopilot_lane_revision",
             snapshot_revision if lane_authority_safe else -1)
+        self.sdk.shared_state.set("autopilot_navigation_readiness", {
+            "ready": lane_authority_safe,
+            "reason": authority_reason,
+            "revision": snapshot_revision if lane_authority_safe else -1,
+            "confidence": snapshot_confidence,
+            "threshold": MIN_LANE_TRAJECTORY_CONFIDENCE,
+            "timestamp": time.monotonic(),
+        })
         navigation_unreliable = bool(
             self.sdk.shared_state.get("navigation_unreliable", False)
             or (gps_navigation_present and not lane_authority_safe))
@@ -290,11 +333,15 @@ class Plugin(BasePlugin):
             self._diag_t = 0.0
             logging.info(
                 "autopilot: active=%s nav=%s engage=%.2f lane_off=%.3f "
-                "nav_steer=%.3f target=%.3f steer_out=%.3f speed=%.0f",
+                "nav_steer=%.3f target=%.3f steer_out=%.3f speed=%.0f "
+                "lane_revision=%s confidence=%.3f reject=%s",
                 active, nav_active, self._engage_blend,
                 float(lane_offset),
                 float(self.sdk.shared_state.get("nav_steering", 0.0) or 0.0),
-                float(self._last_steering), steering_val, speed_kmh)
+                float(self._last_steering), steering_val, speed_kmh,
+                snapshot_revision,
+                snapshot_confidence,
+                authority_reason)
 
         self.sdk.controller.set_steering(steering_val)
 

@@ -20,6 +20,44 @@ def _gear_text(gear):
     return str(int(gear)) if gear > 0 else "R"
 
 
+def hud_navigation_rejection_reason(state, trajectory, now=None):
+    """Return why HUD must hide the blue line, or empty when current."""
+    now = time.monotonic() if now is None else float(now)
+    if not isinstance(trajectory, dict) or not trajectory.get("valid", False):
+        return str((trajectory or {}).get("failure_reason")
+                   or "lane trajectory is invalid")
+    try:
+        revision = int(trajectory.get("revision", -2) or -2)
+        current_revision = int(state.get("lane_trajectory_revision", -1) or -1)
+        if revision != current_revision:
+            return "lane trajectory revision is stale"
+        snapshot_uids = tuple(int(uid) for uid in
+                              (trajectory.get("source_gps_uids", ()) or ()))
+        game_uids = tuple(int(uid) for uid in
+                          (state.get("game_route_node_uids", []) or []))
+        if snapshot_uids != game_uids:
+            return "lane trajectory belongs to a different GPS target"
+        if trajectory.get("request_id") != state.get("nav_recalc_request"):
+            return "lane trajectory request is stale"
+        heartbeat = float(state.get("lane_trajectory_heartbeat", 0.0) or 0.0)
+        if heartbeat <= 0.0 or now - heartbeat > 0.5:
+            return "map plugin heartbeat is stale"
+        if state.get("telemetry_valid", True) is False:
+            return "vehicle telemetry is invalid"
+        if state.get("navigation_recalculating", False):
+            return "navigation is recalculating"
+        points = trajectory.get("display_points", ()) or ()
+        if len(points) < 2:
+            return "display trajectory has fewer than two points"
+        for point in points:
+            if (not isinstance(point, (list, tuple)) or len(point) < 3
+                    or not all(math.isfinite(float(value)) for value in point[:3])):
+                return "display trajectory contains malformed or non-finite 3D points"
+    except (TypeError, ValueError, OverflowError):
+        return "lane trajectory metadata is malformed"
+    return ""
+
+
 # Body colours cycled by vehicle id, so traffic isn't all grey. Each is a
 # (body, roof) pair; the roof (cabin/glass) is rendered darker for contrast.
 _CAR_PALETTE = [
@@ -172,22 +210,32 @@ class UltraPilotHUD(QWidget):
         truck = (s.get("telemetry", {}) or {}).get("truck", {}) or {}
         now = time.monotonic()
         trajectory = s.get("lane_trajectory", {}) or {}
-        current_revision = int(s.get("lane_trajectory_revision", -1) or -1)
-        heartbeat = float(s.get("lane_trajectory_heartbeat", 0.0) or 0.0)
-        snapshot_uids = tuple(int(uid) for uid in
-                              (trajectory.get("source_gps_uids", ()) or ()))
-        game_uids = tuple(int(uid) for uid in
-                          (s.get("game_route_node_uids", []) or []))
-        trajectory_current = bool(
-            trajectory.get("valid", False)
-            and int(trajectory.get("revision", -2) or -2) == current_revision
-            and snapshot_uids == game_uids
-            and trajectory.get("request_id") == s.get("nav_recalc_request")
-            and heartbeat > 0.0 and now - heartbeat <= 0.5
-            and s.get("telemetry_valid", True) is not False
-            and not s.get("navigation_recalculating", False))
+        try:
+            current_revision = int(s.get("lane_trajectory_revision", -1) or -1)
+            lane_confidence = float(trajectory.get("confidence", 0.0) or 0.0)
+            if not math.isfinite(lane_confidence):
+                lane_confidence = 0.0
+        except (TypeError, ValueError, OverflowError):
+            current_revision, lane_confidence = -1, 0.0
+        hud_reason = hud_navigation_rejection_reason(s, trajectory, now)
+        trajectory_current = not hud_reason
         live_path = (trajectory.get("display_points", []) or []
                      if trajectory_current else [])
+        readiness = {
+            "ready": trajectory_current, "reason": hud_reason,
+            "revision": current_revision if trajectory_current else -1,
+            "confidence": lane_confidence,
+            "active_lane_id": (trajectory.get("active_lane_id")
+                               if trajectory_current else None),
+            "timestamp": now,
+        }
+        signature = (readiness["ready"], readiness["reason"],
+                     readiness["revision"], readiness["active_lane_id"])
+        if (signature != getattr(self, "_hud_readiness_signature", None)
+                or now - getattr(self, "_hud_readiness_at", 0.0) >= 1.0):
+            s.set("hud_navigation_readiness", readiness)
+            self._hud_readiness_signature = signature
+            self._hud_readiness_at = now
         runtime_match = s.get("lane_match") or {}
         if int(runtime_match.get("revision", -2) or -2) != current_revision:
             runtime_match = trajectory.get("lane_match") or {}
@@ -221,6 +269,8 @@ class UltraPilotHUD(QWidget):
             "active_lane_id": (trajectory.get("active_lane_id")
                                if trajectory_current else None),
             "lane_match": (runtime_match if trajectory_current else {}),
+            "lane_confidence": lane_confidence,
+            "navigation_failure_reason": hud_reason,
             "road_segments": s.get("map_road_segments", []) or [],
             "limit_ms": truck.get("speedLimit", 0.0) or 0.0,
             # Rear-view camera: shown when a turn signal is active (left/right)

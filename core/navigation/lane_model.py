@@ -119,6 +119,7 @@ class LaneMatch:
     score: float
     confidence: float
     switch_reason: str
+    score_components: tuple[tuple[str, float], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,15 +201,20 @@ class LaneLocator:
                 # Hysteresis is not permission to teleport to a nearby road.
                 # A transition must be topologically confirmed by the network.
                 continue
-            score = (distance
-                     + heading_error * self.config.heading_weight
-                     + vertical * self.config.vertical_weight
-                     + (0.0 if on_route else self.config.off_route_penalty)
-                     + (self.config.derived_width_penalty
-                        if lane.width_source == "derived" else 0.0))
+            components = (
+                ("lateral", float(distance)),
+                ("heading", float(heading_error * self.config.heading_weight)),
+                ("vertical", float(vertical * self.config.vertical_weight)),
+                ("off_route", float(
+                    0.0 if on_route else self.config.off_route_penalty)),
+                ("derived_width", float(
+                    self.config.derived_width_penalty
+                    if lane.width_source == "derived" else 0.0)),
+            )
+            score = sum(value for _, value in components)
             confidence = max(0.0, min(1.0, 1.0 - score / 18.0))
             ranked.append((score, lane, point, segment_index, point_index, signed,
-                           vertical, heading_error, confidence))
+                           vertical, heading_error, confidence, components))
         if not ranked:
             self.previous = None
             return None
@@ -233,9 +239,9 @@ class LaneLocator:
             elif self.network.lanes_connected(previous.lane_id,
                                               chosen[1].lane_id):
                 reason = "topology_transition"
-        score, lane, point, segment_index, point_index, signed, vertical, error, confidence = chosen
+        score, lane, point, segment_index, point_index, signed, vertical, error, confidence, components = chosen
         match = LaneMatch(lane.lane_id, point, segment_index, point_index,
                           signed, vertical, wrap_angle(heading - point.heading),
-                          score, confidence, reason)
+                          score, confidence, reason, components)
         self.previous = match
         return match

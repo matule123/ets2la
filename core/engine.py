@@ -13,9 +13,17 @@ from core.modules.game_watcher import GameWatcher
 from core.modules.better_screen_capture import BetterScreenCapture
 from core.modules.traffic_analysis import TrafficAnalysis
 from core.planner import UltraPilotPlanner
+from core.camera import CameraSnapshotProducer
+from core.navigation.runtime_preflight import build_runtime_preflight
 from sdk.plugin_sdk import (
     CTL_STEERING, CTL_THROTTLE, CTL_BRAKE, CTL_BLINKER, CTL_PAY_TOLL,
 )
+
+
+# Engine-owned fail-safe rates. These apply only when telemetry or the
+# autopilot worker disappears; they do not tune Route/Stanley/PID steering.
+SAFETY_STEERING_RETURN_RATE = 0.50  # full lock -> centre in at most 2 s
+SAFETY_BRAKE_RAMP_UP = 2.50         # reach 0.70 brake in about 0.28 s
 
 
 class UltraPilotEngine:
@@ -48,6 +56,10 @@ class UltraPilotEngine:
         self.ets2la = ETS2LAData()
         from core.sdk.ets2la_route import ETS2LARouteReader
         self.ets2la_route = ETS2LARouteReader()
+        # Converts the game plugin's exact CameraProps buffer into one atomic,
+        # renderTime-synchronised snapshot consumed by AR. It never estimates
+        # a camera pose from the truck pose.
+        self.camera_snapshot_producer = CameraSnapshotProducer()
         self.perception = Perception(self.shared_state)
         self.planner = UltraPilotPlanner()
 
@@ -75,6 +87,11 @@ class UltraPilotEngine:
         self._last_route_signature = None
         self._had_game_destination = False
         self._last_navigation_log_seq = None
+        self._last_runtime_preflight = 0.0
+        self._last_camera_diagnostic = 0.0
+        self._last_control_flush = time.monotonic()
+        self._last_output_steering = 0.0
+        self._last_output_brake = 0.0
         # Track autopilot on/off edges so we release controls only once on disable.
         self._was_active = False
         try:
@@ -346,6 +363,13 @@ class UltraPilotEngine:
             self.shared_state.set("tts_message", msg)
             if not new_state:
                 self.controller.release_all()
+                self._was_active = False
+                self._last_output_steering = 0.0
+                self._last_output_brake = 0.0
+                self.shared_state.update_batch({
+                    CTL_STEERING: 0.0, CTL_THROTTLE: 0.0, CTL_BRAKE: 0.0,
+                    "autopilot_disable_reason": "manual hotkey",
+                })
         self._hotkey_was_down = down
 
     def _process_autopilot_command(self):
@@ -362,15 +386,73 @@ class UltraPilotEngine:
         if not desired:
             self.controller.release_all()
             self._was_active = False
+            self._last_output_steering = 0.0
+            self._last_output_brake = 0.0
             self.shared_state.update_batch({
                 CTL_STEERING: 0.0, CTL_THROTTLE: 0.0, CTL_BRAKE: 0.0,
+                "autopilot_disable_reason": "manual command",
             })
         self.shared_state.set("autopilot_command_ack", seq)
         self.shared_state.set("autopilot_command_pending", None)
         logging.info("Autopilot %s (command acknowledged).",
                      "enabled" if desired else "disabled")
 
+    def _camera_diagnostic(self, snapshot):
+        """Publish/log camera readiness at most once per second."""
+        now = time.monotonic()
+        if now - self._last_camera_diagnostic < 1.0:
+            return
+        self._last_camera_diagnostic = now
+        viewport = snapshot.get("viewport") or {}
+        diagnostic = {
+            "revision": int(snapshot.get("revision", 0) or 0),
+            "valid": bool(snapshot.get("valid", False)),
+            "source": snapshot.get("source", ""),
+            "camera_mode": snapshot.get("camera_mode", "unknown"),
+            "render_time_us": int(snapshot.get("render_time_us", 0) or 0),
+            "viewport": viewport,
+            "fov_horizontal_deg": snapshot.get("fov_horizontal_deg"),
+            "failure_reason": snapshot.get("failure_reason", ""),
+            "timestamp": now,
+        }
+        self.shared_state.set("camera_diagnostics", diagnostic)
+        message = (
+            "camera: revision=%s valid=%s source=%s mode=%s renderTime=%s "
+            "viewport=%sx%s@(%s,%s) hfov=%s failure=%s")
+        args = (diagnostic["revision"], diagnostic["valid"],
+                diagnostic["source"], diagnostic["camera_mode"],
+                diagnostic["render_time_us"], viewport.get("width", 0),
+                viewport.get("height", 0), viewport.get("x", 0),
+                viewport.get("y", 0), diagnostic["fov_horizontal_deg"],
+                diagnostic["failure_reason"])
+        (logging.info if diagnostic["valid"] else logging.warning)(message, *args)
+
     # --- Control flush --------------------------------------------------------
+    def _automatic_safety_stop(self, reason):
+        """Return steering smoothly and ramp brake after producer loss."""
+        now = time.monotonic()
+        previous_time = float(getattr(self, "_last_control_flush", now - 0.02))
+        dt = max(0.001, min(0.10, now - previous_time))
+        self._last_control_flush = now
+        current_steering = float(getattr(
+            self, "_last_output_steering",
+            self.shared_state.get(CTL_STEERING, 0.0) or 0.0))
+        steering_step = SAFETY_STEERING_RETURN_RATE * dt
+        if current_steering > 0.0:
+            steering = max(0.0, current_steering - steering_step)
+        else:
+            steering = min(0.0, current_steering + steering_step)
+        current_brake = float(getattr(
+            self, "_last_output_brake",
+            self.shared_state.get(CTL_BRAKE, 0.0) or 0.0))
+        brake = min(0.70, current_brake + SAFETY_BRAKE_RAMP_UP * dt)
+        self._last_output_steering = steering
+        self._last_output_brake = brake
+        self.shared_state.set("automatic_safety_stop_reason", str(reason))
+        self.controller.set_steering(steering)
+        self.controller.set_throttle(0.0)
+        self.controller.set_brake(brake)
+
     def _flush_controls(self):
         """Apply the latest control intents to the physical device.
 
@@ -382,6 +464,9 @@ class UltraPilotEngine:
             if self._was_active:
                 self.controller.release_all()
                 self._was_active = False
+            self._last_output_steering = 0.0
+            self._last_output_brake = 0.0
+            self._last_control_flush = time.monotonic()
             return
         if self.shared_state.get("telemetry_valid", True) is False:
             # Never keep flushing the last acceleration/steering intent after
@@ -389,18 +474,14 @@ class UltraPilotEngine:
             # normally request its ramped stop within one 100 Hz tick; this is
             # the engine-owned fail-safe for process scheduling or plugin loss.
             self._was_active = True
-            self.controller.set_steering(0.0)
-            self.controller.set_throttle(0.0)
-            self.controller.set_brake(0.70)
+            self._automatic_safety_stop("vehicle telemetry is invalid")
             return
         control_heartbeat = float(self.shared_state.get(
             "autopilot_control_heartbeat", 0.0) or 0.0)
         if (control_heartbeat <= 0.0
                 or time.monotonic() - control_heartbeat > 0.5):
             self._was_active = True
-            self.controller.set_steering(0.0)
-            self.controller.set_throttle(0.0)
-            self.controller.set_brake(0.70)
+            self._automatic_safety_stop("autopilot control heartbeat is stale")
             return
         self._was_active = True
 
@@ -449,6 +530,9 @@ class UltraPilotEngine:
         self.controller.set_steering(steering)
         self.controller.set_throttle(throttle)
         self.controller.set_brake(brake)
+        self._last_control_flush = time.monotonic()
+        self._last_output_steering = steering
+        self._last_output_brake = brake
 
         # Blinker: a plugin may force one via ctl_blinker, otherwise follow the planner.
         blinker = self.shared_state.get(CTL_BLINKER) or self.shared_state.get("active_blinker", "off")
@@ -484,8 +568,20 @@ class UltraPilotEngine:
 
             # 1. Telemetry
             if self.telemetry.update():
+                # Capture the sampling instant immediately. CameraProps is read
+                # later in this same branch and rejects the frame if route/GPS
+                # processing delayed it beyond the synchronization tolerance.
+                telemetry_timestamp = time.monotonic()
                 truck = self.telemetry.get("truck", {}) or {}
                 raw = self.telemetry.get("raw", {}) or {}
+                # Sample CameraProps immediately next to the SCS telemetry
+                # frame, before any route processing can introduce skew.
+                camera_snapshot = self.camera_snapshot_producer.read(
+                    raw.get("renderTime", 0), telemetry_timestamp)
+                self._camera_diagnostic(camera_snapshot)
+                camera_matrix = (list(camera_snapshot.get(
+                    "view_projection", ()))
+                    if camera_snapshot.get("valid", False) else [])
                 self.shared_state.set(
                     "game_in_truck", bool(raw.get("sdkActive", bool(truck))))
                 self._autostart_truck(truck)
@@ -680,7 +776,24 @@ class UltraPilotEngine:
                 self.shared_state.update_batch({
                     "telemetry": self.telemetry.data,
                     "telemetry_valid": bool(truck.get("pose_valid", False)),
-                    "telemetry_timestamp": time.monotonic(),
+                    "telemetry_timestamp": telemetry_timestamp,
+                    # Camera snapshot + matrix compatibility output are
+                    # published in the same Manager update as telemetry.
+                    "camera_snapshot": camera_snapshot,
+                    "game_camera_view_projection": camera_matrix,
+                    "game_camera_view_projection_meta": {
+                        "revision": camera_snapshot.get("revision", 0),
+                        "valid": bool(camera_snapshot.get("valid", False)),
+                        "failure_reason": camera_snapshot.get(
+                            "failure_reason", ""),
+                        "layout": camera_snapshot.get("matrix_layout"),
+                        "handedness": camera_snapshot.get("handedness"),
+                        "clip_space": camera_snapshot.get("clip_space"),
+                        "timestamp": camera_snapshot.get("timestamp", 0.0),
+                        "telemetry_timestamp": telemetry_timestamp,
+                        "render_time_us": camera_snapshot.get(
+                            "render_time_us", 0),
+                    },
                     "speed": truck.get("speed", 0),
                     # World pose for coordinate-based navigation (map plugin).
                     "truck_world_pos": (truck.get("x", 0.0), truck.get("z", 0.0)),
@@ -736,8 +849,24 @@ class UltraPilotEngine:
                 except Exception:
                     pass
             else:
-                self.shared_state.set("game_in_truck", False)
-                self.shared_state.set("telemetry_valid", False)
+                telemetry_timestamp = time.monotonic()
+                camera_snapshot = self.camera_snapshot_producer.read(
+                    0, telemetry_timestamp)
+                self._camera_diagnostic(camera_snapshot)
+                self.shared_state.update_batch({
+                    "game_in_truck": False,
+                    "telemetry_valid": False,
+                    "telemetry_timestamp": telemetry_timestamp,
+                    "camera_snapshot": camera_snapshot,
+                    "game_camera_view_projection": [],
+                    "game_camera_view_projection_meta": {
+                        "revision": camera_snapshot.get("revision", 0),
+                        "valid": False,
+                        "failure_reason": camera_snapshot.get(
+                            "failure_reason", "telemetry is unavailable"),
+                        "timestamp": telemetry_timestamp,
+                    },
+                })
 
             # A transient error in any one frame must NOT kill the engine — log
             # it and keep looping (self-healing). The bootloader also restarts
@@ -772,6 +901,17 @@ class UltraPilotEngine:
                 # 4. Core modules + plugin supervision
                 self.module_manager.update_all(delta_time)
                 self.plugin_manager.tick(delta_time)
+
+                # One rate-limited, atomic readiness report for the manual
+                # preflight. This is diagnostic only and never creates a
+                # fallback route or changes controller tuning.
+                preflight_now = time.monotonic()
+                if preflight_now - self._last_runtime_preflight >= 1.0:
+                    self._last_runtime_preflight = preflight_now
+                    self.shared_state.set(
+                        "navigation_runtime_preflight",
+                        build_runtime_preflight(self.shared_state,
+                                                preflight_now))
 
                 # 5. Apply control intents to the device (safety-gated)
                 self._flush_controls()
