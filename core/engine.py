@@ -612,6 +612,17 @@ class UltraPilotEngine:
                 except (TypeError, ValueError):
                     route_distance = 0.0
                 prev_distance = self._last_game_route_distance
+                # Keep an explicit arrival phase.  routeDistance is the only
+                # authoritative indication that the in-game GPS destination
+                # is close; the lane snapshot can be only a local corridor.
+                # The autopilot consumes this flag to brake, stop, and then
+                # disengage instead of driving beyond the destination.
+                arrival_pending = bool(
+                    0.0 < route_distance <= 35.0
+                    or (prev_distance is not None and 0.0 < prev_distance <= 35.0
+                        and route_distance <= prev_distance + 5.0))
+                if route_distance > 60.0:
+                    arrival_pending = False
                 destination_changed = bool(
                     dest_city and dest_city != self._last_game_destination)
                 route_changed = bool(
@@ -811,6 +822,7 @@ class UltraPilotEngine:
                     # Destination city of the current job (for the gantry sign).
                     "dest_city": dest_city,
                     "game_route_distance": route_distance,
+                    "navigation_arrival_pending": arrival_pending,
                     "game_route_time": float(truck.get("routeTime", 0.0) or 0.0),
                 })
 

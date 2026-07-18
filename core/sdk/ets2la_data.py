@@ -121,6 +121,7 @@ class ETS2LAData:
             out.append({
                 "x": px, "y": py, "z": pz, "yaw": _yaw(rx, ry, rz, rw),
                 "length": length or 4.5, "width": width or 2.0,
+                "height": height or 1.7,
                 "speed": speed, "type": _veh_type(length or 4.5), "id": vid,
             })
         # The companion buffer contains stationary/parked traffic. Without it,
@@ -141,6 +142,7 @@ class ETS2LAData:
                     out.append({
                         "x": px, "y": py, "z": pz, "yaw": _yaw(q0, q1, q2, q3),
                         "length": length or 4.5, "width": width or 2.0,
+                        "height": height or 1.7,
                         "speed": 0.0, "type": _veh_type(length or 4.5),
                         "id": vid, "parked": True,
                     })

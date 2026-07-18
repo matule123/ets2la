@@ -162,6 +162,10 @@ class Plugin(BasePlugin):
         truck = self.sdk.telemetry.get("truck", {}) or {}
         speed = truck.get("speed", 0) or 0
         speed_kmh = abs(speed) * 3.6 if abs(speed) < 200 else abs(speed)
+        try:
+            gear = int(truck.get("gear", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            gear = 0
         self._speed_kmh = 0.6 * speed_kmh + 0.4 * self._speed_kmh
         system_state = self.sdk.shared_state.get("system_state")
         danger_level = self.sdk.shared_state.get("danger_level", 0) or 0
@@ -197,6 +201,52 @@ class Plugin(BasePlugin):
         navigation_unreliable = bool(
             self.sdk.shared_state.get("navigation_unreliable", False)
             or (gps_navigation_present and not lane_authority_safe))
+
+        # Never feed throttle to a reversing truck.  In ETS2's automatic
+        # gearbox a brake held after stopping can select reverse; the old
+        # controller then applied cruise throttle on the next tick.  Disengage
+        # immediately and return all automatic commands to a safe neutral.
+        autopilot_engaged = bool(self.sdk.shared_state.get(
+            "autopilot_active", False))
+        reversing = bool(autopilot_engaged
+                         and (float(speed) < -0.10 or gear < 0))
+        if reversing:
+            self.sdk.controller.set_throttle(0.0)
+            self.sdk.controller.set_steering(0.0)
+            self._last_throttle = 0.0
+            self._last_steering = 0.0
+            self._set_brake(0.45, dt)
+            self.sdk.shared_state.set("autopilot_active", False)
+            self.sdk.shared_state.set("nav_active", False)
+            self.sdk.shared_state.set(
+                "navigation_status", "Autopilot vypnutý – vozidlo cúva")
+            logging.warning("Autopilot disengaged: reverse motion/gear detected (gear=%s).",
+                            gear)
+            return
+
+        arrival_pending = bool(self.sdk.shared_state.get(
+            "navigation_arrival_pending", False))
+        if arrival_pending and autopilot_engaged:
+            self.sdk.controller.set_throttle(0.0)
+            self._last_throttle = 0.0
+            self._last_steering = self._ramp_steering(0.0, dt)
+            self.sdk.controller.set_steering(self._last_steering)
+            if speed_kmh > 1.0:
+                self._set_brake(0.72, dt)
+                self.sdk.shared_state.set(
+                    "navigation_status", "Prichádzam do cieľa – zastavujem")
+            else:
+                # Release before disengaging so an automatic gearbox cannot
+                # interpret a held brake as a request to reverse.
+                self.sdk.controller.set_brake(0.0)
+                self._last_brake = 0.0
+                self.sdk.shared_state.set("autopilot_active", False)
+                self.sdk.shared_state.set("nav_active", False)
+                self.sdk.shared_state.set("navigation_arrival_pending", False)
+                self.sdk.shared_state.set("navigation_status", "Cieľ dosiahnutý")
+                self.sdk.shared_state.set("tts_message", "Cieľ dosiahnutý.")
+                logging.info("Navigation: destination reached; vehicle stopped and autopilot disengaged.")
+            return
 
         # 2. Safety states — these still brake hard, but through the ramp so
         #    the truck doesn't lock up and spin.

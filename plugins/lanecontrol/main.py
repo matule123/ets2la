@@ -180,7 +180,17 @@ class Plugin(BasePlugin):
         px, pz = pos
         sin_h, cos_h = math.sin(heading), math.cos(heading)
         far_lat = None
-        for wx, wz in path:
+        for point in path:
+            # Legacy recorded routes contain (x, z), while the authoritative
+            # lane trajectory contains full (x, y, z) world points.  Treating
+            # the latter as a pair crashed the whole plugin with
+            # "too many values to unpack (expected 2)".
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                continue
+            if len(point) >= 3:
+                wx, wz = point[0], point[2]
+            else:
+                wx, wz = point[0], point[1]
             dx, dz = wx - px, wz - pz
             ahead = dx * (-sin_h) + dz * (-cos_h)
             if 20.0 < ahead < RAMP_LOOKAHEAD:

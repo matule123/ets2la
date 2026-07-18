@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import QApplication, QWidget
 from core.camera import project_world_point, project_world_points
 
 
-def _perspective_route_widths(depth_m):
+def _perspective_route_widths(depth_m, camera_snapshot=None):
     """Return halo/core pixel widths for a road-bound perspective trace.
 
     A constant screen-space pen stays equally thick at the horizon and reads
@@ -28,8 +28,71 @@ def _perspective_route_widths(depth_m):
         depth = max(0.1, float(depth_m))
     except (TypeError, ValueError, OverflowError):
         depth = 1000.0
-    scale = max(0.16, min(1.0, 12.0 / depth))
-    return 4.0 + 24.0 * scale, 2.0 + 11.0 * scale
+    snapshot = camera_snapshot or {}
+    try:
+        viewport_width = float((snapshot.get("viewport") or {})["width"])
+        hfov = math.radians(float(snapshot["fov_horizontal_deg"]))
+        focal_px = viewport_width / (2.0 * math.tan(hfov * 0.5))
+        # A normal ETS2 lane is about 3.5 m wide.  The blue core is a 1.75 m
+        # road-bound ribbon: exactly half a lane in world scale.  Clamp only
+        # the extreme near/horizon cases so it remains legible and stable.
+        core = max(7.0, min(150.0, focal_px * 1.75 / depth))
+        return core + max(5.0, core * 0.16), core
+    except (KeyError, TypeError, ValueError, OverflowError, ZeroDivisionError):
+        scale = max(0.16, min(1.0, 12.0 / depth))
+        return 7.0 + 36.0 * scale, 4.0 + 25.0 * scale
+
+
+def _traffic_occluders(camera_snapshot, traffic, telemetry_timestamp=0.0):
+    """Return screen rectangles occupied by nearer game vehicles.
+
+    Qt overlays cannot read the game's depth buffer.  We reconstruct a
+    conservative depth mask from the authoritative ETS2LA traffic cuboids so
+    the route is not painted through cars and trucks.
+    """
+    occluders = []
+    for vehicle in traffic or ():
+        try:
+            x, y, z = (float(vehicle[key]) for key in ("x", "y", "z"))
+            width = max(0.8, float(vehicle.get("width", 2.0) or 2.0))
+            height = max(1.0, float(vehicle.get("height", 1.7) or 1.7))
+            length = max(1.5, float(vehicle.get("length", 4.5) or 4.5))
+            yaw = float(vehicle.get("yaw", 0.0) or 0.0)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        forward = (-math.sin(yaw), -math.cos(yaw))
+        right = (math.cos(yaw), -math.sin(yaw))
+        corners = []
+        for longitudinal in (-length * 0.5, length * 0.5):
+            for lateral in (-width * 0.5, width * 0.5):
+                wx = x + forward[0] * longitudinal + right[0] * lateral
+                wz = z + forward[1] * longitudinal + right[1] * lateral
+                for wy in (y, y + height):
+                    corners.append((wx, wy, wz))
+        projected, reason = project_world_points(
+            camera_snapshot, corners,
+            telemetry_timestamp=float(telemetry_timestamp or 0.0))
+        visible = [point for point in projected if point is not None]
+        if reason or len(visible) < 2:
+            continue
+        xs, ys = [p[0] for p in visible], [p[1] for p in visible]
+        left, right_px = min(xs) - 3.0, max(xs) + 3.0
+        top, bottom = min(ys) - 3.0, max(ys) + 3.0
+        if right_px - left < 3.0 or bottom - top < 3.0:
+            continue
+        occluders.append((left, top, right_px, bottom,
+                          min(float(p[2]) for p in visible)))
+    return occluders
+
+
+def _segment_is_occluded(first, second, depth, occluders):
+    midpoint_x = (first.x() + second.x()) * 0.5
+    midpoint_y = (first.y() + second.y()) * 0.5
+    for left, top, right, bottom, vehicle_depth in occluders:
+        if (left <= midpoint_x <= right and top <= midpoint_y <= bottom
+                and depth > vehicle_depth + 0.25):
+            return True
+    return False
 
 
 class AROverlay(QWidget):
@@ -161,10 +224,16 @@ class AROverlay(QWidget):
             for first, second in zip(strip, strip[1:]):
                 depth = (first[1] + second[1]) * 0.5
                 segments.append((depth, first[0], second[0]))
+        occluders = _traffic_occluders(
+            camera_snapshot, self.state.get("traffic", []) or [],
+            telemetry_timestamp)
         segments.sort(key=lambda item: item[0], reverse=True)
         for halo in (True, False):
             for depth, first, second in segments:
-                halo_width, core_width = _perspective_route_widths(depth)
+                if _segment_is_occluded(first, second, depth, occluders):
+                    continue
+                halo_width, core_width = _perspective_route_widths(
+                    depth, camera_snapshot)
                 painter.setPen(QPen(
                     QColor(45, 142, 255, 95 if halo else 240),
                     halo_width if halo else core_width,
