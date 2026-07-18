@@ -56,6 +56,27 @@ def autopilot_state(confidence, *, valid=True, heartbeat=None,
 
 
 class LaneGeometryAuditTests(unittest.TestCase):
+    def test_runtime_path_rejects_parallel_first_lane_offset(self):
+        m = SyntheticMap()
+        m.node(1, 0, 0); m.node(2, 0, 40)
+        m.node(10, 12, 0); m.node(11, 12, 40)
+        active_index = m.road(1, 2, 1)
+        m.road(10, 11, 1)
+        active = next(lane for lane in m.net._build_lane_segments(active_index)
+                      if lane.direction == 1)
+        m.net._lane_id_index[active.lane_id] = active
+        match = LaneMatch(active.lane_id, active.centerline[1], 0, 1,
+                          0.0, 0.0, 0.0, 0.0, 1.0, "test")
+
+        # Force a valid GPS corridor on the nearby but disconnected road.  It
+        # must be rejected rather than drawing a lateral jump to that road.
+        path, returned = m.net.build_lane_path(
+            (10, 11), (active.centerline[1].x, active.centerline[1].z),
+            active.centerline[1].heading, start_match=match)
+        self.assertIs(returned, match)
+        self.assertFalse(path.valid)
+        self.assertIn("does not connect", path.failure_reason)
+
     def test_lanes_right_is_physically_right_under_ets2_heading_convention(self):
         m = SyntheticMap()
         m.node(1, 0, 0); m.node(2, 0, 40)

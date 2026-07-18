@@ -1278,13 +1278,21 @@ class RoadNetwork:
         # this real lane segment before the first corridor edge so HUD, AR and
         # steering start at the truck instead of 10+ metres across the prefab.
         active = self._lane_id_index.get(match.lane_id) if match else None
-        if (active is not None and segments
-                and active.lane_id != segments[0].lane_id
-                and active.end_uid == segments[0].start_uid):
-            connection = self._lane_connection(active, segments[0])
-            if connection is not None:
-                active = replace(active, successors=(connection,))
-                segments = (active,) + tuple(segments)
+        if active is not None and segments and active.lane_id != segments[0].lane_id:
+            connection = (self._lane_connection(active, segments[0])
+                          if active.end_uid == segments[0].start_uid else None)
+            if connection is None:
+                # The GPS buffer may start at the next anchor, but it may not
+                # start on an unrelated parallel arm.  Previously that arm was
+                # accepted and the route visibly jumped sideways on a straight
+                # road before eventually joining the correct corridor.
+                return LanePath(
+                    tuple(segments), (), corridor.gps_uids, valid=False,
+                    failure_reason=(
+                        "current truck lane does not connect to the first GPS "
+                        f"lane ({active.lane_id} -> {segments[0].lane_id})")), match
+            active = replace(active, successors=(connection,))
+            segments = (active,) + tuple(segments)
 
         # Trim the actual first LaneSegment as well as the flattened LanePath.
         # build_lane_trajectory() deliberately rebuilds its control geometry
@@ -1307,17 +1315,43 @@ class RoadNetwork:
         if not path.valid or match is None or len(path.points) < 2:
             return path, match
 
-        # The native GPS buffer can begin at the entrance of a prefab while
-        # the truck is already part-way through it. Publishing those points
-        # behind the camera made AR draw a giant line across the whole screen.
-        # Trim only to the nearest confirmed point and rebuild arc distance;
-        # never translate or laterally offset the authoritative geometry.
+        # A valid topology is still not enough for runtime steering: the
+        # published polyline must begin at the lane actually occupied by the
+        # truck and must point in the same direction.  Fail closed instead of
+        # publishing a sideways connector or an opposing carriageway.
         nearest = min(range(len(path.points)), key=lambda index: math.dist(
             (path.points[index].x, path.points[index].y, path.points[index].z),
             (match.point.x, match.point.y, match.point.z)))
         nearest_distance = math.dist(
             (path.points[nearest].x, path.points[nearest].y, path.points[nearest].z),
             (match.point.x, match.point.y, match.point.z))
+        if nearest_distance > 3.0:
+            return replace(
+                path, valid=False,
+                failure_reason=(
+                    f"first GPS lane is offset {nearest_distance:.1f} m from "
+                    "the confirmed truck lane")), match
+        probe = min(len(path.points) - 1, nearest + 2)
+        if probe > nearest:
+            dx = path.points[probe].x - path.points[nearest].x
+            dz = path.points[probe].z - path.points[nearest].z
+            if math.hypot(dx, dz) > 0.5:
+                path_heading = math.atan2(-dx, -dz)
+                heading_error = abs((path_heading - match.point.heading + math.pi)
+                                    % (2.0 * math.pi) - math.pi)
+                if heading_error > math.radians(35.0):
+                    return replace(
+                        path, valid=False,
+                        failure_reason=(
+                            "first GPS lane points away from the confirmed "
+                            f"truck lane by {math.degrees(heading_error):.1f} "
+                            "degrees")), match
+
+        # The native GPS buffer can begin at the entrance of a prefab while
+        # the truck is already part-way through it. Publishing those points
+        # behind the camera made AR draw a giant line across the whole screen.
+        # Trim only to the nearest confirmed point and rebuild arc distance;
+        # never translate or laterally offset the authoritative geometry.
         if nearest > 0 and nearest_distance <= 8.0:
             source = path.points[nearest:]
             rebuilt, distance = [], 0.0
