@@ -26,13 +26,14 @@ except Exception:  # pragma: no cover
 
 from core.paths import app_dir, resource
 
-# The two SDK DLLs every supported game version needs.
-SDK_FILES = ("scs-telemetry.dll", "scs_sdk_controller.dll")
+# All SDK DLLs required for telemetry, controls, GPS route and camera data.
+SDK_FILES = ("scs-telemetry.dll", "scs_sdk_controller.dll", "ets2la_plugin.dll")
 
 # Per-version sources.  ``bundled`` means the DLL is shipped in ``assets/`` and
 # is used directly (no network).  ``urls`` (optional) would let us download a
 # build for a version we don't bundle — left as a hook for the future.
 SOURCES = {
+    "1.60": {"bundled": True, "alias": "1.59"},
     "1.59": {
         "bundled": True,        # present in assets/scs-telemetry.dll etc.
         "urls": {},             # could be filled later with release URLs
@@ -68,7 +69,8 @@ def _resolve(version: str) -> dict:
 
 
 def is_supported(version: str) -> bool:
-    return bool(version and version in SOURCES)
+    version = str(version or "").strip()
+    return ".".join(version.split(".")[:2]) in SOURCES
 
 
 def _dll_source_dir() -> str:
@@ -159,6 +161,7 @@ def ensure_installed(game_path: str, version: str, log=None, progress_cb=None,
 
     if not is_supported(version):
         return False, "unsupported:" + str(version)
+    version = ".".join(str(version).strip().split(".")[:2])
 
     # Stage DLLs into the game's plugins folder.
     plugins_dir = os.path.join(game_path, "bin", "win_x64", "plugins")
@@ -198,7 +201,7 @@ def uninstall(game_path: str) -> tuple:
         return False, "failed:no_game_path"
     plugins_dir = os.path.join(game_path, "bin", "win_x64", "plugins")
     try:
-        for name in SDK_FILES + ("ets2la_plugin.dll",):
+        for name in SDK_FILES:
             path = os.path.join(plugins_dir, name)
             if os.path.exists(path):
                 os.remove(path)

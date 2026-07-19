@@ -399,7 +399,14 @@ class MapPage(QWidget):
         sel_idx = 0
         for i, d in enumerate(datasets):
             mark = "✓ " if d["downloaded"] else ""
-            self.map_combo.addItem(f"{mark}{d['key']}  ({d['game']} {d['version']})", d["key"])
+            game_version = d.get("game_version") or d["version"]
+            if d.get("mod"):
+                detail = f"{d['mod']} {d.get('mod_version') or d['version']} · {d['game']} {game_version}"
+            else:
+                detail = f"{d['game']} {game_version}"
+                if d.get("content"):
+                    detail += f" · {d['content']}"
+            self.map_combo.addItem(f"{mark}{d['key']}  ({detail})", d["key"])
             if d["key"] == wanted:
                 sel_idx = i
         if datasets:

@@ -31,6 +31,26 @@ from core.paths import app_dir
 INDEX_URL = "https://gitlab.com/ETS2LA/data/-/raw/main/index.yaml"
 _BASE = INDEX_URL.rsplit("/", 1)[0]  # .../raw/main
 
+# Compatibility entries are kept locally because the public ETS2LA index can
+# lag behind a game/ProMods release. They describe the expected package layout,
+# but download() still verifies the remote archive; 1.59 is never silently used
+# for a 1.60 game.
+COMPATIBILITY_DATASETS = {
+    "ets2-1.60": {
+        "game": "ETS2", "version": "1.60", "game_version": "1.60",
+        "content": "Base game + official map DLC",
+        "path": "/1.60/ets2/data.zip", "config": "/1.60/ets2/config.json",
+    },
+    "promods-2.83": {
+        "game": "ETS2", "version": "1.60", "game_version": "1.60",
+        "mod": "ProMods", "mod_version": "2.83",
+        "path": "/1.60/ets2/promods/data.zip",
+        "config": "/1.60/ets2/promods/config.json",
+        "path_candidates": ("/2.83/ets2/promods/data.zip",),
+        "config_candidates": ("/2.83/ets2/promods/config.json",),
+    },
+}
+
 
 def cache_dir() -> str:
     d = os.path.join(app_dir(), "map-cache")
@@ -70,10 +90,18 @@ def get_index(force: bool = False) -> dict:
         r = requests.get(INDEX_URL, timeout=20)
         if r.status_code == 200:
             _index_cache = yaml.safe_load(r.text) or {}
+            for key, entry in COMPATIBILITY_DATASETS.items():
+                _index_cache.setdefault(key, dict(entry))
             return _index_cache
     except Exception as e:
         logging.error("map_data: failed to fetch index: %s", e)
-    return {}
+    # Keep the known compatibility choices visible while offline. Downloading
+    # still performs a real HTTP check, so these entries cannot masquerade as
+    # locally available data.
+    _index_cache = {
+        key: dict(entry) for key, entry in COMPATIBILITY_DATASETS.items()
+    }
+    return _index_cache
 
 
 def list_datasets() -> list:
@@ -85,6 +113,10 @@ def list_datasets() -> list:
             "key": key,
             "game": v.get("game", "?"),
             "version": v.get("version", "?"),
+            "game_version": v.get("game_version", v.get("version", "?")),
+            "mod": v.get("mod"),
+            "mod_version": v.get("mod_version"),
+            "content": v.get("content"),
             "downloaded": is_downloaded(key),
         })
     out.sort(key=lambda d: (str(d["game"]), str(d["version"])), reverse=True)
@@ -101,7 +133,10 @@ def suggest_key(game_version: str = None, prefer_promods: bool = False) -> str:
         vt = game_version.strip()
         variant = "promods" if prefer_promods else "ets2"
         for k in keys:
-            if k.startswith(variant) and vt in k:
+            entry = idx.get(k, {}) or {}
+            compatible = str(entry.get("game_version",
+                              entry.get("version", ""))).strip() == vt
+            if k.startswith(variant) and (vt in k or compatible):
                 return k
         for k in keys:  # any variant matching the version
             if vt in k:
@@ -128,7 +163,6 @@ def download(key: str, progress_cb=None) -> bool:
         return False
 
     entry = idx[key]
-    url = _BASE + entry["path"]
     out_dir = dataset_dir(key)
     zip_path = out_dir + ".zip"
     os.makedirs(cache_dir(), exist_ok=True)
@@ -159,9 +193,19 @@ def download(key: str, progress_cb=None) -> bool:
 
     try:
         report(0.0, f"Pripájam sa k serveru… ({key})")
-        r = requests.get(url, stream=True, timeout=30)
-        if r.status_code != 200:
-            logging.error("map_data: download HTTP %s for %s", r.status_code, key)
+        archive_paths = (entry["path"],) + tuple(entry.get("path_candidates", ()))
+        r, attempted = None, []
+        for archive_path in archive_paths:
+            url = _BASE + archive_path
+            attempted.append(url)
+            candidate = requests.get(url, stream=True, timeout=30)
+            if candidate.status_code == 200:
+                r = candidate
+                break
+            candidate.close()
+        if r is None:
+            logging.error("map_data: no published package for %s; tried %s",
+                          key, ", ".join(attempted))
             return False
         total = int(r.headers.get("content-length", 0)) or 1
         report(0.03, f"Spojenie nadviazané · sťahujem archív {total/1e6:.0f} MB")
@@ -206,10 +250,22 @@ def download(key: str, progress_cb=None) -> bool:
         # Save the config alongside for reference.
         report(0.95, "Sťahujem a kontrolujem konfiguráciu mapy…")
         try:
-            cfg = requests.get(_BASE + entry["config"], timeout=20)
-            if cfg.status_code == 200 and yaml is not None:
-                with open(os.path.join(out_dir, "config.json"), "w") as f:
-                    json.dump(yaml.safe_load(cfg.text), f, indent=2)
+            config_paths = ((entry.get("config"),)
+                            + tuple(entry.get("config_candidates", ())))
+            for config_path in filter(None, config_paths):
+                cfg = requests.get(_BASE + config_path, timeout=20)
+                if cfg.status_code == 200 and yaml is not None:
+                    with open(os.path.join(out_dir, "config.json"), "w") as f:
+                        config = yaml.safe_load(cfg.text) or {}
+                        config.update({
+                            "dataset_key": key,
+                            "game_version": entry.get("game_version",
+                                                      entry.get("version")),
+                            "mod": entry.get("mod"),
+                            "mod_version": entry.get("mod_version"),
+                        })
+                        json.dump(config, f, indent=2)
+                    break
         except Exception:
             pass
 

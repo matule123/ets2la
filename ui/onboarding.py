@@ -892,7 +892,12 @@ class OnboardingWizard(QWidget):
         except Exception:
             pass
         base = cfg_name or d["key"]
-        ver = _("map_for_game", game=d["game"], ver=d["version"])
+        game_version = d.get("game_version") or d["version"]
+        ver = _("map_for_game", game=d["game"], ver=game_version)
+        if d.get("mod"):
+            base += f" · {d['mod']} {d.get('mod_version') or d['version']}"
+        elif d.get("content"):
+            base += f" · {d['content']}"
         return base + "  ·  " + ver
 
     def _refresh_map_card(self, card, d, status_lbl, btn):
