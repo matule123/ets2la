@@ -1301,20 +1301,31 @@ class RoadNetwork:
         # steering start at the truck instead of 10+ metres across the prefab.
         active = self._lane_id_index.get(match.lane_id) if match else None
         if active is not None and segments and active.lane_id != segments[0].lane_id:
-            connection = (self._lane_connection(active, segments[0])
-                          if active.end_uid == segments[0].start_uid else None)
-            if connection is None:
-                # The GPS buffer may start at the next anchor, but it may not
-                # start on an unrelated parallel arm.  Previously that arm was
-                # accepted and the route visibly jumped sideways on a straight
-                # road before eventually joining the correct corridor.
-                return LanePath(
-                    tuple(segments), (), corridor.gps_uids, valid=False,
-                    failure_reason=(
-                        "current truck lane does not connect to the first GPS "
-                        f"lane ({active.lane_id} -> {segments[0].lane_id})")), match
-            active = replace(active, successors=(connection,))
-            segments = (active,) + tuple(segments)
+            active_index = next(
+                (index for index, segment in enumerate(segments)
+                 if segment.lane_id == active.lane_id), None)
+            if active_index is not None:
+                # The SCS GPS list is a rolling look-ahead and can retain one
+                # or more anchors already passed by the truck.  Once the
+                # locator confirms a later lane from that exact authoritative
+                # sequence, discard only the passed prefix.  Prepending the
+                # later lane before edge zero reverses the proven topology and
+                # caused navigation to fail a few metres after setting off.
+                segments = tuple(segments[active_index:])
+                active = segments[0]
+            else:
+                connection = (self._lane_connection(active, segments[0])
+                              if active.end_uid == segments[0].start_uid else None)
+                if connection is None:
+                    # The GPS buffer may start at the next anchor, but it may
+                    # not start on an unrelated parallel arm.
+                    return LanePath(
+                        tuple(segments), (), corridor.gps_uids, valid=False,
+                        failure_reason=(
+                            "current truck lane does not connect to the first GPS "
+                            f"lane ({active.lane_id} -> {segments[0].lane_id})")), match
+                active = replace(active, successors=(connection,))
+                segments = (active,) + tuple(segments)
 
         # Trim the actual first LaneSegment as well as the flattened LanePath.
         # build_lane_trajectory() deliberately rebuilds its control geometry
