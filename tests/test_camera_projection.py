@@ -9,7 +9,9 @@ import zipfile
 from pathlib import Path
 from unittest import mock
 
-from core.ar_overlay import AROverlay
+from core.ar_overlay import (
+    AR_MAX_ROAD_DEPTH_M, AROverlay, _first_visible_road_strip,
+)
 from core.camera import (
     CAMERA_MAPPING, CameraSnapshotProducer, camera_snapshot_reason,
     project_world_point, quaternion_to_euler,
@@ -48,6 +50,19 @@ def snapshot(raw=None, view=None, now=None, render_time=1_000_000):
 
 
 class CameraSnapshotTests(unittest.TestCase):
+    def test_ar_stops_at_first_non_visible_road_gap_and_distance_limit(self):
+        projected = [
+            (100.0, 500.0, 4.0),       # cab-hidden
+            (110.0, 480.0, 12.0),
+            (120.0, 450.0, 30.0),
+            (130.0, 430.0, AR_MAX_ROAD_DEPTH_M + 1.0),
+            (140.0, 420.0, 50.0),      # must not reappear after the gap
+        ]
+        strip = _first_visible_road_strip(
+            projected, {"width": 1920, "height": 1080})
+        self.assertEqual(len(strip), 2)
+        self.assertEqual([point[1] for point in strip], [12.0, 30.0])
+
     def test_zip_updater_transfers_new_modules_and_preserves_user_data(self):
         archive = io.BytesIO()
         with zipfile.ZipFile(archive, "w") as bundle:

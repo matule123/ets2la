@@ -16,6 +16,49 @@ from PyQt6.QtWidgets import QApplication, QWidget
 from core.camera import project_world_point, project_world_points
 
 
+AR_MIN_ROAD_DEPTH_M = 8.0
+AR_MAX_ROAD_DEPTH_M = 140.0
+AR_TOP_VISIBILITY_FRACTION = 0.06
+
+
+def _first_visible_road_strip(projected_values, viewport):
+    """Keep only the first continuous, conservatively visible road trace.
+
+    The overlay cannot access ETS2's depth buffer.  It must therefore never
+    let a far route reappear after leaving the camera frustum (for example
+    behind a crest, building or interchange).  Points are not moved or
+    densified: this function only hides samples outside the road visibility
+    envelope and stops at its first gap.
+    """
+    try:
+        height = float((viewport or {})["height"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return []
+    top = height * AR_TOP_VISIBILITY_FRACTION
+    current = []
+    started = False
+    for point in projected_values:
+        valid = False
+        if point is not None:
+            try:
+                x, y, depth = map(float, point[:3])
+                valid = (math.isfinite(x) and math.isfinite(y)
+                         and math.isfinite(depth)
+                         and AR_MIN_ROAD_DEPTH_M <= depth
+                         <= AR_MAX_ROAD_DEPTH_M
+                         and top <= y <= height)
+            except (TypeError, ValueError, IndexError, OverflowError):
+                valid = False
+        if not valid:
+            if started:
+                break
+            current = []
+            continue
+        started = True
+        current.append((QPointF(x, y), depth))
+    return current if len(current) >= 2 else []
+
+
 def _perspective_route_widths(depth_m, camera_snapshot=None):
     """Return halo/core pixel widths for a road-bound perspective trace.
 
@@ -179,23 +222,12 @@ class AROverlay(QWidget):
             self._publish_status(False, camera_reason, current_revision)
             return
 
-        # The overlay has no access to the game's depth buffer.  Suppress the
-        # first metres that are physically hidden by the cab/dashboard rather
-        # than painting the road trace over the interior.
-        projected = [None if point is None or float(point[2]) < 8.0 else
-                     (QPointF(point[0], point[1]), float(point[2]))
-                     for point in projected_values]
-        strips, current = [], []
-        for point in projected:
-            if point is None:
-                if len(current) >= 2:
-                    strips.append(current)
-                current = []
-            else:
-                current.append(point)
-        if len(current) >= 2:
-            strips.append(current)
-        if not strips:
+        # Qt has no access to the game's depth buffer. Suppress the cab-hidden
+        # start, cap the conservative road-visible distance and never render a
+        # later strip after the route first leaves that envelope.
+        strip = _first_visible_road_strip(
+            projected_values, camera_snapshot.get("viewport") or {})
+        if not strip:
             self.state.set("ar_lane_revision", -1)
             self._publish_status(False, "all trajectory points are outside the camera frustum",
                                  current_revision)
@@ -209,10 +241,9 @@ class AROverlay(QWidget):
         # scaling makes the trace lie visually on the road while round caps
         # keep adjacent samples continuous.
         segments = []
-        for strip in strips:
-            for first, second in zip(strip, strip[1:]):
-                depth = (first[1] + second[1]) * 0.5
-                segments.append((depth, first[0], second[0]))
+        for first, second in zip(strip, strip[1:]):
+            depth = (first[1] + second[1]) * 0.5
+            segments.append((depth, first[0], second[0]))
         occluders = _traffic_occluders(
             camera_snapshot, self.state.get("traffic", []) or [],
             telemetry_timestamp)

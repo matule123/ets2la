@@ -11,6 +11,12 @@ from core.paths import app_dir
 # routes/ lives next to the app (works both from source and when frozen).
 ROUTES_DIR = os.path.join(app_dir(), "routes")
 
+# Controller/HUD/AR need a safe rolling horizon, not 50 000 control samples
+# for an entire 100 km trip. The complete native GPS UID tuple remains the
+# authoritative target signature; only live forward geometry is bounded.
+RUNTIME_ROUTE_HORIZON_M = 8_000.0
+RUNTIME_ROUTE_MAX_UIDS = 768
+
 
 class Plugin(BasePlugin):
     """
@@ -90,6 +96,29 @@ class Plugin(BasePlugin):
             return tuple(_uid(uid) for uid in (raw_uids or ()) if _uid(uid))
         except Exception:
             return ()
+
+    def _runtime_gps_window(self, uids):
+        """Return an ordered, bounded prefix for live control geometry.
+
+        Missing nodes are retained so the lane builder reports the precise
+        topology error instead of silently skipping an authoritative GPS UID.
+        """
+        uids = tuple(uids or ())
+        if len(uids) <= 2 or self.road_net is None:
+            return uids
+        selected = [uids[0]]
+        distance = 0.0
+        for start_uid, end_uid in zip(uids, uids[1:]):
+            selected.append(end_uid)
+            start = self.road_net.nodes.get(start_uid)
+            end = self.road_net.nodes.get(end_uid)
+            if start is None or end is None:
+                break
+            distance += math.hypot(end[0] - start[0], end[1] - start[1])
+            if (distance >= RUNTIME_ROUTE_HORIZON_M
+                    or len(selected) >= RUNTIME_ROUTE_MAX_UIDS):
+                break
+        return tuple(selected)
 
     def _build_is_current(self, uids, revision, request_id=None):
         return bool(
@@ -172,6 +201,7 @@ class Plugin(BasePlugin):
             self.sdk.set("navigation_status", "Načítavam GPS trasu")
             return None
 
+        build_uids = self._runtime_gps_window(uids)
         current = self.sdk.get("lane_trajectory", {}) or {}
         build_revision = int(self.sdk.get(
             "lane_trajectory_revision", -1) or -1)
@@ -188,7 +218,7 @@ class Plugin(BasePlugin):
         if locator is None:
             from core.navigation.lane_model import LaneLocator
             locator = self.road_net._runtime_lane_locator = LaneLocator(self.road_net)
-        match = locator.locate((pos[0], altitude, pos[1]), heading, uids,
+        match = locator.locate((pos[0], altitude, pos[1]), heading, build_uids,
                                self._lane_match)
         if not self._build_is_current(uids, build_revision, build_request):
             return None
@@ -222,7 +252,7 @@ class Plugin(BasePlugin):
 
         self.sdk.set("navigation_status", "Vyberám jazdné pruhy")
         lane_path, _ = self.road_net.build_lane_path(
-            uids, pos, heading, altitude=altitude, start_match=match)
+            build_uids, pos, heading, altitude=altitude, start_match=match)
         if not self._build_is_current(uids, build_revision, build_request):
             return None
         if not lane_path.valid:
@@ -277,6 +307,8 @@ class Plugin(BasePlugin):
             "points": control_points, "display_points": display_points,
             "distance_m": float(trajectory.distance_m), "failure_reason": "",
             "source_gps_uids": [int(uid) for uid in uids],
+            "covered_gps_uids": [int(uid) for uid in build_uids],
+            "route_horizon_complete": len(build_uids) == len(uids),
             "request_id": build_request,
         }
         # One shared-state assignment publishes one coherent geometry revision.

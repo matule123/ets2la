@@ -9,7 +9,10 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from core.ar_overlay import _perspective_route_widths, _segment_is_occluded
-from core.hud import HUD_CAMERA_BACK_M, HUD_EGO_AHEAD_M, UltraPilotHUD
+from core.hud import (
+    HUD_CAMERA_BACK_M, HUD_EGO_AHEAD_M, HUD_ROAD_BEHIND_M, UltraPilotHUD,
+    _clip_truck_road_segment,
+)
 from plugins.autopilot.main import Plugin as AutopilotPlugin
 from plugins.lanecontrol.main import Plugin as LaneControlPlugin
 from sdk.plugin_sdk import _ControllerProxy, CTL_SELECT_DRIVE
@@ -146,6 +149,14 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         ego_origin = UltraPilotHUD._project(
             hud, HUD_EGO_AHEAD_M, 0.0, View())
         self.assertEqual(road_origin, ego_origin)
+
+    def test_hud_road_continues_behind_complete_tractor_trailer(self):
+        self.assertGreaterEqual(HUD_ROAD_BEHIND_M, 40.0)
+        clipped = _clip_truck_road_segment((-60.0, 0.0), (-10.0, 0.0))
+        self.assertIsNotNone(clipped)
+        first, second, _t0, _t1 = clipped
+        self.assertAlmostEqual(first[0], -HUD_ROAD_BEHIND_M)
+        self.assertEqual(second, (-10.0, 0.0))
 
 
 if __name__ == "__main__":

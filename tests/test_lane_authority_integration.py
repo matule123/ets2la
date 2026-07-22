@@ -5,7 +5,9 @@ from core.ar_overlay import AROverlay
 from core.hud import UltraPilotHUD
 from core.navigation.route import Route
 from plugins.autopilot.main import Plugin as AutopilotPlugin
-from plugins.map.main import Plugin as MapPlugin
+from plugins.map.main import (
+    RUNTIME_ROUTE_HORIZON_M, RUNTIME_ROUTE_MAX_UIDS, Plugin as MapPlugin,
+)
 from tests.test_lane_route_builder import SyntheticMap
 
 
@@ -77,6 +79,28 @@ def build_map_plugin(y=3.0):
 
 
 class LaneAuthorityIntegrationTests(unittest.TestCase):
+    def test_100_km_gps_route_uses_ordered_rolling_runtime_horizon(self):
+        plugin = MapPlugin.__new__(MapPlugin)
+        uids = tuple(range(1, 5002))
+        plugin.road_net = type("LongRoad", (), {
+            "nodes": {uid: (0.0, (uid - 1) * 20.0) for uid in uids},
+        })()
+        selected = plugin._runtime_gps_window(uids)
+        self.assertEqual(selected, uids[:len(selected)])
+        self.assertLess(len(selected), len(uids))
+        self.assertLessEqual(len(selected), RUNTIME_ROUTE_MAX_UIDS)
+        covered = (selected[-1] - selected[0]) * 20.0
+        self.assertGreaterEqual(covered, RUNTIME_ROUTE_HORIZON_M)
+        self.assertEqual(uids[-1] * 20.0 // 1000, 100)
+
+    def test_runtime_horizon_keeps_first_missing_uid_for_exact_failure(self):
+        plugin = MapPlugin.__new__(MapPlugin)
+        plugin.road_net = type("DamagedRoad", (), {
+            "nodes": {1: (0.0, 0.0), 2: (0.0, 20.0)},
+        })()
+        self.assertEqual(plugin._runtime_gps_window((1, 2, 99, 100)),
+                         (1, 2, 99))
+
     def test_one_snapshot_drives_controller_hud_ar_and_compatibility(self):
         plugin, sdk, _ = build_map_plugin()
         snapshot = sdk.get("lane_trajectory")
@@ -84,6 +108,8 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
         self.assertEqual(plugin._lane_route.world_points,
                          [tuple(point) for point in snapshot["points"]])
         self.assertEqual(snapshot["display_points"], snapshot["points"])
+        self.assertEqual(snapshot["covered_gps_uids"], [1, 2, 3])
+        self.assertTrue(snapshot["route_horizon_complete"])
         self.assertEqual(sdk.get("nav_path"), snapshot["display_points"])
         self.assertEqual(sdk.get("nav_trajectory_revision"), snapshot["revision"])
 

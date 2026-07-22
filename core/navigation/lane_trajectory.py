@@ -126,26 +126,35 @@ def _resample_polyline(points, spacing_m, lane_id=None, segment_index=-1):
 
 
 def _fair_ordinary_segment(segment):
-    """Very small local fairing, accepted only inside the lane corridor."""
-    points = tuple(segment.centerline)
-    if (len(points) < 4 or segment.lane_type in
+    """Remove isolated map-sampling bumps without leaving the lane corridor.
+
+    Three bounded Laplacian passes are enough to suppress a one-node lateral
+    or vertical spike on an otherwise straight road.  Every candidate is
+    checked against the *original* centreline, endpoints never move, and
+    topology-sensitive prefab/roundabout geometry is never filtered.
+    """
+    original = tuple(segment.centerline)
+    if (len(original) < 4 or segment.lane_type in
             ("prefab", "roundabout", "graph")):
-        return points
+        return original
     limit = min(0.75, segment.width_m * 0.20)
-    result = [points[0]]
-    for index in range(1, len(points)-1):
-        previous, current, following = points[index-1:index+2]
-        candidate = LanePoint(
-            (previous.x + 6*current.x + following.x) / 8.0,
-            (previous.y + 6*current.y + following.y) / 8.0,
-            (previous.z + 6*current.z + following.z) / 8.0,
-        )
-        if _distance_to_centerline(candidate, segment) <= limit:
-            result.append(candidate)
-        else:
-            result.append(current)
-    result.append(points[-1])
-    return tuple(result)
+    points = original
+    for _pass in range(3):
+        result = [original[0]]
+        for index in range(1, len(points)-1):
+            previous, current, following = points[index-1:index+2]
+            candidate = LanePoint(
+                (previous.x + 6*current.x + following.x) / 8.0,
+                (previous.y + 6*current.y + following.y) / 8.0,
+                (previous.z + 6*current.z + following.z) / 8.0,
+            )
+            if _distance_to_centerline(candidate, segment) <= limit:
+                result.append(candidate)
+            else:
+                result.append(current)
+        result.append(original[-1])
+        points = tuple(result)
+    return points
 
 
 def _with_kinematics(points):
@@ -186,11 +195,41 @@ def _segments_intersect_2d(a, b, c, d):
 
 
 def _count_self_intersections(points):
+    """Count real 3-D route crossings in near-linear time.
+
+    The former all-pairs scan was O(n²): a 100 km route sampled every two
+    metres required roughly 1.25 billion edge pairs.  Control edges are short,
+    so a fixed world-space grid gives the same exact intersection predicate
+    while comparing only edges whose X/Z bounding boxes overlap a cell.
+    """
     count = 0
     edges = list(zip(points, points[1:]))
-    for first_index, (a, b) in enumerate(edges):
-        for second_index in range(first_index + 3, len(edges)):
-            c, d = edges[second_index]
+    cell_size = 12.0
+    bins = {}
+    tested = set()
+    for edge_index, (a, b) in enumerate(edges):
+        min_x, max_x = sorted((a.x, b.x))
+        min_z, max_z = sorted((a.z, b.z))
+        cell_min_x, cell_max_x = (math.floor(min_x / cell_size),
+                                  math.floor(max_x / cell_size))
+        cell_min_z, cell_max_z = (math.floor(min_z / cell_size),
+                                  math.floor(max_z / cell_size))
+        cells = [(cell_x, cell_z)
+                 for cell_x in range(cell_min_x, cell_max_x + 1)
+                 for cell_z in range(cell_min_z, cell_max_z + 1)]
+        candidates = set()
+        for cell in cells:
+            candidates.update(bins.get(cell, ()))
+        for other_index in candidates:
+            # Adjacent edges and the one edge between them share local route
+            # geometry and cannot be counted as a self-crossing.
+            if edge_index - other_index < 3:
+                continue
+            pair = (other_index, edge_index)
+            if pair in tested:
+                continue
+            tested.add(pair)
+            c, d = edges[other_index]
             # A geometric crossing on another bridge deck is not a route
             # self-intersection in 3-D.
             if min(abs(a.y-c.y), abs(a.y-d.y),
@@ -198,6 +237,8 @@ def _count_self_intersections(points):
                 continue
             if _segments_intersect_2d(a, b, c, d):
                 count += 1
+        for cell in cells:
+            bins.setdefault(cell, []).append(edge_index)
     return count
 
 

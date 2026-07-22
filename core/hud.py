@@ -76,6 +76,33 @@ _CAR_PALETTE = [
 # on bends it therefore appeared beside the correctly transformed road.
 HUD_EGO_AHEAD_M = 0.0
 HUD_CAMERA_BACK_M = 48.0
+HUD_ROAD_BEHIND_M = 44.0
+
+
+def _clip_truck_road_segment(a, b, ahead_min=-HUD_ROAD_BEHIND_M,
+                             ahead_max=210.0, lateral_limit=62.0):
+    """Clip one truck-space road chord to the complete HUD camera frustum."""
+    da, dl = b[0] - a[0], b[1] - a[1]
+    t0, t1 = 0.0, 1.0
+    for p, q in ((-da, a[0] - ahead_min),
+                 (da, ahead_max - a[0]),
+                 (-dl, a[1] + lateral_limit),
+                 (dl, lateral_limit - a[1])):
+        if abs(p) < 1e-9:
+            if q < 0:
+                return None
+            continue
+        ratio = q / p
+        if p < 0:
+            if ratio > t1:
+                return None
+            t0 = max(t0, ratio)
+        else:
+            if ratio < t0:
+                return None
+            t1 = min(t1, ratio)
+    return ((a[0] + da * t0, a[1] + dl * t0),
+            (a[0] + da * t1, a[1] + dl * t1), t0, t1)
 
 
 def _car_colour(v):
@@ -555,25 +582,7 @@ class UltraPilotHUD(QWidget):
             # is then overlaid in blue and remains visually unambiguous.
             def clip_road(a, b):
                 """Clip a truck-space segment to the visible HUD rectangle."""
-                da, dl = b[0] - a[0], b[1] - a[1]
-                t0, t1 = 0.0, 1.0
-                for p, q in ((-da, a[0] + 18.0), (da, 210.0 - a[0]),
-                             (-dl, a[1] + 62.0), (dl, 62.0 - a[1])):
-                    if abs(p) < 1e-9:
-                        if q < 0:
-                            return None
-                        continue
-                    r = q / p
-                    if p < 0:
-                        if r > t1:
-                            return None
-                        t0 = max(t0, r)
-                    else:
-                        if r < t0:
-                            return None
-                        t1 = min(t1, r)
-                return ((a[0] + da * t0, a[1] + dl * t0),
-                        (a[0] + da * t1, a[1] + dl * t1), t0, t1)
+                return _clip_truck_road_segment(a, b)
 
             nearby = []
             ego_road_lateral = None
@@ -1405,6 +1414,14 @@ class UltraPilotHUD(QWidget):
         top = 90; bot = self.H - 40
         midy = (top + bot) / 2
         half = (bot - top) / 2 - 6
+        # Keep the gauge visible at zero input. Previously only the coloured
+        # fills were drawn, so a neutral/safety state looked like the entire
+        # pedal indicator had disappeared.
+        qp.setPen(Qt.PenStyle.NoPen)
+        qp.setBrush(QColor(55, 65, 75, 210))
+        qp.drawRoundedRect(QRectF(3, top, 5, bot - top), 2.5, 2.5)
+        qp.setBrush(QColor(180, 190, 200, 230))
+        qp.drawRect(QRectF(2, midy - 1, 7, 2))
         qp.setPen(Qt.PenStyle.NoPen)
         qp.setBrush(QColor(34, 197, 94, 230))
         qp.drawRect(QRectF(3, midy - t * half, 5, t * half))

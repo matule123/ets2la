@@ -280,8 +280,15 @@ class Plugin(BasePlugin):
             self._last_throttle = 0.0
             self.sdk.controller.set_brake(0.0)
             self._last_brake = 0.0
-            self.sdk.controller.select_drive(True)
-            self._drive_request_t = time.monotonic()
+            now = time.monotonic()
+            # ``geardrive`` is a momentary SDK button. Request a bounded pulse
+            # and explicitly release it between attempts; holding True forever
+            # leaves some automatic gearboxes stuck in Neutral.
+            if now - self._drive_request_t >= 0.7:
+                self.sdk.controller.select_drive(True)
+                self._drive_request_t = now
+            else:
+                self.sdk.controller.select_drive(False)
             self.sdk.shared_state.set(
                 "navigation_status", "Pripravujem jazdu dopredu")
             return

@@ -95,6 +95,10 @@ class UltraPilotEngine:
         self._last_control_flush = time.monotonic()
         self._last_output_steering = 0.0
         self._last_output_brake = 0.0
+        # Momentary SDK controls must be released on the frame after a press.
+        # Keeping ``geardrive`` high does not create another input edge in ETS2
+        # and can leave an automatic gearbox stuck in Neutral indefinitely.
+        self._drive_selector_pressed = False
         # Track autopilot on/off edges so we release controls only once on disable.
         self._was_active = False
         try:
@@ -568,10 +572,19 @@ class UltraPilotEngine:
             self.shared_state.set(CTL_PAY_TOLL, False)
 
         drive_intent = self.shared_state.get(CTL_SELECT_DRIVE, None)
-        if drive_intent is not None:
-            self.controller.select_drive(bool(drive_intent))
-            # Event semantics: consume exactly once. The plugin explicitly
-            # publishes False when the selector should be released.
+        if self._drive_selector_pressed:
+            # Always emit the release before accepting another press. Plugin
+            # workers run faster than the engine and may coalesce repeated
+            # True requests; this guarantees a real low->high input edge.
+            self.controller.select_drive(False)
+            self._drive_selector_pressed = False
+            self.shared_state.set(CTL_SELECT_DRIVE, None)
+        elif drive_intent is True:
+            self.controller.select_drive(True)
+            self._drive_selector_pressed = True
+            self.shared_state.set(CTL_SELECT_DRIVE, None)
+        elif drive_intent is False:
+            self.controller.select_drive(False)
             self.shared_state.set(CTL_SELECT_DRIVE, None)
 
     def run_loop(self):

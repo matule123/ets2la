@@ -1,12 +1,15 @@
 import math
 import os
+import time
 import unittest
+from dataclasses import replace
 
 from core.navigation.lane_model import (
     LaneConnection, LaneId, LaneLocator, LanePath, LanePoint, LaneSegment,
 )
 from core.navigation.lane_trajectory import (
-    build_lane_trajectory, derive_display_points, validate_lane_trajectory,
+    _count_self_intersections, build_lane_trajectory, derive_display_points,
+    validate_lane_trajectory,
 )
 from core.navigation.road_network import RoadNetwork
 from tests.test_lane_route_builder import SyntheticMap
@@ -60,6 +63,51 @@ class LaneTrajectorySyntheticTests(unittest.TestCase):
         self.assertGreater(len(trajectory.points), len(display))
         self.assertEqual((display[0].x, display[0].z), (0.0, 0.0))
         self.assertEqual((display[-1].x, display[-1].z), (0.0, 41.0))
+
+    def test_isolated_straight_road_bump_is_faired_inside_corridor(self):
+        source = single_lane_path([
+            (0, 0, 0), (0, 0, 10), (1.2, 0.7, 20),
+            (0, 0, 30), (0, 0, 40),
+        ])
+        trajectory, validation = self.assert_valid_trajectory(source)
+        middle = min(trajectory.points, key=lambda point: abs(point.z - 20.0))
+        self.assertLess(abs(middle.x), 0.75)
+        self.assertLess(abs(middle.y), 0.45)
+        self.assertLess(validation.max_corridor_deviation_m, 0.75)
+
+    def test_spatial_self_intersection_check_scales_to_100_km(self):
+        segments = []
+        for index in range(1000):
+            lane_id = LaneId(10_000 + index, 1, 0)
+            points = (LanePoint(0.0, 0.0, index * 100.0),
+                      LanePoint(0.0, 0.0, (index + 1) * 100.0))
+            segments.append(LaneSegment(
+                lane_id, index + 1, index + 2, 1, 0, 1, 4.5,
+                "derived", 0, "long-straight", "road", points,
+                gps_uids=frozenset((index + 1, index + 2))))
+        for index in range(len(segments) - 1):
+            segments[index] = replace(
+                segments[index],
+                successors=(LaneConnection(segments[index + 1].lane_id,
+                                           "road"),))
+        source = LanePath(tuple(segments), (), tuple(range(1, 1002)),
+                          100_000.0, 0.99, True)
+        started = time.monotonic()
+        trajectory = build_lane_trajectory(source)
+        elapsed = time.monotonic() - started
+        self.assertTrue(trajectory.valid, trajectory.failure_reason)
+        self.assertGreater(len(trajectory.points), 49_000)
+        self.assertAlmostEqual(trajectory.distance_m, 100_000.0, delta=1.0)
+        # The previous quadratic scan does not complete this case in a useful
+        # runtime. Keep a generous bound for slower CI machines.
+        self.assertLess(elapsed, 25.0)
+
+    def test_spatial_self_intersection_check_still_detects_crossing(self):
+        points = tuple(LanePoint(x, 0.0, z) for x, z in (
+            (0, 0), (10, 10), (20, 0), (10, -10), (0, 0),
+            (10, 10), (0, 20), (10, 0),
+        ))
+        self.assertGreater(_count_self_intersections(points), 0)
 
     def test_smooth_curve(self):
         radius = 30.0
