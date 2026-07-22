@@ -14,6 +14,7 @@ and cached under <app>/map-cache/<key>/.
 import os
 import json
 import logging
+import re
 import zipfile
 
 try:
@@ -31,10 +32,10 @@ from core.paths import app_dir
 INDEX_URL = "https://gitlab.com/ETS2LA/data/-/raw/main/index.yaml"
 _BASE = INDEX_URL.rsplit("/", 1)[0]  # .../raw/main
 
-# Keep the future choices visible, but fail closed until UltraPilot has a
-# TruckLib-907 -> UltraPilot JSON exporter.  This is intentionally not called
-# ``local-game``: that previously invoked ETS2LA/maps and produced invalid 1.60
-# data from a parser whose newest supported format is 1.59.
+# Keep the new choices visible, but generate them only in the independent
+# TruckLib application.  This is intentionally not called ``local-game``:
+# that previously invoked ETS2LA/maps and produced invalid 1.60 data from a
+# parser whose newest supported format is 1.59.
 COMPATIBILITY_DATASETS = {
     "ets2-1.60": {
         "game": "ETS2", "version": "1.60", "game_version": "1.60",
@@ -107,16 +108,63 @@ def dataset_dir(key: str) -> str:
 
 
 def is_downloaded(key: str) -> bool:
-    """A dataset is ready if its folder exists and holds extracted json data."""
+    """Return true only for a complete dataset, never for a partial staging copy."""
     d = dataset_dir(key)
     if not os.path.isdir(d):
         return False
-    # Mark complete if our download wrote the config, or any json data exists.
+    if key not in COMPATIBILITY_DATASETS:
+        # Preserve the exact legacy 1.59 readiness contract.  Those datasets
+        # are downloaded and managed by the pre-existing code path.
+        for _root, _dirs, files in os.walk(d):
+            if any(name == "config.json" or name.endswith(".json")
+                   for name in files):
+                return True
+        return False
+    required = {
+        "nodes", "roads", "prefabs", "roadlooks",
+        "prefabdescriptions", "graph",
+    }
+    found = set()
     for root, _dirs, files in os.walk(d):
         for f in files:
-            if f == "config.json" or f.endswith(".json"):
-                return True
-    return False
+            low = f.casefold()
+            if not low.endswith(".json"):
+                continue
+            stem = low[:-5]
+            for category in required:
+                if (stem == category or stem.endswith("-" + category)
+                        or stem.endswith("_" + category)):
+                    found.add(category)
+    if found != required:
+        return False
+    # New 1.60 datasets are trusted only after the standalone generator's
+    # transactional validation marker is present.
+    try:
+        with open(os.path.join(d, "config.json"), "r", encoding="utf-8") as stream:
+            config = json.load(stream)
+        generator = config.get("generator") or {}
+        validation = config.get("validation") or {}
+        packages = config.get("packages")
+        valid_packages = (isinstance(packages, list) and bool(packages)
+                          and all(isinstance(package, dict)
+                                  and re.fullmatch(
+                                      r"[0-9a-f]{64}",
+                                      str(package.get("sha256", "")))
+                                  for package in packages))
+        return bool(
+            config.get("dataset_key") == key
+            and config.get("map_format") == 907
+            and str(config.get("game_version_major_minor")) == "1.60"
+            and generator.get("library") == "TruckLib"
+            and generator.get("trucklib_version") == "0.5.1"
+            and config.get("generation_complete") is True
+            and validation.get("valid") is True
+            and valid_packages
+            and (key != "promods-2.83"
+                 or str(config.get("promods_version")) == "2.83")
+        )
+    except (OSError, ValueError, TypeError):
+        return False
 
 
 _index_cache = None
@@ -157,7 +205,6 @@ def list_datasets() -> list:
             "key": key,
             "game": v.get("game", "?"),
             "version": v.get("version", "?"),
-            "game_version": v.get("game_version", v.get("version", "?")),
             "game_version": v.get("game_version", v.get("version", "?")),
             "mod": v.get("mod"),
             "mod_version": v.get("mod_version"),
@@ -234,8 +281,9 @@ def download(key: str, progress_cb=None) -> bool:
         _set_error(
             f"Mapa {key} vyzaduje parser TruckLib pre format 907. "
             "Stary parser ETS2LA/maps podporuje iba ETS2 1.59 a jeho data "
-            "sa nesmu pouzit ako mapa 1.60. TruckLib exporter pre "
-            "UltraPilot este nie je implementovany.")
+            "sa nesmu pouzit ako mapa 1.60. Pouzite samostatny program "
+            "UltraPilot Map Generator; tlacidlo v UltraPilote ho zamerne "
+            "nespusta.")
         return False
     if requests is None:
         return False

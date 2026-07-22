@@ -19,6 +19,7 @@ map-cache/
 routes/
 settings.json
 *.log
+tests/.tmp-map-compat/
 
 # Local-only / agent artifacts
 docs/

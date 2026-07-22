@@ -218,6 +218,20 @@ class LaneGeometryAuditTests(unittest.TestCase):
         self.assertAlmostEqual(points[0].z, 1000.0)
         self.assertAlmostEqual(points[0].y, 20.0)
 
+    def test_descriptor_order_uses_origin_node_position_and_rotation(self):
+        net = RoadNetwork(); net.loaded = True
+        net.nodes.update({1: (100.0, 100.0), 2: (1000.0, 1000.0)})
+        net.node_rot.update({1: 0.0, 2: math.pi / 2.0})
+        token = "descriptor-order-transform"
+        net._prefab_desc[token] = (
+            ((-10.0, 0.0, math.pi / 2.0), (0.0, 0.0, 0.0)), (), ())
+        # New format: UIDs are in PPD descriptor order. originNodeIndex=1
+        # therefore selects UID 1 for both translation and rotation.
+        transformed = net._transform_prefab_points(
+            (token, (2, 1), 1, True), ((0.0, 10.0),))
+        self.assertAlmostEqual(transformed[0][0], 100.0)
+        self.assertAlmostEqual(transformed[0][1], 110.0)
+
 
 class TrajectoryNegativeAuditTests(unittest.TestCase):
     def test_zero_duplicate_reversed_nan_and_infinity_are_rejected(self):

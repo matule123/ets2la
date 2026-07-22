@@ -409,11 +409,27 @@ class RoadNetwork:
                 token = str(raw.get("token", ""))
                 if token not in self._prefab_desc:
                     continue
-                uids = tuple(_uid(value) for value in raw.get("nodeUids", ())
-                             if _uid(value))
+                raw_uids = tuple(_uid(value) for value in raw.get("nodeUids", ())
+                                 if _uid(value))
+                descriptor_values = raw.get("descriptorNodeUids")
+                descriptor_order = descriptor_values is not None
+                uids = (tuple(_uid(value) for value in descriptor_values
+                              if _uid(value)) if descriptor_order else raw_uids)
                 if not uids:
                     continue
-                instance = (token, uids, int(raw.get("originNodeIndex", 0)))
+                origin_index = int(raw.get("originNodeIndex", 0))
+                if descriptor_order:
+                    # TruckLib exposes placed nodeUids in sector order (the
+                    # physical origin first), while PPD inputLanes/navNodes are
+                    # indexed in descriptor order.  The generator publishes
+                    # both arrays explicitly; reject a damaged permutation
+                    # instead of silently choosing a wrong junction arm.
+                    if (len(raw_uids) != len(uids)
+                            or sorted(raw_uids) != sorted(uids)
+                            or not (0 <= origin_index < len(uids))):
+                        raise ValueError(
+                            f"invalid descriptorNodeUids for prefab {token}")
+                instance = (token, uids, origin_index, descriptor_order)
                 x, z = float(raw.get("x", 0)), float(raw.get("y", 0))
                 self._prefab_grid.setdefault(self._cell(x, z), []).append(instance)
                 for i in range(len(uids)):
@@ -448,14 +464,18 @@ class RoadNetwork:
         return points
 
     def _transform_prefab_points(self, instance, points):
-        token, uids, origin_index = instance
+        token, uids, origin_index = instance[:3]
+        descriptor_order = bool(instance[3]) if len(instance) > 3 else False
         desc = self._prefab_desc.get(token)
-        anchor = self.nodes.get(uids[0]) if uids else None
+        anchor_index = origin_index if descriptor_order else 0
+        anchor = (self.nodes.get(uids[anchor_index])
+                  if uids and 0 <= anchor_index < len(uids) else None)
         if not desc or anchor is None or not desc[0]:
             return []
         origin_index = max(0, min(origin_index, len(desc[0]) - 1))
         ox, oz, local_rot = desc[0][origin_index]
-        rotation = self.node_rot.get(uids[0], 0.0) - local_rot
+        rotation_uid = uids[anchor_index] if descriptor_order else uids[0]
+        rotation = self.node_rot.get(rotation_uid, 0.0) - local_rot
         c, s = math.cos(rotation), math.sin(rotation)
         ax, az = anchor
         return [(ax + (x - ox) * c - (z - oz) * s,
@@ -771,12 +791,14 @@ class RoadNetwork:
             if (second not in a["next_lines"]
                     or first not in b["prev_lines"]):
                 return False
-            if a["nav_node_index"] < 0 or b["nav_node_index"] < 0:
-                return False
-        return curves[indices[0]]["nav_node_index"] >= 0
+        # navNodeIndex did not exist in older PPD revisions. The chain reaching
+        # this function was already selected through physical navNodes and is
+        # still bounded by inputLanes/outputLanes, so -1 is missing data rather
+        # than permission to invent a connector.
+        return True
 
     def _prefab_connector_options(self, instance, start_uid, end_uid):
-        token, uids, _origin = instance
+        token, uids, _origin = instance[:3]
         try:
             start_item, end_item = uids.index(start_uid), uids.index(end_uid)
         except ValueError:
@@ -821,7 +843,7 @@ class RoadNetwork:
         return sorted(set(filtered))
 
     def _prefab_curve_chain_3d(self, instance, indices):
-        token, uids, origin_index = instance
+        token, uids, origin_index = instance[:3]
         desc = self._prefab_desc[token]
         lane_data = self._prefab_lane_data[token]
         if not uids or not desc[0]:
