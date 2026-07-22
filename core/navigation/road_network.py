@@ -1320,19 +1320,31 @@ class RoadNetwork:
         # build_lane_trajectory() deliberately rebuilds its control geometry
         # from segments, so trimming only LanePath.points resurrected the part
         # of the incoming road behind the truck and produced a screen-wide AR
-        # chord.  This keeps every consumer on the same forward-only geometry.
+        # chord.  Start at the exact, lane-confirmed projection: choosing the
+        # nearest sampled centreline point can choose the sample behind the
+        # truck and still draw a sharp chord through the camera.
         if match is not None and segments and segments[0].lane_id == match.lane_id:
             first = segments[0]
             line = first.centerline
             if len(line) >= 2:
-                nearest = min(range(len(line)), key=lambda index: math.dist(
-                    (line[index].x, line[index].y, line[index].z),
-                    (match.point.x, match.point.y, match.point.z)))
-                if nearest > 0:
-                    trimmed = tuple(line[nearest:])
-                    if len(trimmed) >= 2:
-                        first = replace(first, centerline=trimmed)
-                        segments = (first,) + tuple(segments[1:])
+                projected = replace(match.point, lane_id=first.lane_id,
+                                    segment_index=0)
+                # LaneLocator.segment_index identifies the source edge on
+                # which ``projected`` lies. Only its end and later samples are
+                # forward along this directed LaneSegment.
+                following = line[max(0, match.segment_index + 1):]
+                trimmed = [projected]
+                trimmed.extend(point for point in following if math.dist(
+                    (point.x, point.y, point.z),
+                    (trimmed[-1].x, trimmed[-1].y, trimmed[-1].z)) > 1e-6)
+                if len(trimmed) < 2:
+                    return LanePath(
+                        tuple(segments), (), corridor.gps_uids, valid=False,
+                        failure_reason=(
+                            "confirmed truck position leaves no forward "
+                            "geometry on the first GPS lane")), match
+                first = replace(first, centerline=tuple(trimmed))
+                segments = (first,) + tuple(segments[1:])
         path = self.connect_lane_sequence(segments, corridor.gps_uids)
         if not path.valid or match is None or len(path.points) < 2:
             return path, match

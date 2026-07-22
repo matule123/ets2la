@@ -3,7 +3,9 @@ import math
 import unittest
 
 from core.navigation.lane_model import LaneLocator, wrap_angle
-from core.navigation.lane_trajectory import build_lane_trajectory
+from core.navigation.lane_trajectory import (
+    build_lane_trajectory, derive_display_points,
+)
 from core.navigation.road_network import RoadNetwork
 
 
@@ -175,16 +177,65 @@ class RealMapLaneDataTests(unittest.TestCase):
             gps, (-90092.1956, 48571.8930), 2.004394,
             altitude=22.1638, start_match=match)
         self.assertTrue(runtime_path.valid, runtime_path.failure_reason)
+        # Runtime geometry must begin at the exact confirmed projection.  A
+        # nearest centreline sample can lie behind the truck and creates a
+        # large HUD/AR spike even though the remaining road is straight.
         self.assertLess(math.dist(
             (runtime_path.points[0].x, runtime_path.points[0].y,
              runtime_path.points[0].z),
-            (match.point.x, match.point.y, match.point.z)), 3.2)
+            (match.point.x, match.point.y, match.point.z)), 1e-6)
+        self.assertLess(math.dist(
+            (runtime_path.segments[0].centerline[0].x,
+             runtime_path.segments[0].centerline[0].y,
+             runtime_path.segments[0].centerline[0].z),
+            (match.point.x, match.point.y, match.point.z)), 1e-6)
+        forward_x = -math.sin(match.point.heading)
+        forward_z = -math.cos(match.point.heading)
+        for point in runtime_path.segments[0].centerline[1:]:
+            along = ((point.x - match.point.x) * forward_x
+                     + (point.z - match.point.z) * forward_z)
+            self.assertGreaterEqual(along, -1e-6)
         trajectory = build_lane_trajectory(runtime_path)
         self.assertTrue(trajectory.valid, trajectory.failure_reason)
         self.assertLess(math.dist(
             (trajectory.points[0].x, trajectory.points[0].y,
              trajectory.points[0].z),
-            (match.point.x, match.point.y, match.point.z)), 3.2)
+            (match.point.x, match.point.y, match.point.z)), 1e-6)
+
+    def test_runtime_route_at_reported_ar_spike_starts_at_truck_projection(self):
+        gps = (
+            3808812423411073026, 3808810055118290944,
+            3808827302817759232, 3808826220347588608,
+            3808834757710774275, 3808834379455856640,
+            3808823298989686786,
+        )
+        position = (-90243.50639343262, 22.167076110839844,
+                    48817.4098815918)
+        heading = -1.131815292032769
+        match = LaneLocator(self.net).locate(position, heading, gps)
+        self.assertIsNotNone(match)
+        path, _ = self.net.build_lane_path(
+            gps, (position[0], position[2]), heading,
+            altitude=position[1], start_match=match)
+        self.assertTrue(path.valid, path.failure_reason)
+        trajectory = build_lane_trajectory(path)
+        self.assertTrue(trajectory.valid, trajectory.failure_reason)
+        display_points = derive_display_points(trajectory)
+        self.assertTrue(display_points)
+
+        for points in (path.segments[0].centerline, path.points,
+                       trajectory.points, display_points):
+            self.assertLess(math.dist(
+                (points[0].x, points[0].y, points[0].z),
+                (match.point.x, match.point.y, match.point.z)), 1e-6)
+            # The old nearest-sample trim started 1.37 m behind the confirmed
+            # projection. This forward projection catches that visual chord
+            # independently of resampling density.
+            forward_x = -math.sin(match.point.heading)
+            forward_z = -math.cos(match.point.heading)
+            along = ((points[1].x - points[0].x) * forward_x
+                     + (points[1].z - points[0].z) * forward_z)
+            self.assertGreater(along, 0.0)
 
 
 if __name__ == "__main__":
