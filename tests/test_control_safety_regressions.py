@@ -1,4 +1,6 @@
 import os
+import io
+import struct
 import sys
 import time
 import unittest
@@ -16,12 +18,13 @@ from core.hud import (
 )
 from core.engine import UltraPilotEngine
 from core.controller import Controller as PhysicalController
+from core.sdk.scs_controller_writer import SCSControlsWriter, _FIELDS, _SIZE
 from plugins.autopilot.main import Plugin as AutopilotPlugin
 from plugins.lanecontrol.main import Plugin as LaneControlPlugin
 from plugins.map.main import Plugin as MapPlugin
 from sdk.plugin_sdk import (
-    _ControllerProxy, CTL_BRAKE, CTL_SELECT_DRIVE, CTL_STEERING,
-    CTL_THROTTLE,
+    PluginSDK, _ControllerProxy, CTL_BRAKE, CTL_SELECT_DRIVE,
+    CTL_STEERING, CTL_THROTTLE,
 )
 
 
@@ -77,6 +80,44 @@ def autopilot(truck, state):
 
 
 class ControlSafetyRegressionTests(unittest.TestCase):
+    def test_scs_writer_layout_matches_shipped_controller_dll(self):
+        offsets, total = {}, 0
+        for name, field_type in _FIELDS:
+            offsets[name] = total
+            total += _SIZE[field_type]
+        self.assertEqual(total, 342)
+        self.assertEqual(offsets["steering"], 118)
+        self.assertEqual(offsets["aforward"], 122)
+        self.assertEqual(offsets["abackward"], 126)
+        self.assertEqual(offsets["geardrive"], 268)
+
+        dll_path = os.path.join(ROOT, "assets", "scs_sdk_controller.dll")
+        with open(dll_path, "rb") as stream:
+            dll = stream.read()
+        self.assertIn(b"Local\\SCSControls", dll)
+        for name, _field_type in _FIELDS:
+            self.assertIn(("ETS2LA " + name).encode("ascii"), dll)
+
+        writer = SCSControlsWriter.__new__(SCSControlsWriter)
+        writer.connected = True
+        writer.invert_steering = False
+        writer._buf = io.BytesIO(bytes(total))
+        writer._offsets = offsets
+        writer._retry = 0
+        writer.set_steering(0.25)
+        writer.set_throttle(0.40)
+        writer.set_brake(0.15)
+        writer.select_drive()
+        payload = writer._buf.getvalue()
+        self.assertAlmostEqual(struct.unpack_from(
+            "f", payload, offsets["steering"])[0], 0.25)
+        self.assertAlmostEqual(struct.unpack_from(
+            "f", payload, offsets["aforward"])[0], 0.40)
+        self.assertAlmostEqual(struct.unpack_from(
+            "f", payload, offsets["abackward"])[0], 0.15)
+        self.assertTrue(struct.unpack_from(
+            "?", payload, offsets["geardrive"])[0])
+
     def test_plugin_controller_proxy_supports_drive_selector(self):
         state = {}
         proxy = _ControllerProxy(state)
@@ -110,7 +151,7 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         truck["gear"] = 1
         plugin.on_tick(0.05)
         self.assertFalse(plugin._reverse_recovery)
-        self.assertFalse(plugin.sdk.controller.drive)
+        self.assertNotIn(False, plugin.sdk.controller.drive_events)
 
     def test_neutral_selects_drive_before_throttle(self):
         state = State({"autopilot_active": True})
@@ -121,10 +162,31 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         self.assertEqual(plugin.sdk.controller.throttle, 0.0)
         self.assertEqual(plugin.sdk.controller.brake, 0.0)
 
-        # The next worker tick must release the momentary selector, not keep
-        # geardrive permanently high while telemetry still reports Neutral.
+        # The plugin must not overwrite this event with False before the
+        # slower engine process has consumed it. The engine owns the physical
+        # release half of the momentary pulse.
         plugin.on_tick(0.05)
-        self.assertFalse(plugin.sdk.controller.drive)
+        self.assertEqual(plugin.sdk.controller.drive_events, [True])
+
+    def test_automatic_drive_mode_with_zero_ratio_does_not_deadlock(self):
+        state = State({"autopilot_active": True})
+        plugin = autopilot({"speed": 0.0, "gear": 0}, state)
+        plugin.on_tick(0.05)
+        self.assertEqual(plugin.sdk.controller.throttle, 0.0)
+        self.assertEqual(plugin.tags.throttle, 0.0)
+
+        # ETS2 can show selector D while its current-ratio telemetry remains
+        # zero until throttle is applied. After the bounded settling time the
+        # fallback cruise ramp must be allowed to engage first gear.
+        plugin._drive_engage_started = time.monotonic() - 1.0
+        plugin._drive_request_t = time.monotonic() - 1.0
+        plugin.on_tick(0.10)
+        self.assertTrue(state.get("autopilot_active"))
+        self.assertGreater(plugin.sdk.controller.throttle, 0.0)
+        self.assertGreater(plugin.tags.throttle, 0.0)
+        self.assertEqual(plugin.sdk.controller.brake, 0.0)
+        self.assertEqual(state.get("navigation_status"),
+                         "Jazda dopredu pripravená")
 
     def test_engine_turns_coalesced_drive_requests_into_real_pulses(self):
         state = State({
@@ -152,6 +214,32 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         state.set(CTL_SELECT_DRIVE, True)
         engine._flush_controls()
         self.assertEqual(controller.drive_events, [True, False, True])
+
+    def test_drive_request_survives_worker_engine_scheduling_race(self):
+        shared = {"autopilot_active": True,
+                  "telemetry": {"truck": {"speed": 0.0, "gear": 0}}}
+        sdk = PluginSDK(shared, "autopilot")
+        plugin = AutopilotPlugin(sdk)
+        plugin.on_start()
+        plugin.on_tick(0.01)
+        plugin.on_tick(0.01)
+        # Two fast worker ticks happened before the engine got CPU time. The
+        # selector request must still be pending instead of being overwritten.
+        self.assertIs(shared.get(CTL_SELECT_DRIVE), True)
+
+        controller = Controller()
+        engine = UltraPilotEngine.__new__(UltraPilotEngine)
+        engine.shared_state = sdk.shared_state
+        engine.controller = controller
+        engine._was_active = False
+        engine._last_output_steering = 0.0
+        engine._last_output_brake = 0.0
+        engine._last_control_flush = time.monotonic()
+        engine._drive_selector_pressed = False
+        engine._flush_controls()
+        engine._flush_controls()
+        self.assertEqual(controller.drive_events, [True, False])
+        self.assertIsNone(shared.get(CTL_SELECT_DRIVE))
 
     def test_master_release_also_releases_drive_selector(self):
         class FakeSCS:

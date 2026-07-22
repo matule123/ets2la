@@ -19,6 +19,8 @@ BRAKE_RAMP_UP = 2.5          # brake can rise this fast per second (anti-jerk)
 BRAKE_RAMP_DOWN = 4.0        # brake releases faster than it engages
 BRAKE_MIN_HOLD = 0.04        # below this, treat brake as zero (avoid flutter)
 THROTTLE_RAMP = 3.0          # throttle slew rate per second
+DRIVE_ENGAGE_SETTLE_S = 0.45 # allow the selector pulse to reach the gearbox
+DRIVE_RETRY_S = 1.50         # retry D without blocking throttle indefinitely
 
 # Anticipatory curve braking (Fáza 3c). The lateral acceleration a truck can
 # hold comfortably is ~2.5 m/s²; the safe speed for a bend of radius R is
@@ -129,6 +131,7 @@ class Plugin(BasePlugin):
         self._diag_t = 0.0              # throttle for diagnostic logging
         self._reverse_recovery = False
         self._drive_request_t = 0.0
+        self._drive_engage_started = 0.0
         self._lane_lock_acquired = False
 
     def on_stop(self):
@@ -197,6 +200,7 @@ class Plugin(BasePlugin):
         # fail-closed lane corridor above is checked on every tick.
         if not active_requested:
             self._lane_lock_acquired = False
+            self._drive_engage_started = 0.0
         elif not authority_reason and not self._lane_lock_acquired:
             live_match = (self.sdk.shared_state.get("lane_match")
                           or snapshot.get("lane_match"))
@@ -264,7 +268,6 @@ class Plugin(BasePlugin):
                 self.sdk.shared_state.set(
                     "navigation_status", "Zaraďujem jazdu dopredu")
             else:
-                self.sdk.controller.select_drive(False)
                 self.sdk.controller.set_brake(0.0)
                 self._last_brake = 0.0
                 self._reverse_recovery = False
@@ -272,29 +275,46 @@ class Plugin(BasePlugin):
                     "navigation_status", "Jazda dopredu pripravená")
             return
 
-        # Prevention comes before recovery: if the autopilot is engaged while
-        # the automatic gearbox is in N, select Drive before any throttle is
-        # allowed. This also covers a fresh engagement after loading the game.
+        # ``gear`` is the currently engaged ratio, not a reliable automatic
+        # selector mode. Several ETS2 automatic transmissions report gear 0
+        # while stationary in D and engage first gear only after throttle is
+        # applied. Waiting for gear > 0 before allowing any throttle therefore
+        # deadlocks forever: D waits for throttle and autopilot waits for D.
+        # Send one proven momentary D pulse, wait briefly, then continue with
+        # the normal ramped throttle even if the ratio still reads zero. Retry
+        # the selector periodically without re-entering the blocking phase.
         if autopilot_engaged and speed_kmh < 0.5 and gear == 0:
-            self.sdk.controller.set_throttle(0.0)
-            self._last_throttle = 0.0
-            self.sdk.controller.set_brake(0.0)
-            self._last_brake = 0.0
             now = time.monotonic()
-            # ``geardrive`` is a momentary SDK button. Request a bounded pulse
-            # and explicitly release it between attempts; holding True forever
-            # leaves some automatic gearboxes stuck in Neutral.
-            if now - self._drive_request_t >= 0.7:
+            if self._drive_engage_started <= 0.0:
+                self._drive_engage_started = now
                 self.sdk.controller.select_drive(True)
                 self._drive_request_t = now
-            else:
-                self.sdk.controller.select_drive(False)
+            elif now - self._drive_request_t >= DRIVE_RETRY_S:
+                self.sdk.controller.select_drive(True)
+                self._drive_request_t = now
+
+            if now - self._drive_engage_started < DRIVE_ENGAGE_SETTLE_S:
+                self.sdk.controller.set_throttle(0.0)
+                self._last_throttle = 0.0
+                self.sdk.controller.set_brake(0.0)
+                self._last_brake = 0.0
+                self.sdk.shared_state.set(
+                    "navigation_status", "Pripravujem jazdu dopredu")
+                # Keep the HUD controls visible during this intentional wait.
+                self.tags.speed_kmh = round(speed_kmh, 1)
+                self.tags.nav_active = bool(
+                    self.sdk.shared_state.get("nav_active", False)
+                    and lane_authority_safe)
+                self.tags.brake = 0.0
+                self.tags.throttle = 0.0
+                return
             self.sdk.shared_state.set(
-                "navigation_status", "Pripravujem jazdu dopredu")
-            return
+                "navigation_status", "Jazda dopredu pripravená")
         if gear > 0:
-            # geardrive is a momentary SDK button, never leave it latched.
-            self.sdk.controller.select_drive(False)
+            # The engine owns the physical release half of every momentary
+            # selector pulse. Publishing False here can overwrite an unconsumed
+            # True in shared state before the engine process observes it.
+            self._drive_engage_started = 0.0
 
         arrival_pending = bool(self.sdk.shared_state.get(
             "navigation_arrival_pending", False))
