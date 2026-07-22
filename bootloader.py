@@ -47,6 +47,39 @@ def _app_icon():
     return QIcon(p) if p and os.path.exists(p) else QIcon()
 
 
+def run_splash(shared_dict):
+    """Animate startup independently while the main UI builds its pages."""
+    from core.logger import setup as _log_setup
+    _log_setup()
+    _set_app_id()
+    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtCore import QTimer
+    try:
+        from ui.splash import BootSplash
+    except ModuleNotFoundError:
+        from UI.splash import BootSplash
+    from core.ipc.shared_state import SharedState
+
+    app = QApplication([])
+    app.setWindowIcon(_app_icon())
+    state = SharedState(shared_dict)
+    splash = BootSplash()
+    splash.setWindowIcon(_app_icon())
+    splash.show()
+
+    def finish_when_ready():
+        if (state.get("ui_ready", False)
+                or state.get("splash_close_requested", False)
+                or state.get("app_shutdown_requested", False)):
+            splash.close()
+            app.quit()
+
+    poll = QTimer()
+    poll.timeout.connect(finish_when_ready)
+    poll.start(50)
+    sys.exit(app.exec())
+
+
 def run_ui(shared_dict):
     """Process for the Main Control Panel UI."""
     from core.logger import setup as _log_setup
@@ -54,37 +87,13 @@ def run_ui(shared_dict):
     logging.info("Launching UI Process...")
     _set_app_id()
     from PyQt6.QtWidgets import QApplication
-    from PyQt6.QtCore import QTimer
     from ui.app import UltraPilotApp
-    from ui.splash import BootSplash
     from core.ipc.shared_state import SharedState
     from core.settings.manager import SettingsManager
 
     app = QApplication(sys.argv)
     app.setWindowIcon(_app_icon())
     state = SharedState(shared_dict)
-
-    # Show the boot splash immediately so the user sees a clear loading state
-    # (logo + spinner + „Initializing“) instead of an empty desktop while the
-    # dashboard / onboarding is being built. It closes once ``ui_ready`` flips.
-    splash = BootSplash()
-    splash.setWindowIcon(_app_icon())
-    splash.show()
-    app.processEvents()
-
-    splash_closed = {"v": False}
-
-    def _maybe_close_splash():
-        if splash_closed["v"]:
-            return
-        if state.get("ui_ready", False):
-            splash_closed["v"] = True
-            splash.close()
-            splash.deleteLater()
-
-    poll = QTimer()
-    poll.timeout.connect(_maybe_close_splash)
-    poll.start(100)
 
     # First-run onboarding: if the user hasn't completed setup yet, show the
     # wizard before the main window. When the wizard finishes it writes
@@ -93,15 +102,8 @@ def run_ui(shared_dict):
         sm = SettingsManager()
         if not sm.get("onboarded", False):
             from ui.onboarding import OnboardingWizard
-            # Onboarding is itself the first visible app window. Close the
-            # initializing splash before showing it; waiting for ui_ready here
-            # deadlocked visually because ui_ready is only set by the main UI.
-            if not splash_closed["v"]:
-                splash_closed["v"] = True
-                poll.stop()
-                splash.close()
-                splash.deleteLater()
-                app.processEvents()
+            # Onboarding is itself the first visible app window.
+            state.set("splash_close_requested", True)
             wizard = OnboardingWizard(state)
             wizard.show()
             main_window = {"w": None}
@@ -185,6 +187,7 @@ def main():
     shared_dict = manager.dict()
 
     targets = {
+        "Splash": run_splash,
         "Engine": run_engine,
         "UI": run_ui,
         "HUD": run_hud,

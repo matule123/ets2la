@@ -29,10 +29,13 @@ ACCENT = "#10B981"
 class Spinner(QWidget):
     """A small circular spinner (rotating arc, a.k.a. obvod kolieska)."""
 
-    def __init__(self, size=18, parent=None):
+    def __init__(self, size=18, parent=None, *, arc_color=ACCENT,
+                 track_color="#9AA4B2"):
         super().__init__(parent)
         self._angle = 0
         self._size = size
+        self._arc_color = str(arc_color)
+        self._track_color = str(track_color)
         self.setFixedSize(size, size)
         self._clock = QElapsedTimer()
         self._timer = QTimer(self)
@@ -78,12 +81,12 @@ class Spinner(QWidget):
         margin = 2
         rect = QRectF(margin, margin, w - 2 * margin, h - 2 * margin)
         # Faint full ring as the track.
-        track = QPen(QColor("#9AA4B2"))
+        track = QPen(QColor(self._track_color))
         track.setWidthF(max(1.5, w * 0.10))
         p.setPen(track)
         p.drawArc(rect, 0, 360 * 16)
         # Bright rotating arc (about 100°).
-        arc = QPen(QColor(ACCENT))
+        arc = QPen(QColor(self._arc_color))
         arc.setWidthF(max(1.5, w * 0.10))
         arc.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(arc)

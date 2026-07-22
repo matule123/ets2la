@@ -69,13 +69,13 @@ class BootSplash(QWidget):
         card = QWidget(self)
         card.setObjectName("Card")
         card.setStyleSheet(
-            "#Card { background: #FFFFFF; border: 1px solid #E5E7EB;"
+            "#Card { background: #000000; border: 1px solid #202020;"
             " border-radius: 20px; }"
         )
         shadow = QGraphicsDropShadowEffect(card)
         shadow.setBlurRadius(36)
         shadow.setOffset(0, 10)
-        shadow.setColor(QColor(15, 23, 42, 55))
+        shadow.setColor(QColor(0, 0, 0, 120))
         card.setGraphicsEffect(shadow)
 
         layout = QVBoxLayout(card)
@@ -107,7 +107,7 @@ class BootSplash(QWidget):
 
         wordmark = QLabel("UltraPilot")
         wordmark.setStyleSheet(
-            "color: #065F46; font-size: 27px; font-weight: 800;"
+            "color: #A3A3A3; font-size: 27px; font-weight: 800;"
             " background: transparent;"
         )
         brand_row.addWidget(wordmark)
@@ -116,32 +116,25 @@ class BootSplash(QWidget):
         subtitle = QLabel("Autopilot pre Euro Truck Simulator 2")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle.setStyleSheet(
-            "color: #64748B; font-size: 13px; font-weight: 500;"
+            "color: #737373; font-size: 13px; font-weight: 500;"
             " background: transparent;"
         )
         layout.addSpacing(10)
         layout.addWidget(subtitle)
         layout.addStretch(1)
 
-        self.spinner = Spinner(size=48)
+        self.spinner = Spinner(
+            size=48, arc_color="#A3A3A3", track_color="#303030")
         layout.addWidget(self.spinner, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        self.status_lbl = QLabel("Initializing…")
+        self.status_lbl = QLabel("Initializing...")
         self.status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_lbl.setStyleSheet(
-            "color: #0F172A; font-size: 14px; font-weight: 700;"
+            "color: #A3A3A3; font-size: 14px; font-weight: 700;"
             " background: transparent;"
         )
         layout.addSpacing(16)
         layout.addWidget(self.status_lbl)
-
-        hint = QLabel("Prvé načítanie mapy môže chvíľu trvať")
-        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hint.setStyleSheet(
-            "color: #94A3B8; font-size: 11px; background: transparent;"
-        )
-        layout.addSpacing(6)
-        layout.addWidget(hint)
 
         outer.addWidget(card)
         self.setFixedSize(self.W, self.H)
