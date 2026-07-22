@@ -393,6 +393,8 @@ class Plugin(BasePlugin):
             self.active_route = None
             self.sdk.set("nav_active", False)
             self.sdk.set("nav_steering", 0.0)
+            self.sdk.set("autopilot_active", False)
+            self.sdk.set("autopilot_disable_reason", "map dataset changed")
             logging.info("Navigation: stopped.")
 
         elif cmd == "switch_map":
@@ -453,10 +455,43 @@ class Plugin(BasePlugin):
                     # otherwise fall back to the first downloaded dataset.
                     sm = SettingsManager()
                     wanted = (sm.get("selected_map") or "").strip()
-                    chosen = next((d for d in downloaded if d["key"] == wanted), None)
+                    _game_path, installed_version = map_data.installed_ets2()
+                    chosen = map_data.choose_downloaded_for_game(
+                        datasets, installed_version, wanted)
                     if chosen is None:
-                        chosen = downloaded[0]
+                        reason = (f"Selected map {wanted} is not ready. "
+                                  f"Create or download a dataset for ETS2 "
+                                  f"{installed_version} first.")
+                        self.sdk.set("autopilot_active", False)
+                        self.sdk.set("autopilot_disable_reason",
+                                     "selected map is not ready")
+                        self.sdk.set("navigation_unreliable", True)
+                        self.sdk.set("map_status", reason)
+                        self._publish_invalid_lane_trajectory(
+                            reason, (), reason, log_failure=False)
+                        logging.error("Navigation: %s", reason)
+                        return
+                    if chosen["key"] != wanted:
+                        logging.info(
+                            "Navigation: ETS2 changed to %s; selected exact "
+                            "compatible dataset %s instead of %s.",
+                            installed_version, chosen["key"], wanted or "none")
+                        sm.set("selected_map", chosen["key"])
+                        self.sdk.set("selected_map", chosen["key"])
                     if generation != self._map_load_generation:
+                        return
+                    compatible, installed_version, reason = \
+                        map_data.compatible_with_installed_game(chosen["key"])
+                    self.sdk.set("installed_game_version", installed_version)
+                    if not compatible:
+                        self.sdk.set("autopilot_active", False)
+                        self.sdk.set("autopilot_disable_reason",
+                                     "incompatible map dataset")
+                        self.sdk.set("navigation_unreliable", True)
+                        self.sdk.set("map_status", reason)
+                        self._publish_invalid_lane_trajectory(
+                            reason, (), reason, log_failure=False)
+                        logging.error("Navigation: %s", reason)
                         return
                     self.sdk.set("active_map_key", chosen["key"])
                     self.sdk.set("active_map_name",
@@ -479,10 +514,17 @@ class Plugin(BasePlugin):
                     else:
                         # Allow a retry on the next run, not this one.
                         self._net_attempted = False
+                        self.sdk.set("autopilot_active", False)
+                        self.sdk.set("autopilot_disable_reason",
+                                     "map data is unreadable")
+                        self.sdk.set("navigation_unreliable", True)
                         self.sdk.set("map_status",
                                      "Map data unreadable — will retry.")
                 except Exception as e:
                     logging.error("Navigation: engine-side road network load failed: %s", e)
+                    self.sdk.set("autopilot_active", False)
+                    self.sdk.set("autopilot_disable_reason", "map load failed")
+                    self.sdk.set("navigation_unreliable", True)
                     self.sdk.set("map_status", f"Map load error: {e}")
                 finally:
                     if generation == self._map_load_generation:

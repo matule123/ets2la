@@ -441,7 +441,20 @@ class MapPage(QWidget):
             pass
         self.btn_dl.setVisible(not downloaded)
         self.btn_use.setEnabled(downloaded and self._net_worker is None)
-        self.btn_use.setText("Use & load selected map" if downloaded else "Download map first")
+        local = False
+        if not downloaded:
+            try:
+                entry = next((item for item in map_data.list_datasets()
+                              if item["key"] == key), {})
+                local = entry.get("source") == "local-game"
+            except Exception:
+                pass
+        self.btn_use.setText(
+            "Pouzit a nacitat vybranu mapu" if downloaded else
+            ("Najprv vytvor mapu z nainstalovanej hry" if local
+             else "Najprv stiahni mapu"))
+        self.btn_dl.setText("Vytvorit z nainstalovanej hry" if local
+                            else "Stiahnut mapu")
 
     def use_selected_map(self):
         key = self.map_combo.currentData()
@@ -487,8 +500,16 @@ class MapPage(QWidget):
         self.btn_dl.setEnabled(True)
         self.dl_bar.setVisible(False)
         self._dl_worker = None
-        self.dl_status.setText("✓ Map downloaded — loading road network…"
-                               if ok else "✗ Download failed (check internet).")
+        if ok:
+            self.dl_status.setText("Map data ready - loading road network...")
+        else:
+            try:
+                from core.navigation import map_data
+                reason = map_data.last_error()
+            except Exception:
+                reason = ""
+            self.dl_status.setText(
+                reason or "Map preparation failed; see the log for details.")
         self._populate_maps()
         if ok:
             self._load_road_net()
