@@ -16,7 +16,7 @@ import logging
 import os
 import sys
 
-from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
+from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF, QElapsedTimer
 from PyQt6.QtGui import QPainter, QPen, QColor
 from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel,
                              QPushButton, QProgressBar, QDialog)
@@ -34,13 +34,36 @@ class Spinner(QWidget):
         self._angle = 0
         self._size = size
         self.setFixedSize(size, size)
+        self._clock = QElapsedTimer()
         self._timer = QTimer(self)
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._timer.setInterval(16)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(60)
 
     def _tick(self):
-        self._angle = (self._angle + 18) % 360
+        # Derive the angle from elapsed time so a busy UI cannot make the
+        # animation appear frozen or permanently slow after delayed frames.
+        self._angle = (self._clock.elapsed() * 0.30) % 360
         self.update()
+
+    def start(self):
+        if not self._clock.isValid():
+            self._clock.start()
+        elif not self._timer.isActive():
+            self._clock.restart()
+        if not self._timer.isActive():
+            self._timer.start()
+
+    def stop(self):
+        self._timer.stop()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.start()
+
+    def hideEvent(self, event):
+        self.stop()
+        super().hideEvent(event)
 
     def paintEvent(self, _e):
         p = QPainter(self)
