@@ -85,6 +85,8 @@ class SCSTelemetry:
     TRAILER_BLOCK_START = 6000
     TRAILER_BLOCK_SIZE = 1560
     TRAILER_MAX = 10
+    # scsTrailer_t: 64 constant wheel flags + 16 wheelOnGround flags.
+    TRAILER_ATTACHED_OFFSET = 80
 
     def read_trailer(self, index: int = 0) -> Dict[str, Any]:
         """Read the placement + attached flag of trailer ``index`` (0-based).
@@ -101,7 +103,7 @@ class SCSTelemetry:
         if base + self.TRAILER_BLOCK_SIZE > self.mmap_size:
             return {}
         try:
-            attached = self.read_bool(base + 81)[0]
+            attached = self.read_bool(base + self.TRAILER_ATTACHED_OFFSET)[0]
             world_x = self.read_double(base + 872)[0]
             world_y = self.read_double(base + 880)[0]
             world_z = self.read_double(base + 888)[0]

@@ -299,6 +299,7 @@ class UltraPilotHUD(QWidget):
             "altitude": float(s.get("truck_altitude", 0.0) or 0.0),
             "heading": s.get("truck_heading", 0.0) or 0.0,
             "trailer_attached": bool(s.get("trailer_attached", False)),
+            "trailer_heading": s.get("trailer_heading"),
             "trailer_articulation": float(s.get("trailer_articulation", 0.0) or 0.0),
             "traffic": s.get("traffic", []) or [],
             "light": s.get("traffic_light"),
@@ -626,6 +627,53 @@ class UltraPilotHUD(QWidget):
                 if pa and pb:
                     qp.drawLine(pa, pb)
             travelled += segment
+
+    @staticmethod
+    def _matched_ego_lateral(data):
+        """Place the HUD rig on the exact lane used by its road underlay."""
+        if data.get("lane_revision", -1) < 0:
+            return 0.0
+        match = data.get("lane_match") or {}
+        try:
+            error = float(match.get("lateral_error_m", 0.0) or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+        if not math.isfinite(error) or abs(error) > 3.0:
+            return 0.0
+        # LaneMatch is truck minus projected lane centre along the lane's
+        # right normal. HUD lateral coordinates express lane centre relative
+        # to the truck, hence the opposite sign.
+        return -error
+
+    @staticmethod
+    def _resolved_trailer_articulation(data):
+        """Use live tractor/trailer headings, with the published angle fallback."""
+        if not data.get("trailer_attached", False):
+            return 0.0
+        truck_heading = data.get("heading")
+        trailer_heading = data.get("trailer_heading")
+        try:
+            if truck_heading is not None and trailer_heading is not None:
+                truck_heading = float(truck_heading)
+                trailer_heading = float(trailer_heading)
+                if math.isfinite(truck_heading) and math.isfinite(trailer_heading):
+                    return ((truck_heading - trailer_heading + math.pi)
+                            % (2.0 * math.pi) - math.pi)
+            fallback = float(data.get("trailer_articulation", 0.0) or 0.0)
+            return fallback if math.isfinite(fallback) else 0.0
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+
+    @staticmethod
+    def _articulated_trailer_pose(road_lateral, articulation):
+        """Return the fixed fifth wheel, trailer angle and tail in truck space."""
+        hinge = (HUD_EGO_AHEAD_M - 2.15, float(road_lateral))
+        angle = -max(-math.radians(48.0),
+                     min(math.radians(48.0), float(articulation)))
+        forward_a, forward_l = math.cos(angle), -math.sin(angle)
+        tail = (hinge[0] - forward_a * 11.45,
+                hinge[1] - forward_l * 11.45)
+        return hinge, angle, tail
 
     def _draw_driving_view(self, qp, view, d):
         # Slightly darker ground band below the horizon for depth.
@@ -1060,13 +1108,16 @@ class UltraPilotHUD(QWidget):
             for a, l, ground, v in vehs:
                 self._draw_low_poly_vehicle(qp, view, a, l, v, ground, h)
 
-        # Truck-space lateral zero is the real telemetry position of the
-        # vehicle. Moving the model to a road centreline incorrectly shifted a
-        # truck in the right lane into the middle of the whole carriageway.
-        self._ego_road_lateral = 0.0
+        # The authoritative road underlay is centred on LaneMatch.point. Keep
+        # the HUD model on that exact same lane-local origin. Using hard-coded
+        # zero here made the road move relative to the model as soon as the
+        # telemetry position accumulated ordinary lateral error.
+        self._ego_road_lateral = self._matched_ego_lateral(d)
         # Ego truck as a 3D model at the bottom centre (cab + trailer).
-        self._draw_low_poly_ego(qp, view, d.get("trailer_articulation", 0.0),
-                                True, self._ego_road_lateral)
+        articulation = self._resolved_trailer_articulation(d)
+        self._draw_low_poly_ego(qp, view, articulation,
+                                d.get("trailer_attached", False),
+                                self._ego_road_lateral)
 
     def _draw_low_poly_ego(self, qp, view, articulation=0.0, attached=True,
                            road_lateral=0.0):
@@ -1087,12 +1138,10 @@ class UltraPilotHUD(QWidget):
         # Trailer is a single closed tapered mesh. Its nose overlaps the fifth
         # wheel so articulation never opens a visible hole in the model.
         if attached:
-            trailer_angle = angle - max(-math.radians(48),
-                                        min(math.radians(48), float(articulation)))
+            hinge, trailer_angle, tail = self._articulated_trailer_pose(
+                road_lateral, articulation)
             tua, tul = math.cos(trailer_angle), -math.sin(trailer_angle)
             tpa, tpl = -tul, tua
-            tail = (hinge[0] - tua * 11.45,
-                    hinge[1] - tul * 11.45)
             # Wheels are painted first so the opaque body correctly hides
             # their inner halves in rear/front views.
             for axle in (1.35, 2.35, 3.35):
@@ -1127,6 +1176,20 @@ class UltraPilotHUD(QWidget):
              (3.18, .92, .30, 2.52),
              (3.38, .68, .40, 1.72)],
             ("#666D76", grey, light))
+
+        if attached:
+            # Visible fifth-wheel pivot: both bodies meet at this invariant
+            # point while the trailer rotates around it.
+            pivot = self._project(hinge[0], hinge[1], view, .58)
+            rim = self._project(hinge[0], hinge[1] + .34, view, .58)
+            top = self._project(hinge[0], hinge[1], view, .92)
+            if pivot and rim and top:
+                rx = max(2.0, abs(rim.x() - pivot.x()))
+                ry = max(2.0, abs(top.y() - pivot.y()))
+                qp.setPen(QPen(QColor("#262B31"), 1.2))
+                qp.setBrush(QColor("#9DA3AA"))
+                qp.drawEllipse(QRectF(pivot.x() - rx, pivot.y() - ry,
+                                      rx * 2.0, ry * 2.0))
 
     def _draw_section_mesh(self, qp, view, centre, angle, sections, colors):
         """Draw a watertight faceted body from connected cross-sections."""
