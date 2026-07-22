@@ -80,6 +80,23 @@ def autopilot(truck, state):
 
 
 class ControlSafetyRegressionTests(unittest.TestCase):
+    def test_steering_unwinds_faster_than_it_winds_into_curve(self):
+        plugin = autopilot({"speed": 10.0, "gear": 3}, State())
+        plugin._last_steering = 0.40
+        released = plugin._ramp_steering(0.0, 0.10)
+        release_step = 0.40 - released
+        plugin._last_steering = 0.0
+        applied = plugin._ramp_steering(0.40, 0.10)
+        self.assertGreater(release_step, applied * 2.5)
+        self.assertGreater(released, 0.0)  # still continuous, never snaps
+
+    def test_steering_reversal_passes_smoothly_through_zero(self):
+        plugin = autopilot({"speed": 10.0, "gear": 3}, State())
+        plugin._last_steering = 0.03
+        first = plugin._ramp_steering(-0.40, 0.10)
+        self.assertLess(first, 0.03)
+        self.assertGreaterEqual(first, -0.03)
+
     def test_scs_writer_layout_matches_shipped_controller_dll(self):
         offsets, total = {}, 0
         for name, field_type in _FIELDS:

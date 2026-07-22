@@ -7,7 +7,8 @@ from core.navigation.runtime_preflight import CONFIDENCE_THRESHOLD
 
 
 # --- Tuning (kept here, mirrored into settings under "autopilot" section) -----
-STEER_RATE_LIMIT = 0.16      # enough authority to hold the confirmed lane
+STEER_RATE_LIMIT = 0.16      # rate for adding steering into a confirmed bend
+STEER_UNWIND_RATE = 0.48     # release lock promptly after the apex / CTE crossing
 MIN_LANE_TRAJECTORY_CONFIDENCE = CONFIDENCE_THRESHOLD
 # 0.72 rejects ambiguous/off-route matches while retaining a wide margin below
 # ProMods-1.59 centre samples (min 0.895, p05 0.950, median 0.966) and
@@ -535,8 +536,19 @@ class Plugin(BasePlugin):
         self.sdk.controller.set_brake(self._last_brake)
 
     def _ramp_steering(self, target: float, dt: float) -> float:
-        """Rate-limit the steering so the wheel moves smoothly, never snapping."""
+        """Rate-limit steering without retaining stale lock after a bend.
+
+        Applying and releasing the wheel at the same slow rate left the old
+        command active for several seconds after the route target had crossed
+        zero. That delay is a control integrator: the truck first ran wide,
+        then crossed the centre and kept turning into the opposite lane. Keep
+        engagement gentle, but unwind/reverse toward zero three times faster.
+        """
         target = float(np.clip(target, -1.0, 1.0))
-        max_step = STEER_RATE_LIMIT * max(dt, 1e-3)
+        current = float(self._last_steering)
+        unwinding = (abs(target) < abs(current)
+                     or (current * target < 0.0))
+        rate = STEER_UNWIND_RATE if unwinding else STEER_RATE_LIMIT
+        max_step = rate * max(dt, 1e-3)
         delta = float(np.clip(target - self._last_steering, -max_step, max_step))
         return float(np.clip(self._last_steering + delta, -1.0, 1.0))

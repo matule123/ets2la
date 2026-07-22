@@ -56,6 +56,56 @@ def autopilot_state(confidence, *, valid=True, heartbeat=None,
 
 
 class LaneGeometryAuditTests(unittest.TestCase):
+    def test_route_tracking_cannot_jump_to_later_overlapping_arm(self):
+        # The final arm deliberately runs almost on top of the first one in the
+        # same direction. Once the truck acquired segment 0, a few centimetres
+        # of lateral motion must not jump route progress through the loop.
+        route = Route([
+            (0.20, 0.0), (0.20, 40.0), (20.0, 40.0), (20.0, 0.0),
+            (-10.0, 0.0), (-10.0, 40.0), (0.0, 40.0), (0.0, 80.0),
+        ])
+        heading = math.pi
+        self.assertEqual(route.tracking_index((0.20, 5.0), heading), 0)
+        self.assertEqual(route.tracking_index((0.0, 20.0), heading), 0)
+        # All consumers in the same frame must observe the same projection.
+        self.assertEqual(route.tracking_index((0.0, 20.0), heading), 0)
+        route.curvature_ahead((0.0, 20.0), heading)
+        self.assertEqual(route.tracking_index((0.0, 20.0), heading), 0)
+
+    def test_route_tracking_reacquires_after_real_teleport(self):
+        route = Route([(0.0, 0.0), (0.0, 40.0), (100.0, 40.0),
+                       (100.0, 100.0)])
+        self.assertEqual(route.tracking_index((0.0, 5.0), math.pi), 0)
+        # A world-space displacement larger than the telemetry continuity
+        # window is a genuine teleport/load and permits global reacquisition.
+        self.assertEqual(route.tracking_index((100.0, 80.0), math.pi), 2)
+
+    def test_lookahead_starts_at_projection_not_previous_waypoint(self):
+        route = Route([(0.0, 0.0), (0.0, 20.0), (0.0, 40.0)])
+        point = route.lookahead_point(0, (0.0, 15.0), 10.0)
+        self.assertAlmostEqual(point[0], 0.0)
+        self.assertAlmostEqual(point[1], 25.0)
+
+    def test_lane_centre_recovery_is_damped_not_right_left_hunting(self):
+        # Deterministic bicycle approximation: start 1.5 m off a straight lane
+        # at 43 km/h. The controller may cross centre while settling, but must
+        # not swing deeply into the other lane or keep oscillating.
+        route = Route([(0.0, float(z)) for z in range(0, 501, 2)])
+        x, z, heading = 1.5, 0.0, math.pi
+        errors = []
+        speed, dt, wheelbase = 12.0, 0.05, 5.0
+        for _ in range(400):
+            steering = route.steering((x, z), heading, speed)
+            heading -= speed / wheelbase * (steering * 0.18) * dt
+            x += -math.sin(heading) * speed * dt
+            z += -math.cos(heading) * speed * dt
+            errors.append(x)
+        crossings = sum(first*second < 0.0
+                        for first, second in zip(errors, errors[1:]))
+        self.assertGreater(min(errors), -0.50)
+        self.assertLessEqual(crossings, 4)
+        self.assertLess(max(abs(error) for error in errors[-100:]), 0.06)
+
     def test_runtime_path_rejects_parallel_first_lane_offset(self):
         m = SyntheticMap()
         m.node(1, 0, 0); m.node(2, 0, 40)
@@ -196,7 +246,7 @@ class LaneGeometryAuditTests(unittest.TestCase):
                 {"input_lanes": (0,), "output_lanes": (), "y": 0.0},
                 {"input_lanes": (), "output_lanes": (0,), "y": 0.0},
             ),
-            "curves": ({"nav_node_index": 0, "next_lines": (),
+            "curves": ({"nav_node_index": 1, "next_lines": (),
                         "prev_lines": (), "start_y": 0.0, "end_y": 0.0},),
         }
         instance = (token, (1, 2), 0)
@@ -210,6 +260,15 @@ class LaneGeometryAuditTests(unittest.TestCase):
         segment, reason = net._prefab_lane_segment(ambiguous, 0)
         self.assertIsNone(segment)
         self.assertIn("ambiguous", reason)
+
+        # A curve chain can be geometrically connected yet belong to another
+        # navNode/exit. navNodeIndex is authoritative and must reject it.
+        net._prefab_lane_data[token]["curves"][0]["nav_node_index"] = 0
+        segment, reason = net._prefab_lane_segment(
+            GpsCorridorEdge(1, 2, "prefab", 0,
+                            prefab_instance=(instance,)), 0)
+        self.assertIsNone(segment)
+        self.assertIn("missing", reason)
 
     def test_prefab_origin_node_index_controls_world_anchor(self):
         net = RoadNetwork(); net.loaded = True

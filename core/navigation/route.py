@@ -12,6 +12,7 @@ vision — purely from world coordinates.  Sign convention: positive steering =
 steer right; the world uses ETS2's heading where ``forward = (-sin h, -cos h)``.
 """
 
+import bisect
 import json
 import math
 import os
@@ -31,7 +32,7 @@ Point = Tuple[float, float]
 # tracks curves far better than the old ANGLE_GAIN·h + CTE_GAIN·cte sum,
 # which oscillated in S-bends because the two terms fought each other.
 K_HEADING = 1.0           # heading-error weight (Stanley keeps this at 1.0)
-K_CTE = 1.15              # firm lane-centre recovery without boundary wandering
+K_CTE = 0.70              # damped lane-centre recovery; avoids right/left hunting
 K_SOFT = 1.0              # softening constant → CTE term never explodes at v=0
 MIN_LOOKAHEAD = 22.0
 MAX_LOOKAHEAD = 75.0
@@ -67,6 +68,18 @@ class Route:
             else (float(p[0]), float(p[1]))
             for p in self.world_points]
         self.name = name
+        # Arc-length metadata and a progress-aware projection cache.  A global
+        # nearest-segment search is ambiguous where a route crosses itself or
+        # passes another arm of a roundabout.  Once acquired, tracking must
+        # advance along the confirmed polyline instead of jumping to whichever
+        # geometrically-near arm happens to win by a few centimetres.
+        self._segment_lengths: List[float] = []
+        self._cumulative_m: List[float] = [0.0]
+        for first, second in zip(self.points, self.points[1:]):
+            length = math.dist(first, second)
+            self._segment_lengths.append(length)
+            self._cumulative_m.append(self._cumulative_m[-1] + length)
+        self._tracking_state = None
 
     # --- Construction / persistence ------------------------------------------
     def add_point(self, x: float, z: float, min_spacing: float = 10.0) -> bool:
@@ -75,11 +88,16 @@ class Route:
         if not self.points:
             self.points.append(p)
             self.world_points.append(p)
+            self._tracking_state = None
             return True
         lx, lz = self.points[-1]
         if math.hypot(p[0] - lx, p[1] - lz) >= min_spacing:
+            length = math.hypot(p[0] - lx, p[1] - lz)
             self.points.append(p)
             self.world_points.append(p)
+            self._segment_lengths.append(length)
+            self._cumulative_m.append(self._cumulative_m[-1] + length)
+            self._tracking_state = None
             return True
         return False
 
@@ -111,6 +129,95 @@ class Route:
                 best_d, best_i = d, i
         return best_i
 
+    def _project_segment(self, index: int, pos: Point, heading: float):
+        """Return ``(score, distance2, index, t, progress_m)`` for one edge."""
+        px, pz = pos
+        ax, az = self.points[index]
+        bx, bz = self.points[index + 1]
+        dx, dz = bx - ax, bz - az
+        length2 = dx*dx + dz*dz
+        if length2 < 1e-8:
+            return None
+        t = _clamp(((px-ax)*dx + (pz-az)*dz) / length2, 0.0, 1.0)
+        qx, qz = ax + t*dx, az + t*dz
+        distance2 = (px-qx)**2 + (pz-qz)**2
+        length = math.sqrt(length2)
+        fx, fz = -math.sin(heading), -math.cos(heading)
+        alignment = (dx*fx + dz*fz) / length
+        # Heading disagreement is deliberately expensive.  Opposite-facing
+        # edges remain a fallback only if the local window contains no forward
+        # edge (for example immediately after a telemetry teleport).
+        score = distance2 + (1.0 - alignment) * 36.0
+        progress = self._cumulative_m[index] + t*length
+        return score, distance2, index, t, progress, alignment
+
+    def _best_projection(self, indices, pos: Point, heading: float):
+        best = None
+        fallback = None
+        for index in indices:
+            candidate = self._project_segment(index, pos, heading)
+            if candidate is None:
+                continue
+            if fallback is None or candidate[1] < fallback[1]:
+                fallback = candidate
+            if candidate[5] < -0.15:
+                continue
+            if best is None or candidate[0] < best[0]:
+                best = candidate
+        return best if best is not None else fallback
+
+    def _tracking_projection(self, pos: Point, heading: float):
+        if len(self.points) < 2:
+            return (0, 0.0, 0.0, 0.0)
+
+        px, pz = float(pos[0]), float(pos[1])
+        heading = float(heading)
+        state = self._tracking_state
+        if state is not None:
+            last_pos, last_heading, last_index, last_t, last_progress = state
+            movement = math.hypot(px-last_pos[0], pz-last_pos[1])
+            heading_delta = abs((heading-last_heading+math.pi) % (2*math.pi)-math.pi)
+            # Map, steering, curvature and distance consumers query the same
+            # route during one tick. Reuse the exact projection so those reads
+            # cannot move route progress independently of the truck.
+            if movement < 1e-4 and heading_delta < 1e-5:
+                distance2 = self._project_segment(last_index, (px, pz), heading)[1]
+                return last_index, last_t, last_progress, distance2
+        else:
+            movement = float("inf")
+
+        segment_count = len(self.points) - 1
+        reacquire = state is None or movement > 35.0
+        if reacquire:
+            candidate = self._best_projection(range(segment_count), (px, pz), heading)
+        else:
+            last_progress = state[4]
+            # Normal telemetry may skip several frames, but it cannot move the
+            # truck dozens of route metres without comparable world movement.
+            # A small backward tolerance handles GPS noise while preventing a
+            # crossing/roundabout arm from becoming the new target.
+            min_progress = max(0.0, last_progress - 5.0)
+            max_progress = min(self._cumulative_m[-1],
+                               last_progress + max(18.0, movement*2.5 + 8.0))
+            first = max(0, bisect.bisect_right(
+                self._cumulative_m, min_progress) - 2)
+            last = min(segment_count, bisect.bisect_left(
+                self._cumulative_m, max_progress) + 1)
+            candidate = self._best_projection(range(first, last),
+                                              (px, pz), heading)
+            # Lost map/telemetry position: permit a global reacquisition only
+            # when the entire progress window is clearly nowhere near the
+            # truck.  At a crossing the local arm is at zero distance and wins.
+            if candidate is None or candidate[1] > 18.0**2:
+                candidate = self._best_projection(range(segment_count),
+                                                  (px, pz), heading)
+
+        if candidate is None:
+            return (0, 0.0, 0.0, float("inf"))
+        _, distance2, index, t, progress, _ = candidate
+        self._tracking_state = ((px, pz), heading, index, t, progress)
+        return index, t, progress, distance2
+
     def tracking_index(self, pos: Point, heading: float) -> int:
         """Closest route segment that also agrees with the truck heading.
 
@@ -118,41 +225,29 @@ class Route:
         parallel carriageways. It can jump to another arm and command a random
         left/right turn even though the truck is driving straight.
         """
-        if len(self.points) < 2:
-            return 0
-        px, pz = pos
-        fx, fz = -math.sin(heading), -math.cos(heading)
-        best_index, best_score = 0, float("inf")
-        fallback_index, fallback_score = 0, float("inf")
-        for index, (a, b) in enumerate(zip(self.points, self.points[1:])):
-            ax, az = a
-            bx, bz = b
-            dx, dz = bx - ax, bz - az
-            length2 = dx*dx + dz*dz
-            if length2 < 1e-8:
-                continue
-            t = _clamp(((px-ax)*dx + (pz-az)*dz) / length2, 0.0, 1.0)
-            qx, qz = ax + t*dx, az + t*dz
-            distance2 = (px-qx)**2 + (pz-qz)**2
-            length = math.sqrt(length2)
-            alignment = (dx*fx + dz*fz) / length
-            if distance2 < fallback_score:
-                fallback_index, fallback_score = index, distance2
-            # A heading mismatch carries a strong penalty. Opposite segments
-            # are rejected while a forward-facing alternative exists.
-            if alignment < -0.15:
-                continue
-            score = distance2 + (1.0 - alignment) * 36.0
-            if score < best_score:
-                best_index, best_score = index, score
-        return best_index if best_score < float("inf") else fallback_index
+        return self._tracking_projection(pos, heading)[0]
 
     def lookahead_point(self, idx: int, pos: Point, distance: float) -> Point:
-        """Walk forward along the polyline ``distance`` metres from waypoint ``idx``."""
+        """Walk ``distance`` metres from the projection of ``pos`` on edge ``idx``."""
         if not self.points:
             return pos
-        remaining = distance
-        i = idx
+        i = min(max(int(idx), 0), len(self.points)-1)
+        if i >= len(self.points)-1:
+            return self.points[-1]
+        ax, az = self.points[i]
+        bx, bz = self.points[i+1]
+        dx, dz = bx-ax, bz-az
+        length2 = dx*dx + dz*dz
+        t = (0.0 if length2 < 1e-9 else
+             _clamp(((pos[0]-ax)*dx + (pos[1]-az)*dz) / length2, 0.0, 1.0))
+        qx, qz = ax+t*dx, az+t*dz
+        remaining = max(0.0, float(distance))
+        first_remaining = math.hypot(bx-qx, bz-qz)
+        if remaining <= first_remaining and first_remaining > 1e-9:
+            fraction = remaining / first_remaining
+            return (qx+(bx-qx)*fraction, qz+(bz-qz)*fraction)
+        remaining -= first_remaining
+        i += 1
         while i < len(self.points) - 1:
             ax, az = self.points[i]
             bx, bz = self.points[i + 1]

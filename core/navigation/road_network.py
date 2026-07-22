@@ -826,9 +826,32 @@ class RoadNetwork:
             for target, indices in nav_nodes[nav_index][2]:
                 if target in visited or not indices:
                     continue
+                curves = lane_data.get("curves", ())
+                # SCS stores the target nav-node identity on the first curve
+                # of each navNode connection.  nextLines/prevLines alone can
+                # describe a geometrically continuous ring but do not prove
+                # that it is the GPS-selected exit.  Reject a damaged or
+                # mismatched connector instead of taking the other side of a
+                # roundabout.
+                if not (0 <= indices[0] < len(curves)):
+                    continue
+                nav_node_index = int(curves[indices[0]].get(
+                    "nav_node_index", -1))
+                if nav_node_index != -1:
+                    # A PPD can duplicate an AI navNode for different entry
+                    # histories around a roundabout. In that case the curve
+                    # refers to the canonical duplicate rather than the exact
+                    # target index, but both carry the same endIndex. This is
+                    # the only valid alias; a different endIndex is another
+                    # lane/exit and is rejected.
+                    if not (0 <= nav_node_index < len(nav_nodes)):
+                        continue
+                    if (nav_node_index != target
+                            and nav_nodes[nav_node_index][1]
+                                != nav_nodes[target][1]):
+                        continue
                 combined = tuple(curve_indices) + tuple(indices)
                 if curve_indices:
-                    curves = lane_data["curves"]
                     if (indices[0] not in curves[curve_indices[-1]]["next_lines"]
                             or curve_indices[-1] not in curves[indices[0]]["prev_lines"]):
                         continue
