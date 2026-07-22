@@ -237,6 +237,52 @@ class RealMapLaneDataTests(unittest.TestCase):
                      + (points[1].z - points[0].z) * forward_z)
             self.assertGreater(along, 0.0)
 
+    def test_runtime_route_advances_past_retained_gps_prefix(self):
+        """A truck on edge two must not be prepended before GPS edge one."""
+        gps = (
+            3808812423411073026, 3808810055118290944,
+            3808827302817759232, 3808826220347588608,
+            3808834757710774275, 3808834379455856640,
+            3808823298989686786,
+        )
+        active_id = 3808826221916258305
+        lanes = []
+        for segment_index, road_uid in enumerate(self.net._seg_road_uids):
+            if road_uid == active_id:
+                lanes.extend(self.net._build_lane_segments(segment_index))
+        active = next(lane for lane in lanes
+                      if lane.direction == -1 and lane.lane_index == 0)
+        truck = active.centerline[10]
+        match = LaneLocator(self.net).locate(
+            (truck.x, truck.y, truck.z), truck.heading, gps)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.lane_id, active.lane_id)
+
+        path, returned = self.net.build_lane_path(
+            gps, (truck.x, truck.z), truck.heading,
+            altitude=truck.y, start_match=match)
+        self.assertTrue(path.valid, path.failure_reason)
+        self.assertEqual(returned.lane_id, active.lane_id)
+        self.assertEqual(path.segments[0].lane_id, active.lane_id)
+        self.assertNotIn("does not connect to the first GPS lane",
+                         path.failure_reason)
+        self.assertLess(math.dist(
+            (path.points[0].x, path.points[0].y, path.points[0].z),
+            (match.point.x, match.point.y, match.point.z)), 1e-6)
+
+        trajectory = build_lane_trajectory(path)
+        self.assertTrue(trajectory.valid, trajectory.failure_reason)
+        self.assertLess(math.dist(
+            (trajectory.points[0].x, trajectory.points[0].y,
+             trajectory.points[0].z),
+            (match.point.x, match.point.y, match.point.z)), 1e-6)
+        # No backwards prefix means there is no artificial U-turn/spike at
+        # the live truck position. The real ibe91 bend remains below the
+        # trajectory validator's strict heading limit.
+        jumps = [abs(math.degrees(wrap_angle(b.heading - a.heading)))
+                 for a, b in zip(trajectory.points, trajectory.points[1:])]
+        self.assertLess(max(jumps, default=0.0), 35.0)
+
 
 if __name__ == "__main__":
     unittest.main()
