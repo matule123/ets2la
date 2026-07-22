@@ -374,6 +374,7 @@ class UltraPilotEngine:
             if not new_state:
                 self.controller.release_all()
                 self._was_active = False
+                self._drive_selector_pressed = False
                 self._last_output_steering = 0.0
                 self._last_output_brake = 0.0
                 self.shared_state.update_batch({
@@ -396,6 +397,7 @@ class UltraPilotEngine:
         if not desired:
             self.controller.release_all()
             self._was_active = False
+            self._drive_selector_pressed = False
             self._last_output_steering = 0.0
             self._last_output_brake = 0.0
             self.shared_state.update_batch({
@@ -476,6 +478,13 @@ class UltraPilotEngine:
         self._last_output_steering = steering
         self._last_output_brake = brake
         self.shared_state.set("automatic_safety_stop_reason", str(reason))
+        # HUD diagnostics must reflect the command actually applied by this
+        # engine-owned fallback, not the stale last plugin intent.
+        self.shared_state.update_batch({
+            CTL_STEERING: steering,
+            CTL_THROTTLE: 0.0,
+            CTL_BRAKE: brake,
+        })
         self.controller.set_steering(steering)
         self.controller.set_throttle(0.0)
         self.controller.set_brake(brake)
@@ -491,6 +500,7 @@ class UltraPilotEngine:
             if self._was_active:
                 self.controller.release_all()
                 self._was_active = False
+                self._drive_selector_pressed = False
             self._last_output_steering = 0.0
             self._last_output_brake = 0.0
             self._last_control_flush = time.monotonic()

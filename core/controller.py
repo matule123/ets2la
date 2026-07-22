@@ -152,6 +152,10 @@ class Controller:
             self.set_steering(0.0)
             self.set_throttle(0.0)
             self.set_brake(0.0)
+            if self.mode == "SCS_SDK":
+                # Do not leave the momentary gearbox button latched when the
+                # master switch changes between its press/release frames.
+                self.scs.release_drive()
         elif self.mode == "DIGITAL" and _HAS_PDI:
             for key in list(self._keys_down):
                 pydirectinput.keyUp(key)

@@ -425,8 +425,6 @@ class Plugin(BasePlugin):
             self.active_route = None
             self.sdk.set("nav_active", False)
             self.sdk.set("nav_steering", 0.0)
-            self.sdk.set("autopilot_active", False)
-            self.sdk.set("autopilot_disable_reason", "map dataset changed")
             logging.info("Navigation: stopped.")
 
         elif cmd == "switch_map":
@@ -494,9 +492,6 @@ class Plugin(BasePlugin):
                         reason = (f"Selected map {wanted} is not ready. "
                                   f"Create or download a dataset for ETS2 "
                                   f"{installed_version} first.")
-                        self.sdk.set("autopilot_active", False)
-                        self.sdk.set("autopilot_disable_reason",
-                                     "selected map is not ready")
                         self.sdk.set("navigation_unreliable", True)
                         self.sdk.set("map_status", reason)
                         self._publish_invalid_lane_trajectory(
@@ -516,9 +511,6 @@ class Plugin(BasePlugin):
                         map_data.compatible_with_installed_game(chosen["key"])
                     self.sdk.set("installed_game_version", installed_version)
                     if not compatible:
-                        self.sdk.set("autopilot_active", False)
-                        self.sdk.set("autopilot_disable_reason",
-                                     "incompatible map dataset")
                         self.sdk.set("navigation_unreliable", True)
                         self.sdk.set("map_status", reason)
                         self._publish_invalid_lane_trajectory(
@@ -546,18 +538,19 @@ class Plugin(BasePlugin):
                     else:
                         # Allow a retry on the next run, not this one.
                         self._net_attempted = False
-                        self.sdk.set("autopilot_active", False)
-                        self.sdk.set("autopilot_disable_reason",
-                                     "map data is unreadable")
                         self.sdk.set("navigation_unreliable", True)
                         self.sdk.set("map_status",
                                      "Map data unreadable — will retry.")
+                        self._publish_invalid_lane_trajectory(
+                            "Map data is unreadable", (),
+                            "Map data is unreadable", log_failure=False)
                 except Exception as e:
                     logging.error("Navigation: engine-side road network load failed: %s", e)
-                    self.sdk.set("autopilot_active", False)
-                    self.sdk.set("autopilot_disable_reason", "map load failed")
                     self.sdk.set("navigation_unreliable", True)
                     self.sdk.set("map_status", f"Map load error: {e}")
+                    self._publish_invalid_lane_trajectory(
+                        f"Map load error: {e}", (),
+                        f"Map load error: {e}", log_failure=False)
                 finally:
                     if generation == self._map_load_generation:
                         self._net_loading = False

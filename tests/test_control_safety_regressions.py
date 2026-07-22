@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import unittest
 
 from PyQt6.QtCore import QPointF
@@ -13,9 +14,15 @@ from core.hud import (
     HUD_CAMERA_BACK_M, HUD_EGO_AHEAD_M, HUD_ROAD_BEHIND_M, UltraPilotHUD,
     _clip_truck_road_segment,
 )
+from core.engine import UltraPilotEngine
+from core.controller import Controller as PhysicalController
 from plugins.autopilot.main import Plugin as AutopilotPlugin
 from plugins.lanecontrol.main import Plugin as LaneControlPlugin
-from sdk.plugin_sdk import _ControllerProxy, CTL_SELECT_DRIVE
+from plugins.map.main import Plugin as MapPlugin
+from sdk.plugin_sdk import (
+    _ControllerProxy, CTL_BRAKE, CTL_SELECT_DRIVE, CTL_STEERING,
+    CTL_THROTTLE,
+)
 
 
 class State:
@@ -28,15 +35,24 @@ class State:
     def set(self, key, value):
         self.values[key] = value
 
+    def update_batch(self, values):
+        self.values.update(values)
+
 
 class Controller:
     def __init__(self):
         self.steering = self.throttle = self.brake = 0.0
+        self.drive_events = []
 
     def set_steering(self, value): self.steering = value
     def set_throttle(self, value): self.throttle = value
     def set_brake(self, value): self.brake = value
-    def select_drive(self, pressed=True): self.drive = pressed; return True
+    def set_blinker(self, value): pass
+    def pay_toll(self): pass
+    def select_drive(self, pressed=True):
+        self.drive = pressed
+        self.drive_events.append(pressed)
+        return True
 
 
 class Telemetry:
@@ -104,6 +120,68 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         self.assertTrue(plugin.sdk.controller.drive)
         self.assertEqual(plugin.sdk.controller.throttle, 0.0)
         self.assertEqual(plugin.sdk.controller.brake, 0.0)
+
+        # The next worker tick must release the momentary selector, not keep
+        # geardrive permanently high while telemetry still reports Neutral.
+        plugin.on_tick(0.05)
+        self.assertFalse(plugin.sdk.controller.drive)
+
+    def test_engine_turns_coalesced_drive_requests_into_real_pulses(self):
+        state = State({
+            "autopilot_active": True,
+            "autopilot_control_heartbeat": time.monotonic(),
+            "telemetry_valid": True,
+            CTL_STEERING: 0.0, CTL_THROTTLE: 0.0, CTL_BRAKE: 0.0,
+            CTL_SELECT_DRIVE: True,
+        })
+        controller = Controller()
+        engine = UltraPilotEngine.__new__(UltraPilotEngine)
+        engine.shared_state = state
+        engine.controller = controller
+        engine._was_active = False
+        engine._last_output_steering = 0.0
+        engine._last_output_brake = 0.0
+        engine._last_control_flush = time.monotonic()
+        engine._drive_selector_pressed = False
+
+        engine._flush_controls()
+        # Simulate a 100 Hz plugin publishing True again before the slower
+        # engine frame. The engine must release first instead of holding it.
+        state.set(CTL_SELECT_DRIVE, True)
+        engine._flush_controls()
+        state.set(CTL_SELECT_DRIVE, True)
+        engine._flush_controls()
+        self.assertEqual(controller.drive_events, [True, False, True])
+
+    def test_master_release_also_releases_drive_selector(self):
+        class FakeSCS:
+            def __init__(self): self.drive_released = False
+            def set_steering(self, _value): pass
+            def set_throttle(self, _value): pass
+            def set_brake(self, _value): pass
+            def release_drive(self): self.drive_released = True
+
+        controller = PhysicalController.__new__(PhysicalController)
+        controller.mode = "SCS_SDK"
+        controller.scs = FakeSCS()
+        controller.release_all()
+        self.assertTrue(controller.scs.drive_released)
+
+    def test_navigation_stop_does_not_turn_off_master_autopilot(self):
+        state = State({
+            "nav_cmd": "stop", "autopilot_active": True,
+            "nav_active": True, "nav_steering": 0.4,
+        })
+        plugin = MapPlugin.__new__(MapPlugin)
+        plugin.sdk = type("MapSDK", (), {
+            "get": lambda _self, key, default=None: state.get(key, default),
+            "set": lambda _self, key, value: state.set(key, value),
+        })()
+        plugin.active_route = object()
+        plugin._handle_command(None)
+        self.assertTrue(state.get("autopilot_active"))
+        self.assertFalse(state.get("nav_active"))
+        self.assertEqual(state.get("nav_steering"), 0.0)
 
     def test_arrival_stops_and_disengages(self):
         state = State({
