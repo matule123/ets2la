@@ -1,5 +1,6 @@
 import os
 import io
+import math
 import struct
 import sys
 import time
@@ -323,6 +324,46 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         first, second, _t0, _t1 = clipped
         self.assertAlmostEqual(first[0], -HUD_ROAD_BEHIND_M)
         self.assertEqual(second, (-10.0, 0.0))
+
+    def test_lane_driving_corridor_keeps_authoritative_xyz_and_order(self):
+        path = [[0.0, 12.0, 0.0], [0.5, 12.5, -10.0],
+                [2.0, 13.0, -25.0]]
+
+        def to_truck(x, z, align_road=True):
+            self.assertFalse(align_road)
+            return -z, x
+
+        corridor = UltraPilotHUD._lane_driving_corridor(path, to_truck, 10.0)
+        self.assertGreaterEqual(len(corridor), len(path))
+        # The optional first point is only a backwards extension of the first
+        # confirmed tangent. Every authoritative sample remains unchanged.
+        self.assertEqual(corridor[-3:], [(0.0, 0.0, 2.0),
+                                        (10.0, 0.5, 2.5),
+                                        (25.0, 2.0, 3.0)])
+
+    def test_lane_driving_corridor_covers_trailer_when_route_starts_at_cab(self):
+        path = [[0.0, 0.0, 0.0], [0.0, 0.0, -5.0],
+                [0.0, 0.0, -15.0]]
+
+        def to_truck(x, z, align_road=True):
+            return -z, x
+
+        corridor = UltraPilotHUD._lane_driving_corridor(path, to_truck, 0.0)
+        self.assertLessEqual(corridor[0][0], -HUD_ROAD_BEHIND_M + 0.01)
+        self.assertTrue(any(abs(a) < 0.01 and abs(l) < 0.01
+                            for a, l, _height in corridor))
+
+    def test_lane_driving_corridor_rejects_non_finite_display_points(self):
+        path = [[0.0, 0.0, 0.0], [float("nan"), 0.0, -5.0],
+                [0.0, 0.0, -10.0]]
+
+        def to_truck(x, z, align_road=True):
+            return -z, x
+
+        corridor = UltraPilotHUD._lane_driving_corridor(path, to_truck, 0.0)
+        self.assertTrue(corridor)
+        self.assertTrue(all(math.isfinite(value) for point in corridor
+                            for value in point))
 
 
 if __name__ == "__main__":
