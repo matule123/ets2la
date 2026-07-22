@@ -931,6 +931,26 @@ class RoadNetwork:
                     candidates.append((instance, indices, points,
                                        exit_lane_index,
                                        max(1, len(output_lanes))))
+        if len(candidates) > 1:
+            # Some roundabout PPDs enumerate both the direct confirmed exit
+            # and a full extra lap that returns to the same output curve. GPS
+            # supplies only entry/exit UIDs, so an extra lap is not an
+            # independent route choice. When every option has the identical
+            # instance, entry curve and exit curve, accept only a uniquely
+            # shortest navCurve chain; otherwise retain fail-closed ambiguity.
+            signatures = {(item[0][0], item[1][0], item[1][-1])
+                          for item in candidates}
+            if len(signatures) == 1:
+                ranked = sorted(candidates, key=lambda item: sum(
+                    math.dist((a.x, a.y, a.z), (b.x, b.y, b.z))
+                    for a, b in zip(item[2], item[2][1:])))
+                shortest = sum(math.dist((a.x, a.y, a.z), (b.x, b.y, b.z))
+                               for a, b in zip(ranked[0][2], ranked[0][2][1:]))
+                next_length = sum(
+                    math.dist((a.x, a.y, a.z), (b.x, b.y, b.z))
+                    for a, b in zip(ranked[1][2], ranked[1][2][1:]))
+                if shortest < next_length * 0.75:
+                    candidates = [ranked[0]]
         if len(candidates) != 1:
             return None, ("ambiguous prefab lane connector"
                           if candidates else "missing prefab lane connector")

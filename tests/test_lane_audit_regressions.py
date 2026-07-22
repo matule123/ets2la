@@ -118,6 +118,17 @@ class LaneGeometryAuditTests(unittest.TestCase):
         self.assertLess(route.steering((point.x - 1.0, point.z),
                                        point.heading, 10.0), 0.0)
 
+    def test_gentle_curve_cannot_wind_steering_at_standstill(self):
+        points = [[0.0, 0.0, 0.0], [1.0, 0.0, 10.0],
+                  [3.0, 0.0, 20.0], [6.0, 0.0, 30.0],
+                  [10.0, 0.0, 40.0], [15.0, 0.0, 50.0],
+                  [21.0, 0.0, 60.0]]
+        route = Route(points)
+        heading = math.pi
+        self.assertGreater(route.curvature_ahead((0.0, 0.0), heading), 100.0)
+        self.assertLessEqual(abs(route.steering(
+            (0.0, 0.0), heading, speed_ms=0.0)), 0.22 + 1e-9)
+
     def test_equal_parallel_candidates_are_rejected_without_history(self):
         def lane(uid, x):
             lid = LaneId(uid, 1, 0)

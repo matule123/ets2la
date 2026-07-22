@@ -60,6 +60,14 @@ class LaneLocatorTests(unittest.TestCase):
             (0.1, 0, 15), math.pi, (10, 11))
         self.assertEqual(match.lane_id, route.lane_id)
 
+    def test_directed_gps_edge_beats_wrong_arm_sharing_junction_uid(self):
+        wrong_arm = lane(1, 0.0, gps=(9, 10))
+        route_arm = lane(2, 0.3, gps=(10, 11))
+        match = LaneLocator(FakeNetwork([wrong_arm, route_arm])).locate(
+            (0.0, 0.0, 15.0), math.pi, (10, 11, 12))
+        self.assertIsNotNone(match)
+        self.assertEqual(match.lane_id, route_arm.lane_id)
+
     def test_hysteresis_holds_previous_lane_for_small_score_change(self):
         left = lane(1, -1.0, lane_index=0)
         right = lane(1, 1.0, lane_index=1)

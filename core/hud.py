@@ -520,115 +520,6 @@ class UltraPilotHUD(QWidget):
         return self._display_truck_pos, new_h
 
     @staticmethod
-    def _lane_driving_corridor(path, to_truck, altitude):
-        """Return one ordered, lane-centred HUD road from the live snapshot.
-
-        This is deliberately a *display underlay*, not another navigation
-        path.  It retains the authoritative XYZ samples and their order, and
-        never pulls in neighbouring map segments or junction branches.
-        """
-        points = []
-        for point in path or ():
-            try:
-                if len(point) < 3:
-                    continue
-                x, y, z = map(float, point[:3])
-                if not all(math.isfinite(value) for value in (x, y, z)):
-                    continue
-                ahead, lateral = to_truck(x, z, align_road=False)
-                points.append((ahead, lateral, y - altitude))
-            except (TypeError, ValueError, IndexError):
-                continue
-        if len(points) < 2:
-            return []
-
-        closest = min(range(len(points)),
-                      key=lambda i: math.hypot(points[i][0], points[i][1]))
-        # Keep genuine samples behind the cab so the trailer never hangs over
-        # an empty background.  The route order remains untouched.
-        start = closest
-        while start > 0 and points[start][0] > -HUD_ROAD_BEHIND_M:
-            start -= 1
-        corridor = [p for p in points[start:]
-                    if -HUD_ROAD_BEHIND_M - 8.0 <= p[0] <= 220.0]
-        if len(corridor) < 2:
-            return []
-
-        # A newly calculated route commonly begins at the truck and contains
-        # no historic samples. Extend only the confirmed first tangent for the
-        # display asphalt behind the trailer; navigation points stay intact.
-        first = corridor[0]
-        if first[0] > -HUD_ROAD_BEHIND_M + 4.0:
-            second = corridor[1]
-            da, dl, dy = (second[0] - first[0], second[1] - first[1],
-                          second[2] - first[2])
-            horizontal = math.hypot(da, dl)
-            if horizontal > 0.25 and da > 0.0:
-                distance = min(HUD_ROAD_BEHIND_M + first[0], 48.0)
-                scale = distance / horizontal
-                corridor.insert(0, (first[0] - da * scale,
-                                    first[1] - dl * scale,
-                                    first[2] - dy * scale))
-        return corridor
-
-    def _draw_lane_driving_corridor(self, qp, view, corridor):
-        """Paint the clean perspective road used by the driving HUD."""
-        if len(corridor) < 2:
-            return
-
-        # A selected lane is the invariant geometry available in every map.
-        # Render it as a generous real-world lane plus shoulders, rather than
-        # guessing the centre of a multi-carriageway road from roadLook data.
-        half_width = 3.25
-        left, right = [], []
-        for index, (ahead, lateral, height) in enumerate(corridor):
-            previous = corridor[max(0, index - 1)]
-            following = corridor[min(len(corridor) - 1, index + 1)]
-            da = following[0] - previous[0]
-            dl = following[1] - previous[1]
-            length = math.hypot(da, dl)
-            if length < 0.05:
-                continue
-            normal_a, normal_l = -dl / length, da / length
-            lp = self._project(ahead + normal_a * half_width,
-                               lateral + normal_l * half_width, view, height)
-            rp = self._project(ahead - normal_a * half_width,
-                               lateral - normal_l * half_width, view, height)
-            if lp and rp:
-                left.append(lp)
-                right.append(rp)
-        if len(left) < 2 or len(left) != len(right):
-            return
-
-        qp.setPen(Qt.PenStyle.NoPen)
-        qp.setBrush(QColor(49, 53, 60, 255))
-        qp.drawPolygon(QPolygonF(left + list(reversed(right))))
-
-        edge_pen = QPen(QColor(220, 223, 228, 235), 2.4,
-                        Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
-                        Qt.PenJoinStyle.RoundJoin)
-        qp.setPen(edge_pen)
-        qp.drawPolyline(QPolygonF(left))
-        qp.drawPolyline(QPolygonF(right))
-
-        # Short world-spaced centre dashes provide depth without turning the
-        # scene into a top-down map. They are derived from the same corridor.
-        qp.setPen(QPen(QColor(210, 214, 220, 210), 2.0,
-                       Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
-        travelled = 0.0
-        for first, second in zip(corridor, corridor[1:]):
-            segment = math.dist(first, second)
-            if segment < 0.05:
-                continue
-            midpoint = travelled + segment * 0.5
-            if int(midpoint / 6.0) % 2 == 0:
-                pa = self._project(first[0], first[1], view, first[2])
-                pb = self._project(second[0], second[1], view, second[2])
-                if pa and pb:
-                    qp.drawLine(pa, pb)
-            travelled += segment
-
-    @staticmethod
     def _matched_ego_lateral(data):
         """Place the HUD rig on the exact lane used by its road underlay."""
         if data.get("lane_revision", -1) < 0:
@@ -735,11 +626,6 @@ class UltraPilotHUD(QWidget):
             return ahead, lateral
 
         if pos:
-            lane_corridor = []
-            if d.get("lane_revision", -1) >= 0:
-                lane_corridor = self._lane_driving_corridor(
-                    d.get("nav_path", ()), to_truck, d["altitude"])
-                self._draw_lane_driving_corridor(qp, view, lane_corridor)
             # Draw the full nearby road network first; the selected GPS route
             # is then overlaid in blue and remains visually unambiguous.
             def clip_road(a, b):
@@ -752,8 +638,7 @@ class UltraPilotHUD(QWidget):
             # A valid lane snapshot is the sole road source in driving view.
             # The broad network remains a compatibility fallback only while
             # no lane route exists; mixing both created the map-like carpet.
-            road_segments = ([] if lane_corridor else
-                             d.get("road_segments", []))
+            road_segments = d.get("road_segments", [])
             for segment in road_segments:
                 try:
                     a = to_truck(float(segment[0][0]), float(segment[0][1]))

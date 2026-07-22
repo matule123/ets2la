@@ -184,7 +184,9 @@ class LaneLocator:
         else:
             px, py, pz = map(float, position[:3])
         previous = previous if previous is not None else self.previous
-        gps = frozenset(int(uid) for uid in gps_uids)
+        gps_order = tuple(int(uid) for uid in gps_uids)
+        gps = frozenset(gps_order)
+        directed_gps_edges = frozenset(zip(gps_order, gps_order[1:]))
         candidates = self.network.lane_segments_near(
             (px, pz), self.config.search_radius_m)
         ranked = []
@@ -198,6 +200,8 @@ class LaneLocator:
                     or vertical > self.config.max_vertical_m
                     or heading_error > self.config.max_heading_rad):
                 continue
+            exact_route_edge = ((lane.start_uid, lane.end_uid)
+                                in directed_gps_edges)
             on_route = not gps or bool(lane.gps_uids & gps)
             continuous = (previous is None
                           or lane.lane_id == previous.lane_id
@@ -212,7 +216,9 @@ class LaneLocator:
                 ("heading", float(heading_error * self.config.heading_weight)),
                 ("vertical", float(vertical * self.config.vertical_weight)),
                 ("off_route", float(
-                    0.0 if on_route else self.config.off_route_penalty)),
+                    0.0 if exact_route_edge or not gps else
+                    min(2.0, self.config.off_route_penalty) if on_route else
+                    self.config.off_route_penalty)),
                 ("derived_width", float(
                     self.config.derived_width_penalty
                     if lane.width_source == "derived" else 0.0)),

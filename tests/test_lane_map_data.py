@@ -283,6 +283,18 @@ class RealMapLaneDataTests(unittest.TestCase):
                  for a, b in zip(trajectory.points, trajectory.points[1:])]
         self.assertLess(max(jumps, default=0.0), 35.0)
 
+    def test_roundabout_same_exit_rejects_unrequested_extra_lap(self):
+        gps = (3764330771381420034, 3808790278165430272)
+        corridor = self.net.resolve_gps_corridor(gps)
+        self.assertTrue(corridor.valid, corridor.failure_reason)
+        segment, reason = self.net._prefab_lane_segment(corridor.edges[0], 0)
+        self.assertEqual(reason, "")
+        self.assertIsNotNone(segment)
+        self.assertEqual(segment.connector_curve_indices, (0, 5, 8, 7))
+        self.assertLess(sum(math.dist(
+            (a.x, a.y, a.z), (b.x, b.y, b.z))
+            for a, b in zip(segment.centerline, segment.centerline[1:])), 70.0)
+
 
 if __name__ == "__main__":
     unittest.main()

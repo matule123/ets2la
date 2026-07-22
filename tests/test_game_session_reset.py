@@ -1,4 +1,6 @@
 import unittest
+
+from core.engine import _live_route_suffix
 from unittest import mock
 
 from core.modules.game_watcher import GameWatcher
@@ -30,6 +32,18 @@ class _Engine:
 
 
 class GameSessionResetTests(unittest.TestCase):
+    def test_live_route_suffix_does_not_keep_passed_fork_arm(self):
+        items = [
+            {"uid": 10, "distance": 900.0},
+            {"uid": 11, "distance": 600.0},
+            {"uid": 12, "distance": 200.0},
+            {"uid": 13, "distance": 0.0},
+        ]
+        suffix, passed, matched = _live_route_suffix(items, 210.0)
+        self.assertEqual(passed, 2)
+        self.assertEqual(matched, 200.0)
+        self.assertEqual([item["uid"] for item in suffix], [12, 13])
+
     def test_game_close_disables_master_and_clears_route(self):
         engine = _Engine()
         watcher = GameWatcher(engine)

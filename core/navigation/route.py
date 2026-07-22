@@ -377,4 +377,9 @@ class Route:
         # the truck leaves its lane, while tight roundabouts remain unrestricted.
         if radius > 300.0:
             steer = _clamp(steer, -0.16, 0.16)
+        elif radius > 100.0:
+            # A broad road bend must not wind on 40% steering at launch merely
+            # because the speed-dependent Stanley term is strongest at zero
+            # speed. Tight prefab turns remain unrestricted below 100 m.
+            steer = _clamp(steer, -0.22, 0.22)
         return _clamp(steer, -1.0, 1.0)
