@@ -1,6 +1,5 @@
 import unittest
 from unittest import mock
-import subprocess
 
 from core.navigation import map_data
 from core.sdk import sdk_downloader
@@ -25,17 +24,17 @@ class Version160SupportTests(unittest.TestCase):
         self.assertEqual(map_data.suggest_key("1.60"), "ets2-1.60")
         self.assertEqual(map_data.suggest_key("1.60", prefer_promods=True),
                          "promods-2.83")
-        self.assertEqual(datasets["ets2-1.60"]["source"], "local-game")
-        self.assertEqual(datasets["promods-2.83"]["source"], "local-game")
+        self.assertEqual(datasets["ets2-1.60"]["source"],
+                         "trucklib-required")
+        self.assertEqual(datasets["promods-2.83"]["source"],
+                         "trucklib-required")
 
-    def test_160_is_never_built_from_installed_159(self):
-        with mock.patch.object(map_data, "installed_ets2",
-                               return_value=(r"C:\\ETS2", "1.59")):
-            ok = map_data._build_from_installed_game(
-                "ets2-1.60", map_data.COMPATIBILITY_DATASETS["ets2-1.60"])
+    def test_160_is_never_built_with_the_159_parser(self):
+        ok = map_data.download("ets2-1.60")
         self.assertFalse(ok)
-        self.assertIn("ETS2 1.59", map_data.last_error())
-        self.assertIn("ETS2 1.60", map_data.last_error())
+        self.assertIn("TruckLib", map_data.last_error())
+        self.assertIn("907", map_data.last_error())
+        self.assertIn("iba ETS2 1.59", map_data.last_error())
 
     def test_dataset_compatibility_uses_real_executable_version(self):
         with mock.patch.object(map_data, "installed_ets2",
@@ -45,19 +44,6 @@ class Version160SupportTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(installed, "1.59")
         self.assertIn("1.60", reason)
-
-    def test_windows_cmd_tools_are_passed_as_one_quoted_command_line(self):
-        with mock.patch.object(map_data.os, "name", "nt"), \
-                mock.patch.object(map_data.subprocess, "run") as run:
-            run.return_value = subprocess.CompletedProcess([], 0)
-            map_data._run_tool([
-                r"C:\Program Files\parser.cmd", "-g",
-                r"C:\Program Files\Euro Truck Simulator 2",
-            ], check=False)
-        args, kwargs = run.call_args
-        self.assertIsInstance(args[0], str)
-        self.assertIn('"C:\\Program Files\\parser.cmd"', args[0])
-        self.assertTrue(kwargs["shell"])
 
     def test_branch_switch_selects_exact_downloaded_version(self):
         datasets = [

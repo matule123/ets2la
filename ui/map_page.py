@@ -442,18 +442,23 @@ class MapPage(QWidget):
         self.btn_dl.setVisible(not downloaded)
         self.btn_use.setEnabled(downloaded and self._net_worker is None)
         local = False
+        trucklib_required = False
         if not downloaded:
             try:
                 entry = next((item for item in map_data.list_datasets()
                               if item["key"] == key), {})
                 local = entry.get("source") == "local-game"
+                trucklib_required = entry.get("source") == "trucklib-required"
             except Exception:
                 pass
+        self.btn_dl.setEnabled(not trucklib_required)
         self.btn_use.setText(
             "Pouzit a nacitat vybranu mapu" if downloaded else
-            ("Najprv vytvor mapu z nainstalovanej hry" if local
+            ("Pre ETS2 1.60 chyba TruckLib exporter" if trucklib_required
+             else "Najprv vytvor mapu z nainstalovanej hry" if local
              else "Najprv stiahni mapu"))
-        self.btn_dl.setText("Vytvorit z nainstalovanej hry" if local
+        self.btn_dl.setText("Podpora 1.60 sa pripravuje" if trucklib_required
+                            else "Vytvorit z nainstalovanej hry" if local
                             else "Stiahnut mapu")
 
     def use_selected_map(self):
