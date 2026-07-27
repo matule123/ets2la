@@ -4,6 +4,7 @@ import unittest
 
 from core.hud import UltraPilotHUD
 from core.sdk.scs_sdk import SCSTelemetry
+from tests.test_lane_route_builder import SyntheticMap
 
 
 class HudPoseStabilityTests(unittest.TestCase):
@@ -35,7 +36,7 @@ class HudPoseStabilityTests(unittest.TestCase):
         error = (heading - (-math.pi + 0.01) + math.pi) % (2 * math.pi) - math.pi
         self.assertLess(abs(error), math.radians(0.13))
 
-    def test_lane_match_keeps_model_on_same_lane_origin_while_moving(self):
+    def test_lane_match_does_not_move_model_twice_from_telemetry_origin(self):
         samples = (0.0, 0.35, 1.20, 2.35, -1.75)
         for lateral_error in samples:
             data = {
@@ -43,10 +44,10 @@ class HudPoseStabilityTests(unittest.TestCase):
                 "lane_match": {"lateral_error_m": lateral_error},
             }
             model_lateral = UltraPilotHUD._matched_ego_lateral(data)
-            # The lane centre transformed into truck space is the negative of
-            # LaneMatch's signed truck-from-lane error.
-            lane_centre_lateral = -lateral_error
-            self.assertAlmostEqual(model_lateral, lane_centre_lateral)
+            # The road was already transformed by subtracting truck_world_pos.
+            # Moving the model by -lateral_error again depicts the lane centre,
+            # not the real truck, and causes visible drift off the road.
+            self.assertEqual(model_lateral, 0.0)
 
     def test_invalid_or_unmatched_lane_never_moves_model(self):
         self.assertEqual(UltraPilotHUD._matched_ego_lateral({
@@ -84,6 +85,26 @@ class HudPoseStabilityTests(unittest.TestCase):
         for tail in (straight_tail, left_tail, right_tail):
             self.assertAlmostEqual(math.dist(straight_hinge, tail), 11.45,
                                    places=6)
+
+    def test_hud_road_mesh_excludes_unconnected_parallel_road(self):
+        synthetic = SyntheticMap()
+        synthetic.node(1, 0.0, 20.0)
+        synthetic.node(2, 0.0, -30.0)
+        synthetic.node(3, 0.0, -80.0)
+        synthetic.node(4, 15.0, 20.0)
+        synthetic.node(5, 15.0, -80.0)
+        synthetic.road(1, 2)
+        synthetic.road(2, 3)
+        synthetic.road(4, 5)
+        segments = synthetic.net.hud_segments_3d_near(
+            (0.0, 0.0), radius=120.0, altitude=0.0)
+        self.assertTrue(segments)
+        xs = [point[0] for segment in segments
+              for point in segment[:2]]
+        self.assertLess(max(abs(x) for x in xs), 1.0)
+        zs = [point[1] for segment in segments
+              for point in segment[:2]]
+        self.assertLess(min(zs), -50.0)
 
     def test_sdk_reads_attached_after_all_eighty_trailer_flags(self):
         sdk = SCSTelemetry()

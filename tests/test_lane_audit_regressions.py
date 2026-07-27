@@ -303,6 +303,33 @@ class LaneGeometryAuditTests(unittest.TestCase):
         self.assertAlmostEqual(transformed[0][0], 100.0)
         self.assertAlmostEqual(transformed[0][1], 110.0)
 
+    def test_hud_prefab_height_comes_from_nav_curve_not_nearest_node(self):
+        net = RoadNetwork(); net.loaded = True
+        net.nodes[1] = (100.0, 200.0)
+        net.node_alt[1] = 10.0
+        net.node_rot[1] = 0.0
+        token = "hud-height-test"
+        net._prefab_desc[token] = (
+            ((0.0, 0.0, 0.0),),
+            ((0.0, 0.0, 10.0, 0.0, 1.0, 0.0, 1.0, 0.0),), ())
+        net._prefab_lane_data[token] = {
+            "nodes": ({"y": 2.0},),
+            "curves": ({"start_y": 2.0, "end_y": 5.0},),
+        }
+        instance = (token, (1,), 0, False)
+        net._prefab_grid[net._cell(100.0, 200.0)] = [instance]
+        segments = net.prefab_segments_3d_near(
+            (100.0, 200.0), radius=40.0)
+        self.assertTrue(segments)
+        self.assertAlmostEqual(segments[0][0][2], 10.0)
+        self.assertAlmostEqual(segments[-1][1][2], 13.0)
+
+    def test_hud_rejects_wrong_deck_vertical_chord(self):
+        self.assertTrue(RoadNetwork._hud_chord_is_sane(
+            (0.0, 0.0, 10.0), (2.5, 0.0, 10.4), 10.0, 0.0))
+        self.assertFalse(RoadNetwork._hud_chord_is_sane(
+            (0.0, 0.0, 10.0), (2.5, 0.0, 30.0), 10.0, 0.0))
+
 
 class TrajectoryNegativeAuditTests(unittest.TestCase):
     def test_zero_duplicate_reversed_nan_and_infinity_are_rejected(self):

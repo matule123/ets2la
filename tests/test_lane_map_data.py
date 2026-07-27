@@ -164,6 +164,50 @@ class RealMapLaneDataTests(unittest.TestCase):
                                              trajectory.points[1:])]
                 self.assertLess(max(heading_jumps), 12.0)
 
+    def test_blkw_prefab_to_offset_road_transition_uses_ppd_lane_centres(self):
+        """Regression for the reported 6.27 m prefab-output failure.
+
+        The blkw_2k00o arm ends near a 1.75 m lane offset while the following
+        road look ends at a 7.75 m offset. SCS interpolates those offsets along
+        the road; applying the road's end offset at its start creates a false
+        lateral gap even though topology and headings agree exactly.
+        """
+        routes = (
+            (5962819259746114755, 5962819261264452801,
+             5962819256810101952, 5962819253060394194,
+             5962819254075415764, 5962819266683514703),
+            (5962819268579312546, 5962819261331562124,
+             5962819256810101952, 5962819253060394194,
+             5962819254436125907, 5962819257229532404),
+        )
+        for gps in routes:
+            with self.subTest(approach_uid=gps[1], exit_uid=gps[-2]):
+                corridor = self.net.resolve_gps_corridor(gps)
+                self.assertTrue(corridor.valid, corridor.failure_reason)
+                first_edge = corridor.edges[0]
+                incoming = next(
+                    lane for lane in self.net._build_lane_segments(
+                        first_edge.segment_index)
+                    if lane.start_uid == first_edge.start_uid
+                    and lane.raw_lane_index == 0)
+                truck = incoming.centerline[len(incoming.centerline) // 2]
+                path, match = self.net.build_lane_path(
+                    gps, (truck.x, truck.z), truck.heading, truck.y)
+                self.assertIsNotNone(match)
+                self.assertTrue(path.valid, path.failure_reason)
+                gaps = [math.dist(
+                    (first.centerline[-1].x, first.centerline[-1].y,
+                     first.centerline[-1].z),
+                    (second.centerline[0].x, second.centerline[0].y,
+                     second.centerline[0].z))
+                    for first, second in zip(path.segments,
+                                             path.segments[1:])]
+                self.assertLess(max(gaps), 0.51)
+                trajectory = build_lane_trajectory(path)
+                self.assertTrue(trajectory.valid,
+                                trajectory.failure_reason)
+                self.assertEqual(path.segments[-1].raw_lane_index, 0)
+
     def test_roundabout_selects_authoritative_exit(self):
         start = 5462850010004422086
         first_exit = 5462850012948823206

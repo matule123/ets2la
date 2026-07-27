@@ -577,6 +577,72 @@ class RoadNetwork:
                                 return result
         return result
 
+    def prefab_segments_3d_near(self, pos, radius=800.0, limit=10000,
+                                allowed_node_uids=None):
+        """Return prefab navCurve chords with their real local elevations.
+
+        A nearest-node X/Z lookup is not a valid source of prefab height: at
+        an overpass it can select a node from the other deck and turn a flat
+        junction lane into a near-vertical HUD ribbon.  The PPD navCurve
+        stores start/end Y and ``_prefab_curve_chain_3d`` applies the same
+        placed-prefab transform as lane navigation, so use that geometry
+        directly for the display mesh as well.
+        """
+        if not pos or not self._prefab_grid:
+            return []
+        px, pz = pos
+        cx, cz = self._cell(px, pz)
+        rings = int(radius // self.GRID) + 1
+        seen, result = set(), []
+        for dx in range(-rings, rings + 1):
+            for dz in range(-rings, rings + 1):
+                for instance in self._prefab_grid.get((cx + dx, cz + dz), ()):
+                    marker = (instance[0], instance[1])
+                    if marker in seen:
+                        continue
+                    seen.add(marker)
+                    if (allowed_node_uids is not None
+                            and not any(uid in allowed_node_uids
+                                        for uid in instance[1])):
+                        continue
+                    desc = self._prefab_desc.get(instance[0])
+                    if not desc:
+                        continue
+                    for curve_index in range(len(desc[1])):
+                        try:
+                            points = self._prefab_curve_chain_3d(
+                                instance, (curve_index,))
+                        except (IndexError, KeyError, TypeError, ValueError):
+                            continue
+                        for first, second in zip(points, points[1:]):
+                            a = (first.x, first.z, first.y)
+                            b = (second.x, second.z, second.y)
+                            if min((a[0]-px)**2 + (a[1]-pz)**2,
+                                   (b[0]-px)**2 + (b[1]-pz)**2) > radius*radius:
+                                continue
+                            result.append((a, b))
+                            if len(result) >= limit:
+                                return result
+        return result
+
+    @staticmethod
+    def _hud_chord_is_sane(a, b, altitude=None, distance2=float("inf")):
+        """Reject malformed display chords without changing map topology."""
+        if not all(math.isfinite(float(value)) for value in (*a, *b)):
+            return False
+        horizontal = math.hypot(b[0] - a[0], b[1] - a[1])
+        if horizontal < 0.05:
+            return False
+        # Sampled map chords are roughly 2.5 m long. Even a very steep ramp
+        # cannot legitimately gain several metres in one sample; that is a
+        # wrong-deck assignment and was rendered as a road into the sky.
+        if abs(b[2] - a[2]) > max(1.5, horizontal * 0.35):
+            return False
+        if altitude is not None and distance2 < 90.0 ** 2:
+            if min(abs(a[2] - altitude), abs(b[2] - altitude)) > 3.2:
+                return False
+        return True
+
     def _road_curve_3d(self, first, second, spacing=2.5,
                        with_tangents=False):
         """Exact-ish Hermite centreline for a normal road, including height."""
@@ -631,36 +697,76 @@ class RoadNetwork:
         px, pz = pos
         cx, cz = self._cell(px, pz)
         rings = int(radius // self.GRID) + 1
-        seen, ranked = set(), []
+        candidate_indices = set()
         for dx in range(-rings, rings + 1):
             for dz in range(-rings, rings + 1):
-                for index in self._seg_grid.get((cx+dx, cz+dz), ()):
-                    if index in seen:
-                        continue
-                    seen.add(index)
-                    first, second = self._seg_uids[index]
-                    token = (self._road_look_token.get(first)
-                             or self._road_look_token.get(second))
-                    lanes = int((self.road_looks.get(token) or {}).get("lanes", 2))
-                    curve = self._road_curve_3d(first, second)
-                    for curve_index, (a, b) in enumerate(zip(curve, curve[1:])):
-                        distance2 = min((a[0]-px)**2+(a[1]-pz)**2,
-                                        (b[0]-px)**2+(b[1]-pz)**2)
-                        if distance2 <= radius*radius:
-                            look = self.road_looks.get(token) or {}
-                            divided = bool((look.get("lanes_left", 0)
-                                            and look.get("lanes_right", 0))
-                                           or (lanes >= 4 and look.get("type")
-                                               in ("motorway", "expressway")))
-                            # Fixed 7.5 m dash / 5 m gap in world space. Qt's
-                            # screen-space DashLine restarted on every sampled
-                            # curve and produced differently-sized markings.
-                            dash_on = (curve_index % 5) < 3
-                            pillar = (curve_index % 12) == 0
-                            rail_post = (curve_index % 4) == 0
-                            ranked.append((distance2, a, b, "road",
-                                           max(1, lanes), divided, dash_on,
-                                           pillar, rail_post))
+                candidate_indices.update(
+                    self._seg_grid.get((cx+dx, cz+dz), ()))
+
+        # The old HUD painted every road inside a 280 m circle. Parallel
+        # streets, depot lanes and overpasses then floated as unrelated islands
+        # beside the driving view. Keep the topological component containing
+        # the truck; junction arms remain because placed prefab endpoints link
+        # their real road objects, while an unrelated nearby road cannot enter.
+        connected_indices = set(candidate_indices)
+        start_index = self._nearest_segment_index(pos)
+        if start_index in candidate_indices:
+            node_roads = {}
+            for index in candidate_indices:
+                for uid in self._seg_uids[index]:
+                    node_roads.setdefault(uid, set()).add(index)
+            prefab_links = {}
+            prefab_seen = set()
+            for dx in range(-rings, rings + 1):
+                for dz in range(-rings, rings + 1):
+                    for instance in self._prefab_grid.get((cx+dx, cz+dz), ()):
+                        marker = (instance[0], instance[1])
+                        if marker in prefab_seen:
+                            continue
+                        prefab_seen.add(marker)
+                        endpoint_set = set(instance[1])
+                        for uid in endpoint_set:
+                            prefab_links.setdefault(uid, set()).update(endpoint_set)
+            connected_indices, queue = {start_index}, [start_index]
+            while queue:
+                index = queue.pop()
+                linked_nodes = set(self._seg_uids[index])
+                for uid in tuple(linked_nodes):
+                    linked_nodes.update(prefab_links.get(uid, ()))
+                for uid in linked_nodes:
+                    for neighbour in node_roads.get(uid, ()):
+                        if neighbour not in connected_indices:
+                            connected_indices.add(neighbour)
+                            queue.append(neighbour)
+
+        ranked = []
+        for index in connected_indices:
+            first, second = self._seg_uids[index]
+            token = (self._road_look_token.get(first)
+                     or self._road_look_token.get(second))
+            lanes = int((self.road_looks.get(token) or {}).get("lanes", 2))
+            curve = self._road_curve_3d(first, second)
+            for curve_index, (a, b) in enumerate(zip(curve, curve[1:])):
+                distance2 = min((a[0]-px)**2+(a[1]-pz)**2,
+                                (b[0]-px)**2+(b[1]-pz)**2)
+                if distance2 > radius*radius:
+                    continue
+                if not self._hud_chord_is_sane(a, b, altitude, distance2):
+                    continue
+                look = self.road_looks.get(token) or {}
+                divided = bool((look.get("lanes_left", 0)
+                                and look.get("lanes_right", 0))
+                               or (lanes >= 4 and look.get("type")
+                                   in ("motorway", "expressway")))
+                # Fixed 7.5 m dash / 5 m gap in world space. Qt's
+                # screen-space DashLine restarted on every sampled
+                # curve and produced differently-sized markings.
+                dash_on = (curve_index % 5) < 3
+                pillar = (curve_index % 12) == 0
+                rail_post = (curve_index % 4) == 0
+                ranked.append((distance2, a, b, "road",
+                               max(1, lanes), divided, dash_on,
+                               pillar, rail_post))
         # Spatial index for the overlap check below. Scanning every ordinary
         # chord for every prefab chord made HUD publication unnecessarily
         # expensive in large interchanges.
@@ -677,20 +783,16 @@ class RoadNetwork:
         # Prefab curves fill the otherwise missing geometry between ordinary
         # road objects at junctions. The HUD renders them only as an unmarked
         # asphalt underlay, never as independent outlined lanes.
-        for prefab_index, (a, b) in enumerate(
-                self.prefab_segments_near(pos, radius, limit * 2)):
-            uid_a = self._nearest_node(a, max_ring=1)
-            uid_b = self._nearest_node(b, max_ring=1)
-            ah = self.node_alt.get(uid_a, 0.0)
-            bh = self.node_alt.get(uid_b, ah)
+        connected_nodes = {
+            uid for index in connected_indices for uid in self._seg_uids[index]
+        }
+        for prefab_index, (a, b) in enumerate(self.prefab_segments_3d_near(
+                pos, radius, limit * 2,
+                allowed_node_uids=connected_nodes or None)):
+            ah, bh = a[2], b[2]
             distance2 = min((a[0]-px)**2+(a[1]-pz)**2,
                             (b[0]-px)**2+(b[1]-pz)**2)
-            # At an overpass, a nearest-X/Z lookup can borrow the bridge's node
-            # height for the prefab road below. Close to the truck, suppress a
-            # prefab assigned to another deck; the ordinary 3-D road segments
-            # still render the real bridge at its own altitude.
-            if (altitude is not None and distance2 < 90.0 ** 2
-                    and min(abs(ah - altitude), abs(bh - altitude)) > 3.2):
+            if not self._hud_chord_is_sane(a, b, altitude, distance2):
                 continue
 
             # Prefab curves bridge gaps at junctions, but some datasets repeat
@@ -725,8 +827,7 @@ class RoadNetwork:
                         break
             if duplicate:
                 continue
-            ranked.append((distance2, (a[0], a[1], ah),
-                           (b[0], b[1], bh), "lane", 1, False,
+            ranked.append((distance2, a, b, "lane", 1, False,
                            (prefab_index % 5) < 3,
                            False, False))
         ranked.sort(key=lambda item: item[0])
@@ -2067,6 +2168,117 @@ class RoadNetwork:
         token = self._seg_look_tokens[previous_index]
         return self.road_looks.get(token)
 
+    def _prefab_boundary_lane_offsets(self, node_uid, road_curve, at_start):
+        """Derive road-boundary lane centres from the adjacent prefab PPD.
+
+        SCS road-look offsets describe the road's end. Its start inherits lane
+        positions from the preceding map item. For road-to-road transitions
+        ``_previous_road_look`` supplies those values; when the preceding item
+        is a prefab, the authoritative positions are the input/output navCurve
+        endpoints at the shared physical node. ``at_start`` selects whether
+        the road leaves or enters that prefab in stored road direction.
+        """
+        if node_uid not in self.nodes or not road_curve:
+            return (), ()
+        adjacent_item = (self.node_backward_item.get(node_uid, 0)
+                         if at_start else
+                         self.node_forward_item.get(node_uid, 0))
+        if (not adjacent_item
+                or adjacent_item in self._road_segment_by_uid):
+            return (), ()
+        try:
+            tangent = road_curve[0] if at_start else road_curve[-1]
+            fx, fz = float(tangent[3]), float(tangent[4])
+        except (IndexError, TypeError, ValueError):
+            return (), ()
+        forward_length = math.hypot(fx, fz)
+        if forward_length < 1e-8:
+            return (), ()
+        fx, fz = fx / forward_length, fz / forward_length
+        cache = getattr(self, "_prefab_boundary_offset_cache", None)
+        if cache is None:
+            cache = self._prefab_boundary_offset_cache = {}
+        cache_key = (int(node_uid), bool(at_start),
+                     round(fx, 5), round(fz, 5))
+        if cache_key in cache:
+            return cache[cache_key]
+        right_x, right_z = -fz, fx
+        nx, nz = self.nodes[node_uid]
+        node_y = self.node_alt.get(node_uid, 0.0)
+        cx, cz = self._cell(nx, nz)
+        instances, seen = [], set()
+        for dx in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                for instance in self._prefab_grid.get((cx + dx, cz + dz), ()):
+                    marker = (instance[0], instance[1])
+                    if marker in seen or node_uid not in instance[1]:
+                        continue
+                    seen.add(marker)
+                    instances.append(instance)
+
+        forward_offsets, reverse_offsets = [], []
+        for instance in instances:
+            lane_data = self._prefab_lane_data.get(instance[0]) or {}
+            try:
+                node_index = instance[1].index(node_uid)
+                prefab_node = (lane_data.get("nodes") or ())[node_index]
+            except (ValueError, IndexError, TypeError):
+                continue
+            # Leaving a prefab into the stored road start uses output curves;
+            # entering one at the stored road end uses input curves. The
+            # opposite travel direction uses the complementary set.
+            if at_start:
+                groups = ((prefab_node.get("output_lanes", ()), True, -1),
+                          (prefab_node.get("input_lanes", ()), False, 0))
+            else:
+                groups = ((prefab_node.get("input_lanes", ()), True, 0),
+                          (prefab_node.get("output_lanes", ()), False, -1))
+            for curve_indices, travels_forward, endpoint_index in groups:
+                for curve_index in curve_indices:
+                    points = self._prefab_curve_chain_3d(
+                        instance, (int(curve_index),))
+                    if len(points) < 2:
+                        continue
+                    point = points[endpoint_index]
+                    direction_x = -math.sin(point.heading)
+                    direction_z = -math.cos(point.heading)
+                    alignment = direction_x * fx + direction_z * fz
+                    if ((travels_forward and alignment < 0.85)
+                            or (not travels_forward and alignment > -0.85)):
+                        continue
+                    dxp, dzp = point.x - nx, point.z - nz
+                    planar_gap = math.hypot(dxp, dzp)
+                    if planar_gap > 24.0 or abs(point.y - node_y) > 2.0:
+                        continue
+                    offset = dxp * right_x + dzp * right_z
+                    target = forward_offsets if travels_forward else reverse_offsets
+                    if not any(abs(offset - existing) < 0.20
+                               for existing in target):
+                        target.append(offset)
+
+        # right lane arrays run from the centre outwards in increasing signed
+        # offset; left arrays use the mirrored (decreasing) order.
+        forward_offsets.sort()
+        reverse_offsets.sort(reverse=True)
+        result = tuple(reverse_offsets), tuple(forward_offsets)
+        cache[cache_key] = result
+        return result
+
+    @staticmethod
+    def _match_prefab_offsets(expected, candidates, width=4.5):
+        """Map physical prefab offsets to the road's raw-lane prefix."""
+        available = list(candidates)
+        result = []
+        for target in expected:
+            if not available:
+                break
+            best = min(range(len(available)),
+                       key=lambda index: abs(available[index] - target))
+            if abs(available[best] - target) > width * 1.5:
+                break
+            result.append(available.pop(best))
+        return tuple(result)
+
     def _build_lane_segments(self, segment_index):
         """Lazily derive lane centres for one ordinary road map item.
 
@@ -2092,11 +2304,27 @@ class RoadNetwork:
             return ()
         width = 4.5
         left_offsets, right_offsets = self._lane_center_offsets(look)
+        prefab_end_left, prefab_end_right = (
+            self._prefab_boundary_lane_offsets(end_uid, curve, False))
+        matched_end_left = self._match_prefab_offsets(
+            left_offsets, prefab_end_left, width)
+        matched_end_right = self._match_prefab_offsets(
+            right_offsets, prefab_end_right, width)
+        if matched_end_left:
+            left_offsets = matched_end_left + left_offsets[len(matched_end_left):]
+        if matched_end_right:
+            right_offsets = (matched_end_right
+                             + right_offsets[len(matched_end_right):])
         previous_look = self._previous_road_look(segment_index)
         if previous_look:
             previous_left, previous_right = self._lane_center_offsets(previous_look)
         else:
-            previous_left, previous_right = (), ()
+            prefab_start_left, prefab_start_right = (
+                self._prefab_boundary_lane_offsets(start_uid, curve, True))
+            previous_left = self._match_prefab_offsets(
+                left_offsets, prefab_start_left, width)
+            previous_right = self._match_prefab_offsets(
+                right_offsets, prefab_start_right, width)
         groups = ((1, tuple(look.get("lane_types_right", ()))),
                   (-1, tuple(look.get("lane_types_left", ()))))
         built = []

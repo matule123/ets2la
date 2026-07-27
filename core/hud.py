@@ -77,10 +77,12 @@ _CAR_PALETTE = [
 HUD_EGO_AHEAD_M = 0.0
 HUD_CAMERA_BACK_M = 48.0
 HUD_ROAD_BEHIND_M = 44.0
+HUD_ROAD_LATERAL_M = 44.0
 
 
 def _clip_truck_road_segment(a, b, ahead_min=-HUD_ROAD_BEHIND_M,
-                             ahead_max=210.0, lateral_limit=62.0):
+                             ahead_max=210.0,
+                             lateral_limit=HUD_ROAD_LATERAL_M):
     """Clip one truck-space road chord to the complete HUD camera frustum."""
     da, dl = b[0] - a[0], b[1] - a[1]
     t0, t1 = 0.0, 1.0
@@ -344,7 +346,7 @@ class UltraPilotHUD(QWidget):
         # Nearly opaque like ETS2LA's visualization panel.  The former 205
         # alpha mixed with bright windows/desktops and produced the large grey
         # block visible in the old HUD.
-        qp.setBrush(QColor(8, 10, 13, 247))
+        qp.setBrush(QColor(20, 21, 23, 252))
         qp.drawRoundedRect(panel, 16, 16)
         # Subtle accent border tinted by the current driving state.
         accent = QColor(_STATE_COLORS.get(d["state"], "#10B981"))
@@ -521,20 +523,15 @@ class UltraPilotHUD(QWidget):
 
     @staticmethod
     def _matched_ego_lateral(data):
-        """Place the HUD rig on the exact lane used by its road underlay."""
-        if data.get("lane_revision", -1) < 0:
-            return 0.0
-        match = data.get("lane_match") or {}
-        try:
-            error = float(match.get("lateral_error_m", 0.0) or 0.0)
-        except (TypeError, ValueError, OverflowError):
-            return 0.0
-        if not math.isfinite(error) or abs(error) > 3.0:
-            return 0.0
-        # LaneMatch is truck minus projected lane centre along the lane's
-        # right normal. HUD lateral coordinates express lane centre relative
-        # to the truck, hence the opposite sign.
-        return -error
+        """Keep the ego model at the shared telemetry origin.
+
+        Roads, traffic and the navigation line are transformed by subtracting
+        ``truck_world_pos``. Their coordinates therefore already express the
+        real scene relative to the truck. Applying ``-lateral_error`` to the
+        model a second time displayed the lane centre as if it were the truck
+        and made the rig drift off the road while driving.
+        """
+        return 0.0
 
     @staticmethod
     def _resolved_trailer_articulation(data):
@@ -570,7 +567,7 @@ class UltraPilotHUD(QWidget):
         # Slightly darker ground band below the horizon for depth.
         horizon_y = view.top() + view.height() * 0.025
         qp.setPen(Qt.PenStyle.NoPen)
-        qp.setBrush(QColor(9, 11, 14, 235))
+        qp.setBrush(QColor(20, 21, 23, 255))
         qp.drawRect(QRectF(view.left(), horizon_y, view.width(), view.bottom() - horizon_y))
 
         pos, h = d["pos"], d["heading"]
@@ -633,8 +630,6 @@ class UltraPilotHUD(QWidget):
                 return _clip_truck_road_segment(a, b)
 
             nearby = []
-            ego_road_lateral = None
-            ego_road_score = float("inf")
             # A valid lane snapshot is the sole road source in driving view.
             # The broad network remains a compatibility fallback only while
             # no lane route exists; mixing both created the map-like carpet.
@@ -661,23 +656,6 @@ class UltraPilotHUD(QWidget):
                 a, b, t0, t1 = clipped
                 clipped_ah = ah + (bh-ah)*t0
                 clipped_bh = ah + (bh-ah)*t1
-                # Anchor the HUD vehicle to the centreline of the closest
-                # same-level road, instead of assuming that lateral zero is
-                # always the rendered carriageway centre.
-                vx, vl = b[0] - a[0], b[1] - a[1]
-                vlen2 = vx * vx + vl * vl
-                if vlen2 > .05 and abs((clipped_ah + clipped_bh) * .5) < 1.8:
-                    nearest_t = max(0.0, min(1.0,
-                        -(a[0] * vx + a[1] * vl) / vlen2))
-                    nearest_a = a[0] + vx * nearest_t
-                    nearest_l = a[1] + vl * nearest_t
-                    distance = math.hypot(nearest_a, nearest_l)
-                    alignment = abs(vx) / math.sqrt(vlen2)
-                    kind_penalty = 0.0 if kind == "road" else 2.5
-                    score = distance + (1.0 - alignment) * 6.0 + kind_penalty
-                    if score < ego_road_score and distance < 14.0:
-                        ego_road_score = score
-                        ego_road_lateral = nearest_l
                 # When the truck is on an elevated ramp/bridge, geometry more
                 # than one deck below it is occluded by the opaque asphalt.
                 if max(clipped_ah, clipped_bh) < -2.4:
@@ -703,10 +681,11 @@ class UltraPilotHUD(QWidget):
             nearby.sort(key=lambda item: ((item[3] + item[4]) * .5, -item[0]))
             # Surface pass in world units. Drawing perspective-scaled screen
             # pens produced the huge pill/oval roads seen in the screenshot.
-            # Quads plus projected world-space discs seal curved chord joins
-            # without changing the physical road width.
+            # Overlapping world-space quads form one continuous ribbon. The
+            # former disc at every sampled endpoint made otherwise straight
+            # prefab lanes look like a chain of grey pills.
             qp.setPen(Qt.PenStyle.NoPen)
-            qp.setBrush(QColor(61, 67, 76, 255))
+            qp.setBrush(QColor(34, 36, 40, 255))
             for (_, sa, sb, sah, sbh, skind, slanes, _divided, _dash,
                  _pillar, _rail) in nearby:
                 sda, sdl = sb[0] - sa[0], sb[1] - sa[1]
@@ -733,19 +712,6 @@ class UltraPilotHUD(QWidget):
                         surface_edges[0][0], surface_edges[0][1],
                         surface_edges[1][1], surface_edges[1][0],
                     ]))
-                # Correct-perspective round joint at both chord endpoints.
-                for (centre_a, centre_l), joint_h in ((sa, sah), (sb, sbh)):
-                    circle = []
-                    for step in range(12):
-                        theta = math.tau * step / 12.0
-                        point = self._project(
-                            centre_a + math.cos(theta) * shalf,
-                            centre_l + math.sin(theta) * shalf,
-                            view, joint_h)
-                        if point:
-                            circle.append(point)
-                    if len(circle) >= 3:
-                        qp.drawPolygon(QPolygonF(circle))
             drawn_pillars = []
             for (_, a, b, ah, bh, kind, segment_lanes, divided, dash_on,
                  pillar, rail_post) in nearby:
@@ -777,7 +743,7 @@ class UltraPilotHUD(QWidget):
                                 lane_edges.append((ea, eb))
                         if len(lane_edges) == 2:
                             qp.setPen(Qt.PenStyle.NoPen)
-                            qp.setBrush(QColor(61, 67, 76, 255))
+                            qp.setBrush(QColor(34, 36, 40, 255))
                             qp.drawPolygon(QPolygonF([
                                 lane_edges[0][0], lane_edges[0][1],
                                 lane_edges[1][1], lane_edges[1][0],
@@ -840,7 +806,7 @@ class UltraPilotHUD(QWidget):
                     # at junctions without the former long polygon spikes.
                     if len(edges) == 2:
                         qp.setPen(Qt.PenStyle.NoPen)
-                        qp.setBrush(QColor(61, 67, 76, 255))
+                        qp.setBrush(QColor(34, 36, 40, 255))
                         qp.drawPolygon(QPolygonF([
                             edges[0][0], edges[0][1],
                             edges[1][1], edges[1][0],
@@ -993,10 +959,8 @@ class UltraPilotHUD(QWidget):
             for a, l, ground, v in vehs:
                 self._draw_low_poly_vehicle(qp, view, a, l, v, ground, h)
 
-        # The authoritative road underlay is centred on LaneMatch.point. Keep
-        # the HUD model on that exact same lane-local origin. Using hard-coded
-        # zero here made the road move relative to the model as soon as the
-        # telemetry position accumulated ordinary lateral error.
+        # Every world element above was transformed around truck_world_pos;
+        # the ego model must therefore remain at the same zero origin.
         self._ego_road_lateral = self._matched_ego_lateral(d)
         # Ego truck as a 3D model at the bottom centre (cab + trailer).
         articulation = self._resolved_trailer_articulation(d)
