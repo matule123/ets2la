@@ -106,6 +106,32 @@ class HudPoseStabilityTests(unittest.TestCase):
               for point in segment[:2]]
         self.assertLess(min(zs), -50.0)
 
+    def test_hud_uses_offset_lane_carriageway_under_truck_model(self):
+        synthetic = SyntheticMap()
+        synthetic.node(1, 0.0, 0.0)
+        synthetic.node(2, 0.0, 100.0)
+        index = synthetic.road(1, 2, 4)
+        synthetic.look("divided-offset", 2, 2, 5.75)
+        synthetic.set_road_look(index, "divided-offset")
+        lane = next(item for item in synthetic.net._build_lane_segments(index)
+                    if item.direction == 1 and item.lane_index == 0)
+        truck = lane.centerline[len(lane.centerline) // 2]
+        segments = synthetic.net.hud_segments_3d_near(
+            (truck.x, truck.z), radius=80.0, altitude=truck.y)
+        roads = [segment for segment in segments if segment[2] == "road"]
+        self.assertTrue(roads)
+        # A divided road is published as two real two-lane carriageways,
+        # rather than one undersized ribbon around the raw item centre.
+        self.assertEqual({segment[3] for segment in roads}, {2})
+        self.assertTrue(all(len(segment) >= 9 for segment in roads))
+        covering = []
+        for segment in roads:
+            a, b, half = segment[0], segment[1], segment[8]
+            if min(a[1], b[1]) <= truck.z <= max(a[1], b[1]):
+                centre_x = (a[0] + b[0]) * .5
+                covering.append(centre_x-half <= truck.x <= centre_x+half)
+        self.assertIn(True, covering)
+
     def test_sdk_reads_attached_after_all_eighty_trailer_flags(self):
         sdk = SCSTelemetry()
         sdk.mm = bytearray(sdk.mmap_size)

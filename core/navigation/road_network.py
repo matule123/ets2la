@@ -742,31 +742,97 @@ class RoadNetwork:
         ranked = []
         for index in connected_indices:
             first, second = self._seg_uids[index]
-            token = (self._road_look_token.get(first)
+            # Use the exact road item's look. Node-level compatibility lookup
+            # is ambiguous at junctions and can select a neighbouring arm's
+            # lane count/offset, which misplaces the entire HUD carriageway.
+            token = (self._seg_look_tokens[index]
+                     if index < len(self._seg_look_tokens) else
+                     self._road_look_token.get(first)
                      or self._road_look_token.get(second))
-            lanes = int((self.road_looks.get(token) or {}).get("lanes", 2))
-            curve = self._road_curve_3d(first, second)
-            for curve_index, (a, b) in enumerate(zip(curve, curve[1:])):
-                distance2 = min((a[0]-px)**2+(a[1]-pz)**2,
-                                (b[0]-px)**2+(b[1]-pz)**2)
-                if distance2 > radius*radius:
+            look = self.road_looks.get(token) or {}
+            lane_segments = tuple(self._build_lane_segments(index))
+            groups = []
+            if lane_segments:
+                by_direction = {
+                    direction: tuple(lane for lane in lane_segments
+                                     if lane.direction == direction)
+                    for direction in (-1, 1)
+                }
+                by_direction = {key: value for key, value in by_direction.items()
+                                if value}
+                # ``roadLook.offset`` separates carriageways around a median.
+                # Painting one ribbon around the raw map-item centre ignored
+                # that offset (5.75 m on the reported blkw2c road), clipped the
+                # truck's carriageway away and made the HUD rig appear outside
+                # the road. Keep separated direction groups as real ribbons.
+                split = (len(by_direction) == 2
+                         and abs(float(look.get("offset_m", 0.0) or 0.0)) > .75)
+                groups = (list(by_direction.values()) if split
+                          else [lane_segments])
+
+            ribbons = []
+            for group in groups:
+                oriented = [tuple(lane.centerline
+                                  if lane.direction > 0
+                                  else reversed(lane.centerline))
+                            for lane in group]
+                count = min((len(points) for points in oriented), default=0)
+                if count < 2:
                     continue
-                if not self._hud_chord_is_sane(a, b, altitude, distance2):
-                    continue
-                look = self.road_looks.get(token) or {}
-                divided = bool((look.get("lanes_left", 0)
-                                and look.get("lanes_right", 0))
-                               or (lanes >= 4 and look.get("type")
-                                   in ("motorway", "expressway")))
-                # Fixed 7.5 m dash / 5 m gap in world space. Qt's
-                # screen-space DashLine restarted on every sampled
-                # curve and produced differently-sized markings.
-                dash_on = (curve_index % 5) < 3
-                pillar = (curve_index % 12) == 0
-                rail_post = (curve_index % 4) == 0
-                ranked.append((distance2, a, b, "road",
-                               max(1, lanes), divided, dash_on,
-                               pillar, rail_post))
+                curve, half_widths = [], []
+                shoulder = max(.5, float(look.get("shoulder_left_m", .5) or .5),
+                               float(look.get("shoulder_right_m", .5) or .5))
+                for point_index in range(count):
+                    sample = [points[point_index] for points in oriented]
+                    if len(sample) == 1:
+                        left = right = sample[0]
+                    else:
+                        left, right = max(
+                            ((a, b) for item_index, a in enumerate(sample)
+                             for b in sample[item_index + 1:]),
+                            key=lambda pair: math.hypot(
+                                pair[1].x-pair[0].x,
+                                pair[1].z-pair[0].z))
+                    span = math.hypot(right.x-left.x, right.z-left.z)
+                    curve.append(((left.x+right.x)*.5,
+                                  (left.z+right.z)*.5,
+                                  (left.y+right.y)*.5))
+                    half_widths.append(span*.5 + 2.25 + shoulder)
+                ribbons.append((curve, len(group), not split,
+                                tuple(half_widths)))
+
+            if not ribbons:
+                lanes = max(1, int(look.get("lanes", 2)))
+                curve = self._road_curve_3d(first, second)
+                ribbons = [(curve, lanes, bool(
+                    (look.get("lanes_left", 0) and look.get("lanes_right", 0))
+                    or (lanes >= 4 and look.get("type")
+                        in ("motorway", "expressway"))),
+                    tuple(lanes * 4.5 / 2.0 + .5 for _ in curve))]
+
+            for curve, lanes, divided, half_widths in ribbons:
+                for curve_index, (a, b) in enumerate(zip(curve, curve[1:])):
+                    distance2 = min((a[0]-px)**2+(a[1]-pz)**2,
+                                    (b[0]-px)**2+(b[1]-pz)**2)
+                    if distance2 > radius*radius:
+                        continue
+                    if not self._hud_chord_is_sane(a, b, altitude, distance2):
+                        continue
+                    # Fixed 7.5 m dash / 5 m gap in world space. Qt's
+                    # screen-space DashLine restarted on every sampled curve.
+                    dash_on = (curve_index % 5) < 3
+                    pillar = (curve_index % 12) == 0
+                    rail_post = (curve_index % 4) == 0
+                    half_width = ((half_widths[curve_index]
+                                   + half_widths[curve_index + 1]) * .5)
+                    near_prefab_boundary = (
+                        (first in prefab_links and curve_index < 5)
+                        or (second in prefab_links
+                            and curve_index >= len(curve) - 6))
+                    ranked.append((distance2, a, b, "road",
+                                   max(1, lanes), divided, dash_on,
+                                   pillar, rail_post, half_width,
+                                   near_prefab_boundary))
         # Spatial index for the overlap check below. Scanning every ordinary
         # chord for every prefab chord made HUD publication unnecessarily
         # expensive in large interchanges.
@@ -828,11 +894,12 @@ class RoadNetwork:
             if duplicate:
                 continue
             ranked.append((distance2, a, b, "lane", 1, False,
-                           (prefab_index % 5) < 3,
-                           False, False))
+                           False, False, False, 3.05, True))
         ranked.sort(key=lambda item: item[0])
-        return [(a, b, kind, lanes, divided, dash_on, pillar, rail_post)
-                for _, a, b, kind, lanes, divided, dash_on, pillar, rail_post
+        return [(a, b, kind, lanes, divided, dash_on, pillar, rail_post,
+                 half_width, suppress_markings)
+                for _, a, b, kind, lanes, divided, dash_on, pillar, rail_post,
+                half_width, suppress_markings
                 in ranked[:limit]]
 
     # --- Authoritative lane-level GPS route ---------------------------------
@@ -1207,6 +1274,70 @@ class RoadNetwork:
         return LaneConnection(second.lane_id, kind, curves,
                               gps_exit_uid=second.end_uid)
 
+    @staticmethod
+    def _retarget_road_end_to_prefab(road, prefab):
+        """Taper a confirmed road lane into the selected prefab input lane.
+
+        A PPD can expose different input navCurves for different GPS exits.
+        When the requested exit starts one lane beside the continuing lane,
+        the lane change belongs on the preceding road—not in a 4.5 m chord at
+        the physical prefab boundary. This helper is intentionally narrow: it
+        requires shared topology, equal height, matching direction and enough
+        road distance for a gradual transition to the exact PPD endpoint.
+        """
+        if (road.lane_id.prefab_token is not None
+                or prefab.lane_id.prefab_token in (None, "graph")
+                or road.end_uid != prefab.start_uid
+                or len(road.centerline) < 3 or len(prefab.centerline) < 2):
+            return road
+        source = road.centerline[-1]
+        target = prefab.centerline[0]
+        dx, dy, dz = (target.x-source.x, target.y-source.y,
+                      target.z-source.z)
+        gap = math.sqrt(dx*dx + dy*dy + dz*dz)
+        if gap <= 0.35:
+            return road
+        first_heading = road.centerline[-1].heading
+        second_heading = prefab.centerline[0].heading
+        heading_jump = abs((second_heading-first_heading+math.pi)
+                           % (2.0*math.pi)-math.pi)
+        forward_x, forward_z = -math.sin(first_heading), -math.cos(first_heading)
+        longitudinal = dx*forward_x + dz*forward_z
+        lateral = dx*math.cos(first_heading) - dz*math.sin(first_heading)
+        total = road.centerline[-1].s
+        if (gap > road.width_m * 1.10 or abs(dy) > 1.0
+                or heading_jump > math.radians(15.0)
+                or abs(longitudinal) > 1.5
+                or abs(lateral) > road.width_m * 1.05
+                or total < max(24.0, abs(lateral) * 7.0)):
+            return road
+
+        transition = min(total, max(36.0, abs(lateral) * 12.0))
+        shifted = []
+        for point in road.centerline:
+            progress = max(0.0, min(1.0,
+                (point.s - (total-transition)) / transition))
+            smooth = progress*progress*(3.0-2.0*progress)
+            shifted.append((point.x + dx*smooth,
+                            point.y + dy*smooth,
+                            point.z + dz*smooth))
+        # Preserve the exact authoritative PPD boundary and rebuild arc length
+        # and headings after the bounded lane transition.
+        shifted[-1] = (target.x, target.y, target.z)
+        rebuilt, travelled = [], 0.0
+        for index, point in enumerate(shifted):
+            if rebuilt:
+                travelled += math.dist(shifted[index-1], point)
+            before = shifted[max(0, index-1)]
+            after = shifted[min(len(shifted)-1, index+1)]
+            tx, tz = after[0]-before[0], after[2]-before[2]
+            heading = (math.atan2(-tx, -tz) if math.hypot(tx, tz) > 1e-8
+                       else (rebuilt[-1].heading if rebuilt else first_heading))
+            rebuilt.append(LanePoint(
+                point[0], point[1], point[2], travelled, heading,
+                lane_id=road.lane_id))
+        return replace(road, centerline=tuple(rebuilt))
+
     def select_lane_sequence(self, corridor, start_match):
         """Select one continuous lane for every authoritative corridor edge."""
         if not isinstance(corridor, GpsCorridor) or not corridor.valid:
@@ -1298,6 +1429,9 @@ class RoadNetwork:
                 if current is None:
                     return tuple(selected), (
                         f"{reason} for prefab {edge.start_uid} -> {edge.end_uid}")
+                if selected:
+                    selected[-1] = self._retarget_road_end_to_prefab(
+                        selected[-1], current)
             else:
                 # A directed graph edge proves node reachability, but it has no
                 # concrete lane centre, width or elevation. Do not invent one.

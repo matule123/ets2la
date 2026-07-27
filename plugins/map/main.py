@@ -666,9 +666,11 @@ class Plugin(BasePlugin):
                     pos, radius=280.0, limit=950, altitude=altitude)
                 self.sdk.set("map_road_segments",
                              [[list(a), list(b), kind, lanes, divided, dash_on,
-                               pillar, rail_post]
+                               pillar, rail_post, half_width,
+                               suppress_markings]
                               for a, b, kind, lanes, divided, dash_on,
-                              pillar, rail_post in roads])
+                              pillar, rail_post, half_width,
+                              suppress_markings in roads])
             except Exception as e:
                 logging.debug("HUD road geometry error: %s", e)
 

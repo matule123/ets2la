@@ -648,6 +648,10 @@ class UltraPilotHUD(QWidget):
                     dash_on = bool(segment[5]) if len(segment) > 5 else True
                     pillar = bool(segment[6]) if len(segment) > 6 else False
                     rail_post = bool(segment[7]) if len(segment) > 7 else False
+                    half_width = (float(segment[8]) if len(segment) > 8
+                                  else None)
+                    suppress_markings = (bool(segment[9])
+                                         if len(segment) > 9 else False)
                 except (TypeError, ValueError, IndexError):
                     continue
                 clipped = clip_road(a, b)
@@ -675,7 +679,8 @@ class UltraPilotHUD(QWidget):
                     b = (b[0] + ua * overlap, b[1] + ul * overlap)
                 nearby.append((max(a[0], b[0]), a, b, clipped_ah, clipped_bh,
                                kind, segment_lanes, divided, dash_on,
-                               pillar, rail_post))
+                               pillar, rail_post, half_width,
+                               suppress_markings))
             # Lower decks first, higher/nearer decks last so opaque road
             # polygons correctly hide roads passing underneath.
             nearby.sort(key=lambda item: ((item[3] + item[4]) * .5, -item[0]))
@@ -687,7 +692,7 @@ class UltraPilotHUD(QWidget):
             qp.setPen(Qt.PenStyle.NoPen)
             qp.setBrush(QColor(34, 36, 40, 255))
             for (_, sa, sb, sah, sbh, skind, slanes, _divided, _dash,
-                 _pillar, _rail) in nearby:
+                 _pillar, _rail, supplied_half, _suppress) in nearby:
                 sda, sdl = sb[0] - sa[0], sb[1] - sa[1]
                 slength = math.hypot(sda, sdl)
                 if slength < .15:
@@ -697,8 +702,9 @@ class UltraPilotHUD(QWidget):
                 # prefab lane-centre curves spaced up to ~5.5 m apart.  The old
                 # 2.15 m ribbons left long black cuts even on a straight road.
                 # Overlap the display-only underlay; markings are drawn later.
-                shalf = (3.05 if skind == "lane" else
-                         max(1, min(6, slanes)) * 3.6 / 2.0 + .98)
+                shalf = (supplied_half if supplied_half is not None else
+                         (3.05 if skind == "lane" else
+                          max(1, min(6, slanes)) * 4.5 / 2.0 + .5))
                 surface_edges = []
                 for side in (-1.0, 1.0):
                     sea = self._project(sa[0] + sna * shalf * side,
@@ -714,7 +720,8 @@ class UltraPilotHUD(QWidget):
                     ]))
             drawn_pillars = []
             for (_, a, b, ah, bh, kind, segment_lanes, divided, dash_on,
-                 pillar, rail_post) in nearby:
+                 pillar, rail_post, supplied_half,
+                 suppress_markings) in nearby:
                 da, dl = b[0] - a[0], b[1] - a[1]
                 length = math.hypot(da, dl)
                 if length < 0.15:
@@ -748,16 +755,10 @@ class UltraPilotHUD(QWidget):
                                 lane_edges[0][0], lane_edges[0][1],
                                 lane_edges[1][1], lane_edges[1][0],
                             ]))
-                        # Prefab geometry contains the real curved lane paths
-                        # through junctions/ramps. It previously stopped here
-                        # after painting only grey asphalt, so these branches
-                        # looked like unfinished drawn ribbons. Add one clean
-                        # world-spaced marking to each enabled dash section.
-                        if dash_on and pa and pb:
-                            qp.setPen(QPen(QColor(226, 230, 236, 205), 2.0,
-                                           Qt.PenStyle.SolidLine,
-                                           Qt.PenCapStyle.FlatCap))
-                            qp.drawLine(pa, pb)
+                        # PPD navCurves are lane connectivity, not painted road
+                        # markings. Drawing every curve as a white dash created
+                        # the dense cross-hatched "line garbage" at junctions.
+                        # Keep them solely as an unmarked asphalt infill.
                         continue
                     # ETS2LA-style schematic geometry: two precise road edges
                     # and a faint centre marking. Filled rectangles for every
@@ -766,7 +767,8 @@ class UltraPilotHUD(QWidget):
                     # Trust this map segment, never a global telemetry lane
                     # count from a nearby toll/plaza branch.
                     road_lanes = max(1, min(6, segment_lanes))
-                    half = road_lanes * 3.6 / 2.0 + 0.98
+                    half = (supplied_half if supplied_half is not None else
+                            road_lanes * 4.5 / 2.0 + .5)
                     edges = []
                     for side in (-1.0, 1.0):
                         ea = self._project(a[0] + na * half * side,
@@ -811,13 +813,14 @@ class UltraPilotHUD(QWidget):
                             edges[0][0], edges[0][1],
                             edges[1][1], edges[1][0],
                         ]))
-                    edge_pen = QPen(QColor(195, 201, 210, 225), 3.0,
-                                    Qt.PenStyle.SolidLine,
-                                    Qt.PenCapStyle.RoundCap,
-                                    Qt.PenJoinStyle.RoundJoin)
-                    qp.setPen(edge_pen)
-                    for ea, eb in edges:
-                        qp.drawLine(ea, eb)
+                    if not suppress_markings:
+                        edge_pen = QPen(QColor(195, 201, 210, 225), 3.0,
+                                        Qt.PenStyle.SolidLine,
+                                        Qt.PenCapStyle.RoundCap,
+                                        Qt.PenJoinStyle.RoundJoin)
+                        qp.setPen(edge_pen)
+                        for ea, eb in edges:
+                            qp.drawLine(ea, eb)
                     if deck_height > 2.0:
                         # Continuous raised guardrails on both bridge sides.
                         qp.setPen(QPen(QColor(160, 168, 178, 255), 2.7,
@@ -858,7 +861,7 @@ class UltraPilotHUD(QWidget):
                                for i in range(1, road_lanes)]
                     if not offsets:
                         offsets = [0.0]
-                    for offset in offsets:
+                    for offset in (() if suppress_markings else offsets):
                         if divided and abs(offset) < 0.25:
                             qp.setPen(QPen(QColor(244, 246, 248, 235), 3.0,
                                            Qt.PenStyle.SolidLine,

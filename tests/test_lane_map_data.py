@@ -208,6 +208,41 @@ class RealMapLaneDataTests(unittest.TestCase):
                                 trajectory.failure_reason)
                 self.assertEqual(path.segments[-1].raw_lane_index, 0)
 
+    def test_live_ioannina_exit_changes_lane_before_prefab_without_heading_bump(self):
+        """Regression for the reported 54.2 degree sub-kilometre failure.
+
+        The selected dlc_blkw_81 exit begins one lane beside the continuing
+        navCurve. The confirmed lateral transition must happen gradually on
+        the preceding road, not as a 4.5 m diagonal at the prefab boundary.
+        """
+        gps = (
+            5962819263713953727, 5962819268579312546,
+            5962819261331562124, 5962819256810101952,
+            5962819253060394194, 5962819251944709334,
+            5962819252473191639, 5962819266733850743,
+            5962819280843480628, 5962819250728386678,
+        )
+        truck = (42593.63119506836, 59.73221206665039,
+                 62200.77322387695)
+        heading = 0.03585750237107277 * math.tau
+        path, match = self.net.build_lane_path(
+            gps, (truck[0], truck[2]), heading, truck[1])
+        self.assertIsNotNone(match)
+        self.assertTrue(path.valid, path.failure_reason)
+        trajectory = build_lane_trajectory(path)
+        self.assertTrue(trajectory.valid, trajectory.failure_reason)
+        jumps = [abs(math.degrees(wrap_angle(b.heading-a.heading)))
+                 for a, b in zip(trajectory.points, trajectory.points[1:])]
+        self.assertLess(max(jumps), 38.0)
+        self.assertLess(math.dist(
+            (path.segments[2].centerline[-1].x,
+             path.segments[2].centerline[-1].y,
+             path.segments[2].centerline[-1].z),
+            (path.segments[3].centerline[0].x,
+             path.segments[3].centerline[0].y,
+             path.segments[3].centerline[0].z)), .01)
+        self.print_metrics("live-ioannina-prefab-exit", gps, trajectory)
+
     def test_roundabout_selects_authoritative_exit(self):
         start = 5462850010004422086
         first_exit = 5462850012948823206
