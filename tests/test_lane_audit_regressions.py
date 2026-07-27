@@ -271,7 +271,7 @@ class LaneGeometryAuditTests(unittest.TestCase):
         self.assertIsNone(segment)
         self.assertIn("missing", reason)
 
-    def test_prefab_origin_node_index_controls_world_anchor(self):
+    def test_legacy_prefab_uses_item_node_zero_as_world_anchor(self):
         net = RoadNetwork(); net.loaded = True
         net.nodes.update({1: (100.0, 100.0), 2: (1000.0, 1000.0)})
         net.node_alt.update({1: 1.0, 2: 20.0})
@@ -285,9 +285,9 @@ class LaneGeometryAuditTests(unittest.TestCase):
             "curves": ({"start_y": 0.0, "end_y": 0.0},),
         }
         points = net._prefab_curve_chain_3d((token, (1, 2), 1), (0,))
-        self.assertAlmostEqual(points[0].x, 1000.0)
-        self.assertAlmostEqual(points[0].z, 1000.0)
-        self.assertAlmostEqual(points[0].y, 20.0)
+        self.assertAlmostEqual(points[0].x, 110.0)
+        self.assertAlmostEqual(points[0].z, 100.0)
+        self.assertAlmostEqual(points[0].y, 1.0)
 
     def test_descriptor_order_uses_origin_node_position_and_rotation(self):
         net = RoadNetwork(); net.loaded = True

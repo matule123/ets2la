@@ -484,7 +484,8 @@ class RoadNetwork:
         if not desc or anchor is None or not desc[0]:
             return []
         origin_index = max(0, min(origin_index, len(desc[0]) - 1))
-        ox, oz, local_rot = desc[0][origin_index]
+        descriptor_anchor = origin_index if descriptor_order else 0
+        ox, oz, local_rot = desc[0][descriptor_anchor]
         rotation_uid = uids[anchor_index] if descriptor_order else uids[0]
         rotation = self.node_rot.get(rotation_uid, 0.0) - local_rot
         c, s = math.cos(rotation), math.sin(rotation)
@@ -891,19 +892,28 @@ class RoadNetwork:
 
     def _prefab_curve_chain_3d(self, instance, indices):
         token, uids, origin_index = instance[:3]
+        descriptor_order = bool(instance[3]) if len(instance) > 3 else False
         desc = self._prefab_desc[token]
         lane_data = self._prefab_lane_data[token]
         if not uids or not desc[0]:
             return ()
         origin_index = max(0, min(origin_index, len(desc[0]) - 1))
-        if origin_index >= len(uids):
+        # New converter datasets store descriptorNodeUids and therefore use
+        # originNodeIndex directly. Legacy ETS2LA 1.59 nodeUids are in map
+        # item order: their world anchor is node 0 while originNodeIndex still
+        # identifies the descriptor-local origin. This must match
+        # _transform_prefab_points(), otherwise lane navCurves are placed tens
+        # of metres away from the already-correct prefab road mesh.
+        anchor_index = origin_index if descriptor_order else 0
+        if anchor_index >= len(uids):
             return ()
-        origin_uid = uids[origin_index]
+        origin_uid = uids[anchor_index]
         anchor = self.nodes.get(origin_uid)
         if anchor is None:
             return ()
-        ox, oz, local_rotation = desc[0][origin_index]
-        origin_y = lane_data["nodes"][origin_index]["y"]
+        descriptor_anchor = origin_index if descriptor_order else 0
+        ox, oz, local_rotation = desc[0][descriptor_anchor]
+        origin_y = lane_data["nodes"][descriptor_anchor]["y"]
         rotation = self.node_rot.get(origin_uid, 0.0) - local_rotation
         c, s = math.cos(rotation), math.sin(rotation)
         anchor_y = self.node_alt.get(origin_uid, 0.0)
@@ -1122,7 +1132,47 @@ class RoadNetwork:
                         f"{edge.start_uid} -> {edge.end_uid}")
                 by_index = {lane.lane_index: lane for lane in lanes}
                 by_raw_index = {lane.raw_lane_index: lane for lane in lanes}
-                if raw_lane_index in by_raw_index:
+                if (selected and selected[-1].lane_id.prefab_token
+                        not in (None, "graph")):
+                    # PPD outputLanes are navCurve identifiers, not road-lane
+                    # ordinals.  Their list order is reversed in some SCS
+                    # prefabs (for example dlc_blkw_81).  The road edge is
+                    # already proven by the authoritative GPS corridor, so
+                    # choose only among its real directed lanes by continuity
+                    # with the selected output navCurve.  Treating the
+                    # outputLanes array index as raw_lane_index moved the path
+                    # across a lane at the prefab boundary and produced a
+                    # sharp artificial bump.
+                    exit_point = selected[-1].centerline[-1]
+                    ranked_lanes = sorted(lanes, key=lambda lane: math.dist(
+                        (exit_point.x, exit_point.y, exit_point.z),
+                        (lane.centerline[0].x, lane.centerline[0].y,
+                         lane.centerline[0].z)))
+                    best_gap = math.dist(
+                        (exit_point.x, exit_point.y, exit_point.z),
+                        (ranked_lanes[0].centerline[0].x,
+                         ranked_lanes[0].centerline[0].y,
+                         ranked_lanes[0].centerline[0].z))
+                    next_gap = (math.dist(
+                        (exit_point.x, exit_point.y, exit_point.z),
+                        (ranked_lanes[1].centerline[0].x,
+                         ranked_lanes[1].centerline[0].y,
+                         ranked_lanes[1].centerline[0].z))
+                        if len(ranked_lanes) > 1 else float("inf"))
+                    if best_gap > 6.0:
+                        return tuple(selected), (
+                            f"prefab output has no continuous lane on road edge "
+                            f"{edge.start_uid} -> {edge.end_uid} "
+                            f"(nearest gap {best_gap:.2f} m)")
+                    if next_gap - best_gap < 0.35:
+                        return tuple(selected), (
+                            f"prefab output is ambiguous between road lanes at "
+                            f"{edge.start_uid} (gaps {best_gap:.2f} m and "
+                            f"{next_gap:.2f} m)")
+                    current = ranked_lanes[0]
+                    lane_index = current.lane_index
+                    raw_lane_index = current.raw_lane_index
+                elif raw_lane_index in by_raw_index:
                     current = by_raw_index[raw_lane_index]
                     lane_index = current.lane_index
                 elif lane_index in by_index and not selected:

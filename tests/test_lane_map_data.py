@@ -118,6 +118,52 @@ class RealMapLaneDataTests(unittest.TestCase):
         self.assertLess(max(math.dist((a.x, a.y, a.z), (b.x, b.y, b.z))
                             for a, b in zip(path.points, path.points[1:])), 4.0)
 
+    def test_dlc_blkw_81_legacy_anchor_and_output_lane_are_continuous(self):
+        """Regression for the reported 141 degree prefab-exit jump.
+
+        Legacy ETS2LA map data anchors this placed prefab at item node zero;
+        originNodeIndex is descriptor metadata and must not select another
+        world node.  Its outputLanes order also does not equal the raw road
+        lane order, so physical continuity must select the confirmed outgoing
+        lane after topology selects the road edge.
+        """
+        approaches = (
+            (5962819256810101952, 5962819253060394194,
+             5962819254075415764, 5962819266683514703),
+            (5962819256810101952, 5962819253060394194,
+             5962819254436125907, 5962819257229532404),
+        )
+        incoming = next(
+            lane for lane in self.net._build_lane_segments(
+                self.net._road_segment_by_uid[5962819239009456979])
+            if lane.direction == 1 and lane.raw_lane_index == 0)
+        truck = incoming.centerline[3]
+        for gps in approaches:
+            with self.subTest(exit_uid=gps[2]):
+                path, match = self.net.build_lane_path(
+                    gps, (truck.x, truck.z), truck.heading, truck.y)
+                self.assertIsNotNone(match)
+                self.assertTrue(path.valid, path.failure_reason)
+                self.assertEqual(path.segments[1].lane_id.prefab_token,
+                                 "dlc_blkw_81")
+                self.assertEqual(path.segments[2].raw_lane_index, 0)
+                boundary_gaps = [math.dist(
+                    (first.centerline[-1].x, first.centerline[-1].y,
+                     first.centerline[-1].z),
+                    (second.centerline[0].x, second.centerline[0].y,
+                     second.centerline[0].z))
+                    for first, second in zip(path.segments,
+                                             path.segments[1:])]
+                self.assertLess(max(boundary_gaps), 0.30)
+                trajectory = build_lane_trajectory(path)
+                self.assertTrue(trajectory.valid,
+                                trajectory.failure_reason)
+                heading_jumps = [abs(math.degrees(wrap_angle(
+                    second.heading-first.heading)))
+                    for first, second in zip(trajectory.points,
+                                             trajectory.points[1:])]
+                self.assertLess(max(heading_jumps), 12.0)
+
     def test_roundabout_selects_authoritative_exit(self):
         start = 5462850010004422086
         first_exit = 5462850012948823206
