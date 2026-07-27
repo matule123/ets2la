@@ -31,35 +31,6 @@ class MapDownloadWorker(QThread):
             self.done.emit(False)
 
 
-class RoadNetLoadWorker(QThread):
-    """Loads the downloaded road network in the background (can be large)."""
-    # (network, reason) — reason is "" on success, a human hint otherwise.
-    done = pyqtSignal(object, str)
-
-    def __init__(self, key=None):
-        super().__init__()
-        self.key = key
-
-    def run(self):
-        try:
-            from core.navigation import map_data
-            from core.navigation.road_network import RoadNetwork
-            downloaded = [d for d in map_data.list_datasets() if d["downloaded"]]
-            if not downloaded:
-                self.done.emit(None, "no_map")
-                return
-            chosen = next((d for d in downloaded if d["key"] == self.key), downloaded[0])
-            net = RoadNetwork()
-            if net.load(map_data.dataset_dir(chosen["key"])):
-                self.done.emit(net, "")
-            else:
-                # Files present but couldn't be parsed — usually a corrupt or
-                # half-finished download. Suggesting a re-download fixes it.
-                self.done.emit(None, "corrupt")
-        except Exception as e:
-            self.done.emit(None, f"error:{e}")
-
-
 class MapView(QWidget):
     """Top-down 2D view of the active route polyline and the truck pose."""
 
@@ -67,9 +38,11 @@ class MapView(QWidget):
         super().__init__()
         self.state = state
         self.route_points = []   # [(x, z), ...] drawn route (loaded for display)
-        self.road_net = None     # RoadNetwork (when a map is downloaded + loaded)
+        # Bounded display-only snapshot from the map plugin. Loading another
+        # complete RoadNetwork here doubles memory and can terminate the UI.
+        self.road_segments = []
         self._pal = None         # set by the page (or a default below)
-        self.zoom_radius = 900.0
+        self.zoom_radius = 280.0
         self.pan_world = [0.0, 0.0]
         self._drag_at = None
         self.setMinimumHeight(300)
@@ -77,14 +50,14 @@ class MapView(QWidget):
         self.apply_theme()
 
     def reset_view(self):
-        self.zoom_radius = 900.0
+        self.zoom_radius = 280.0
         self.pan_world[:] = [0.0, 0.0]
         self.update()
 
     def wheelEvent(self, event):
         # Wheel up zooms in, wheel down zooms out to a broad regional view.
         factor = 0.78 if event.angleDelta().y() > 0 else 1.28
-        self.zoom_radius = max(90.0, min(30000.0, self.zoom_radius * factor))
+        self.zoom_radius = max(90.0, min(500.0, self.zoom_radius * factor))
         self.update()
         event.accept()
 
@@ -122,6 +95,20 @@ class MapView(QWidget):
         self.route_points = points or []
         self.update()
 
+    def set_road_segments(self, payload):
+        """Keep only finite X/Z endpoints from the lightweight live snapshot."""
+        segments = []
+        for item in (payload or [])[:1200]:
+            try:
+                a, b = item[0], item[1]
+                values = float(a[0]), float(a[1]), float(b[0]), float(b[1])
+                if not all(math.isfinite(value) for value in values):
+                    continue
+                segments.append((values[:2], values[2:]))
+            except (TypeError, ValueError, IndexError):
+                continue
+        self.road_segments = segments
+
     def _bounds(self, pts):
         xs = [p[0] for p in pts]
         zs = [p[1] for p in pts]
@@ -138,8 +125,8 @@ class MapView(QWidget):
         truck = self.state.get("truck_world_pos")
         heading = self.state.get("truck_heading", 0.0) or 0.0
 
-        # Truck-centered map view when the road network is loaded.
-        if self.road_net is not None and self.road_net.loaded and truck:
+        # Truck-centered view from the engine-published local map snapshot.
+        if self.road_segments and truck:
             self._paint_map(qp, w, h, truck, heading)
             return
 
@@ -210,8 +197,7 @@ class MapView(QWidget):
         # Nearby roads (grey).
         qp.setPen(QPen(QColor("#555B63"), 2, Qt.PenStyle.SolidLine,
                        Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        centre = (cx, cz)
-        for a, b in self.road_net.visual_segments_near(centre, radius * 1.45):
+        for a, b in self.road_segments:
             qp.drawLine(to_screen(a), to_screen(b))
 
         # Blue is reserved for the route selected in the game's GPS.
@@ -356,14 +342,13 @@ class MapPage(QWidget):
         layout.addLayout(content, 1)
 
         self._dl_worker = None
-        self._net_worker = None
         self._last_active_map_key = None
+        self._last_road_segments_revision = None
+        self._last_pose_signature = None
         self._populate_maps()
-        self._load_road_net()   # if a map is already downloaded, load it for display
-
         self.timer = QTimer()
         self.timer.timeout.connect(self.refresh)
-        self.timer.start(150)
+        self.timer.start(250)
         self._last_routes = None
 
     def restyle(self, theme):
@@ -440,7 +425,7 @@ class MapPage(QWidget):
         except Exception:
             pass
         self.btn_dl.setVisible(not downloaded)
-        self.btn_use.setEnabled(downloaded and self._net_worker is None)
+        self.btn_use.setEnabled(downloaded)
         local = False
         trucklib_required = False
         if not downloaded:
@@ -466,12 +451,11 @@ class MapPage(QWidget):
         if not key:
             return
         self._on_map_selected(self.map_combo.currentIndex())
-        self.view.road_net = None
+        self.view.set_road_segments([])
         self.state.set("nav_arg", key)
         self.state.set("nav_cmd", "switch_map")
         self.dl_status.setText(f"Loading roads, prefabs and cities from {key}...")
         self.btn_use.setEnabled(False)
-        self._load_road_net(key, force=True)
 
     def _update_active_map_label(self):
         """Show which map the autopilot is actually using."""
@@ -516,46 +500,6 @@ class MapPage(QWidget):
             self.dl_status.setText(
                 reason or "Map preparation failed; see the log for details.")
         self._populate_maps()
-        if ok:
-            self._load_road_net()
-
-    def _load_road_net(self, key=None, force=False):
-        """Load the downloaded road network in the background (for the map view)."""
-        if (self.view.road_net is not None and not force) or self._net_worker is not None:
-            return
-        try:
-            from core.navigation import map_data
-            if not any(d["downloaded"] for d in map_data.list_datasets()):
-                return
-        except Exception:
-            return
-        self.dl_status.setText("Loading road network…")
-        self._net_worker = RoadNetLoadWorker(key or self.map_combo.currentData())
-        self._net_worker.done.connect(self._on_net_loaded)
-        self._net_worker.start()
-
-    def _on_net_loaded(self, net, reason=""):
-        self._net_worker = None
-        self._update_map_actions()
-        if net is not None:
-            self.view.road_net = net
-            self.view.reset_view()
-            self.dl_status.setText(f"✓ Map loaded ({len(net.segments)} road segments). "
-                                   "Roads around the truck are shown above.")
-            self.view.update()
-            return
-
-        # Tell the user *why* it failed and what to do, instead of a bare message.
-        if reason == "no_map":
-            self.dl_status.setText("No map downloaded yet. Pick your game version and download.")
-        elif reason == "corrupt":
-            self.dl_status.setText("Map files look incomplete or corrupt. "
-                                   "Please download the map again.")
-        elif reason.startswith("error:"):
-            self.dl_status.setText(f"Could not load map: {reason[6:]}. "
-                                   "Try downloading it again.")
-        else:
-            self.dl_status.setText("Map data present but could not be loaded.")
 
     # --- Actions --------------------------------------------------------------
     def start_record(self):
@@ -591,16 +535,36 @@ class MapPage(QWidget):
         # The engine may auto-select a compatible dataset after comparing live
         # GPS node UIDs. Reload that same network in the UI process as well.
         active_key = self.state.get("active_map_key")
-        if (active_key and active_key != self._last_active_map_key
-                and self._net_worker is None):
+        repaint = False
+        if active_key and active_key != self._last_active_map_key:
             self._last_active_map_key = active_key
             index = self.map_combo.findData(active_key)
             if index >= 0:
                 self.map_combo.blockSignals(True)
                 self.map_combo.setCurrentIndex(index)
                 self.map_combo.blockSignals(False)
-            self.view.road_net = None
-            self._load_road_net(active_key, force=True)
+            self.view.set_road_segments([])
+            repaint = True
+
+        # Fetch the relatively large segment list only when the producer
+        # publishes a new atomic revision, rather than on every UI refresh.
+        road_revision = self.state.get("map_road_segments_revision", 0)
+        if road_revision != self._last_road_segments_revision:
+            self._last_road_segments_revision = road_revision
+            self.view.set_road_segments(
+                self.state.get("map_road_segments", []) or [])
+            repaint = True
+
+        truck = self.state.get("truck_world_pos")
+        heading = float(self.state.get("truck_heading", 0.0) or 0.0)
+        try:
+            pose_signature = (round(float(truck[0]), 1),
+                              round(float(truck[1]), 1), round(heading, 3))
+        except (TypeError, ValueError, IndexError):
+            pose_signature = None
+        if pose_signature != self._last_pose_signature:
+            self._last_pose_signature = pose_signature
+            repaint = True
 
         # Keep the route dropdown in sync with what the map plugin published.
         routes = self.state.get("nav_routes", []) or []
@@ -628,4 +592,5 @@ class MapPage(QWidget):
         # published (so the user sees the real running map, not just the
         # last selection from the combo).
         self._update_active_map_label()
-        self.view.update()
+        if repaint or self.state.get("nav_active"):
+            self.view.update()

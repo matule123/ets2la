@@ -49,6 +49,9 @@ class Plugin(BasePlugin):
         self._map_load_generation = 0
         self._diag_t = 0.0           # throttle for localization diagnostics
         self._roads_t = 0.0          # throttle nearby-road HUD publishing
+        self._roads_pos = None
+        self._roads_revision = int(self.sdk.get(
+            "map_road_segments_revision", 0) or 0)
         self._lane_signature = None
         self._lane_path = None
         self._lane_route = None
@@ -442,7 +445,12 @@ class Plugin(BasePlugin):
             self.sdk.set("active_map_key", None)
             self.sdk.set("active_map_name", None)
             self.sdk.set("map_path", [])
-            self.sdk.set("map_road_segments", [])
+            self._roads_revision += 1
+            self.sdk.shared_state.update_batch({
+                "map_road_segments": [],
+                "map_road_segments_revision": self._roads_revision,
+            })
+            self._roads_pos = None
             self.sdk.set("lane_match", None)
             self.sdk.set("nav_active", False)
             self.sdk.set("nav_steering", 0.0)
@@ -658,19 +666,26 @@ class Plugin(BasePlugin):
         # Display-only local road geometry. It is deliberately separate from
         # nav_path and therefore cannot influence autopilot steering.
         self._roads_t += delta_time
-        if self._roads_t >= 0.35 and self.road_net is not None and self.road_net.loaded:
+        moved = (self._roads_pos is None or math.hypot(
+            float(pos[0]) - self._roads_pos[0],
+            float(pos[1]) - self._roads_pos[1]) >= 12.0)
+        if (self._roads_t >= 0.75 and moved
+                and self.road_net is not None and self.road_net.loaded):
             self._roads_t = 0.0
             try:
                 altitude = float(self.sdk.get("truck_altitude", 0.0) or 0.0)
                 roads = self.road_net.hud_segments_3d_near(
                     pos, radius=280.0, limit=950, altitude=altitude)
-                self.sdk.set("map_road_segments",
-                             [[list(a), list(b), kind, lanes, divided, dash_on,
-                               pillar, rail_post, half_width,
-                               suppress_markings]
-                              for a, b, kind, lanes, divided, dash_on,
-                              pillar, rail_post, half_width,
-                              suppress_markings in roads])
+                payload = [[list(a), list(b), kind, lanes, divided, dash_on,
+                            pillar, rail_post, half_width, suppress_markings]
+                           for a, b, kind, lanes, divided, dash_on, pillar,
+                           rail_post, half_width, suppress_markings in roads]
+                self._roads_revision += 1
+                self.sdk.shared_state.update_batch({
+                    "map_road_segments": payload,
+                    "map_road_segments_revision": self._roads_revision,
+                })
+                self._roads_pos = (float(pos[0]), float(pos[1]))
             except Exception as e:
                 logging.debug("HUD road geometry error: %s", e)
 
