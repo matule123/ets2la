@@ -1,4 +1,6 @@
 import logging
+import os
+import re
 
 try:
     import pydirectinput
@@ -10,6 +12,63 @@ except Exception:  # not installed / non-Windows
 
 from core.sdk.scs_controller_writer import SCSControlsWriter
 from core.sdk.virtual_joystick import VirtualJoystick
+
+
+_SCS_TO_PDI_KEY = {
+    "lbracket": "[", "rbracket": "]", "semicolon": ";",
+    "apostrophe": "'", "comma": ",", "period": ".", "slash": "/",
+    "backslash": "\\", "minus": "-", "equals": "=", "space": "space",
+}
+
+
+def _discover_blinker_keys(documents_dir=None):
+    """Return the active ETS2 profile's physical left/right indicator keys.
+
+    ETS2 stores the selected profile name in ``game.log.txt`` and its control
+    expressions below a UTF-8-hex profile directory.  Reading the expressions
+    avoids assuming the default ``[``/``]`` keys; wheel users commonly bind
+    them to completely different keyboard keys as a secondary input.
+
+    This is deliberately read-only.  Missing or non-keyboard bindings return
+    an empty mapping so the caller can use the semantic SCS input instead.
+    """
+    root = documents_dir or os.path.join(
+        os.path.expanduser("~"), "Documents", "Euro Truck Simulator 2")
+    log_path = os.path.join(root, "game.log.txt")
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as stream:
+            log_text = stream.read()
+    except OSError:
+        return {}
+    matches = re.findall(r"Set profile finished:\s*'([^']+)'", log_text)
+    if not matches:
+        return {}
+    encoded = matches[-1].encode("utf-8").hex().upper()
+    controls_path = None
+    for directory in ("steam_profiles", "profiles"):
+        candidate = os.path.join(root, directory, encoded, "controls.sii")
+        if os.path.isfile(candidate):
+            controls_path = candidate
+            break
+    if not controls_path:
+        return {}
+    try:
+        with open(controls_path, "r", encoding="utf-8", errors="replace") as stream:
+            controls = stream.read()
+    except OSError:
+        return {}
+
+    result = {}
+    for side, mix_name in (("left", "lblinker"), ("right", "rblinker")):
+        expression = re.search(
+            rf'"mix\s+{mix_name}\s+`([^`]*)`', controls, re.IGNORECASE)
+        if not expression:
+            continue
+        key = re.search(r"keyboard\.([A-Za-z0-9_]+)\?", expression.group(1))
+        if key:
+            token = key.group(1).lower()
+            result[side] = _SCS_TO_PDI_KEY.get(token, token)
+    return result
 
 
 def _scs_dll_installed() -> bool:
@@ -67,6 +126,12 @@ class Controller:
         # Track digital key state so we don't spam keyDown/keyUp.
         self._keys_down = set()
         self.current_blinker = "off"
+        self._scs_blinker_button = None
+        self._blinker_keys = _discover_blinker_keys()
+        if self._blinker_keys:
+            logging.info("ETS2 profile blinker keys: left=%s right=%s",
+                         self._blinker_keys.get("left", "unbound"),
+                         self._blinker_keys.get("right", "unbound"))
 
     # --- Digital helpers ------------------------------------------------------
     def _key(self, key: str, down: bool):
@@ -110,21 +175,61 @@ class Controller:
 
     def set_blinker(self, side: str):
         """side: 'left', 'right' or 'off'. Tracks state so 'off' actually cancels."""
+        if side not in ("left", "right", "off"):
+            side = "off"
+
+        # Prefer the key actually configured by the active ETS2 profile. The
+        # controller DLL exposes semantic indicator fields, but unlike its
+        # analog axes they are not consumed by every live game/input setup.
+        # A profile-resolved key works with keyboard and wheel profiles alike.
+        button = side if side in ("left", "right") else self.current_blinker
+        key = getattr(self, "_blinker_keys", {}).get(button)
+        if _HAS_PDI and key:
+            if side == self.current_blinker:
+                return
+            logging.info("Blinker: %s", side)
+            pydirectinput.press(key)
+            self.current_blinker = side
+            return
+
+        if self.mode == "SCS_SDK":
+            # A blinker control is a button edge, not a persistent state. Hold
+            # True for one engine frame, release it on the next, and only send
+            # another edge when the requested side changes.
+            if self._scs_blinker_button is not None:
+                if self._scs_blinker_button == "left":
+                    self.scs.set_left_blinker(False)
+                else:
+                    self.scs.set_right_blinker(False)
+                self._scs_blinker_button = None
+            if side == self.current_blinker:
+                return
+            logging.info("Blinker: %s", side)
+            if button == "left":
+                self.scs.set_left_blinker(True)
+                self._scs_blinker_button = "left"
+            elif button == "right":
+                self.scs.set_right_blinker(True)
+                self._scs_blinker_button = "right"
+            self.current_blinker = side
+            return
         if side == self.current_blinker:
             return
         logging.info(f"Blinker: {side}")
         if not _HAS_PDI:
             self.current_blinker = side
             return
+        left_key = getattr(self, "_blinker_keys", {}).get("left", "[")
+        right_key = getattr(self, "_blinker_keys", {}).get("right", "]")
         if side == "left":
-            pydirectinput.press('[')
+            pydirectinput.press(left_key)
         elif side == "right":
-            pydirectinput.press(']')
+            pydirectinput.press(right_key)
         else:  # off -> press the currently-active side again to cancel
             if self.current_blinker == "left":
-                pydirectinput.press('[')
+                pydirectinput.press(left_key)
             elif self.current_blinker == "right":
-                pydirectinput.press(']')
+                pydirectinput.press(right_key)
         self.current_blinker = side
 
     def select_drive(self, pressed: bool = True):

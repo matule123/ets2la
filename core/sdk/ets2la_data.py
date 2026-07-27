@@ -38,6 +38,7 @@ _SEM_SIZE = 1920
 
 # Traffic-light state codes (from ETS2LA).
 ST_OFF, ST_Y2R, ST_RED, ST_Y2G, ST_GREEN, ST_SLEEP = 0, 1, 2, 4, 8, 32
+ETS2_TILE_SIZE_M = 512.0
 
 
 def _yaw(q0, q1, q2, q3):
@@ -58,6 +59,11 @@ def _veh_type(length):
     if length < 14.0:
         return "bus"
     return "truck"
+
+
+def _tile_world(local_coordinate, tile_coordinate):
+    """Convert an ETS2LA semaphore tile-local coordinate to ETS2 world space."""
+    return float(local_coordinate) + int(tile_coordinate) * ETS2_TILE_SIZE_M
 
 
 class ETS2LAData:
@@ -152,7 +158,12 @@ class ETS2LAData:
         return out
 
     def read_traffic_lights(self) -> list:
-        """List of {x, z, state, color, time_left} for active traffic lights."""
+        """Traffic lights in absolute ETS2 world coordinates.
+
+        The semaphore buffer stores X/Z relative to signed 512 m map tiles.
+        Ignoring the tile fields leaves every light near the world origin and
+        makes red-light braking impossible outside that one tile.
+        """
         self._ensure()
         if self._sem_buf is None:
             return []
@@ -165,13 +176,21 @@ class ETS2LAData:
         for i in range(40):
             b = i * 13
             px, py, pz = data[b], data[b + 1], data[b + 2]
+            tile_x, tile_z = data[b + 3], data[b + 4]
+            q0, q1, q2, q3 = data[b + 5:b + 9]
             kind = data[b + 9]          # 1 = traffic light
             time_left = data[b + 10]
             state = data[b + 11]
             if kind != 1 or (px == 0 and pz == 0):
                 continue
-            out.append({"x": px, "z": pz, "state": state,
-                        "color": _state_color(state), "time_left": time_left})
+            out.append({
+                "x": _tile_world(px, tile_x), "y": float(py),
+                "z": _tile_world(pz, tile_z),
+                "tile_x": int(tile_x), "tile_z": int(tile_z),
+                "yaw": _yaw(q0, q1, q2, q3),
+                "state": state, "color": _state_color(state),
+                "time_left": time_left, "id": data[b + 12],
+            })
         return out
 
 
@@ -186,20 +205,37 @@ def _state_color(state):
 
 
 def nearest_light_ahead(lights, pos, heading, max_dist=120.0):
-    """Pick the traffic light most likely controlling us (ahead, within range)."""
+    """Pick the signal controlling our approach, rejecting crossing arms."""
     if not lights or not pos:
         return None
     px, pz = pos
     fx, fz = -math.sin(heading), -math.cos(heading)
-    best, best_d = None, max_dist
+    best, best_score = None, float("inf")
     for lt in lights:
-        dx, dz = lt["x"] - px, lt["z"] - pz
+        try:
+            dx, dz = float(lt["x"]) - px, float(lt["z"]) - pz
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
         dist = math.hypot(dx, dz)
         if dist < 3 or dist > max_dist:
             continue
-        # in front of us (dot of forward and direction-to-light > 0)
-        if (fx * dx + fz * dz) <= 0:
+        ahead = fx * dx + fz * dz
+        lateral = fx * dz - fz * dx
+        if ahead <= 0 or abs(lateral) > 32.0:
             continue
-        if dist < best_d:
-            best_d, best = dist, dict(lt, distance=dist)
+        # A controlling head faces the approaching vehicle. Cross-traffic
+        # heads are roughly 90 degrees away and must not stop our carriageway.
+        if "yaw" in lt:
+            try:
+                facing_error = abs(abs(math.atan2(
+                    math.sin(float(lt["yaw"]) - heading),
+                    math.cos(float(lt["yaw"]) - heading))) - math.pi)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if facing_error > math.radians(55.0):
+                continue
+        score = ahead + abs(lateral) * 0.12
+        if score < best_score:
+            best_score = score
+            best = dict(lt, distance=ahead, lateral_distance=lateral)
     return best

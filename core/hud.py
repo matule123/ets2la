@@ -596,30 +596,16 @@ class UltraPilotHUD(QWidget):
             pos, h = self._stabilize_display_pose(
                 pos, h, float(d.get("speed_kmh", 0.0) or 0.0))
 
-        # Camera perception is the only source that knows the truck's position
-        # *inside* the visible lane. Align display-only road/traffic geometry
-        # with it; navigation remains in its real world coordinates below.
-        target_road_shift = (0.0 if d.get("lane_revision", -1) >= 0 else
-            max(-2.8, min(2.8,
-                -float(d.get("vision_lane_offset", 0.0) or 0.0) * 8.0)))
-        shift_error = target_road_shift - self._road_scene_shift
-        # A stopped truck has no meaningful optical-flow update. Freeze the
-        # established lane alignment so detector noise cannot make the road
-        # (and therefore the apparently stationary model) sway side to side.
-        if d.get("lane_revision", -1) >= 0:
-            # During authoritative GPS navigation the road, truck and blue
-            # trajectory must share the exact telemetry transform immediately.
-            self._road_scene_shift = 0.0
-        elif d.get("speed_kmh", 0.0) >= 1.5 and abs(shift_error) >= 0.16:
-            self._road_scene_shift += max(-0.055, min(0.055, shift_error))
-        road_scene_shift = self._road_scene_shift
+        # The ego model, roads, traffic and GPS path share one telemetry origin.
+        # A former vision-derived display shift moved only the road mesh; after
+        # a few metres the fixed ego rig therefore appeared to drift outside
+        # the lane even though its real world pose was correct.
+        self._road_scene_shift = 0.0
 
-        def to_truck(wx, wz, align_road=True):
+        def to_truck(wx, wz):
             dx, dz = wx - pos[0], wz - pos[1]
             ahead = dx * (-math.sin(h)) + dz * (-math.cos(h))
             lateral = dx * math.cos(h) - dz * math.sin(h)
-            if align_road:
-                lateral += road_scene_shift
             return ahead, lateral
 
         if pos:
@@ -718,7 +704,6 @@ class UltraPilotHUD(QWidget):
                         surface_edges[0][0], surface_edges[0][1],
                         surface_edges[1][1], surface_edges[1][0],
                     ]))
-            drawn_pillars = []
             for (_, a, b, ah, bh, kind, segment_lanes, divided, dash_on,
                  pillar, rail_post, supplied_half,
                  suppress_markings) in nearby:
@@ -730,10 +715,6 @@ class UltraPilotHUD(QWidget):
                 pa = self._project(a[0], a[1], view, ah)
                 pb = self._project(b[0], b[1], view, bh)
                 if pa and pb:
-                    centre_lateral = (a[1] + b[1]) * 0.5
-                    follows_truck_road = (
-                        kind == "road" and abs(centre_lateral) < 10.0
-                        and abs(da) / length > 0.68)
                     if kind == "lane":
                         # Prefab trajectories connect roads through junctions.
                         # Draw one round-capped surface only. Giving every
@@ -782,11 +763,6 @@ class UltraPilotHUD(QWidget):
                     # separation unmistakable and hides geometry below it.
                     deck_height = (ah + bh) * .5
                     if len(edges) == 2 and deck_height > 2.0:
-                        mid_a, mid_l = ((a[0] + b[0]) * .5,
-                                        (a[1] + b[1]) * .5)
-                        pillar_clear = all(
-                            math.hypot(mid_a - old_a, mid_l - old_l) >= 22.0
-                            for old_a, old_l in drawn_pillars)
                         # Keep the ETS2LA-style clean elevated ribbon. The old
                         # procedural columns/crossbeams were generated for
                         # every sampled road and formed a forest of supports in
@@ -883,7 +859,7 @@ class UltraPilotHUD(QWidget):
                 if len(point) < 3:
                     continue
                 ahead, lateral = to_truck(
-                    float(point[0]), float(point[2]), align_road=False)
+                    float(point[0]), float(point[2]))
                 transformed.append((ahead, lateral,
                                     float(point[1]) - d["altitude"]))
             # Start at the route point nearest to the truck. Never force a line

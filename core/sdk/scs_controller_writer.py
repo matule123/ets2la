@@ -182,6 +182,12 @@ class SCSControlsWriter:
     def release_drive(self):
         return self._write_bool("geardrive", False)
 
+    def set_left_blinker(self, pressed: bool):
+        return self._write_bool("lblinker", pressed)
+
+    def set_right_blinker(self, pressed: bool):
+        return self._write_bool("rblinker", pressed)
+
     # --- Public API (mirrors the other control backends) ---------------------
     def set_steering(self, value: float):
         v = max(-1.0, min(1.0, value))
@@ -198,6 +204,8 @@ class SCSControlsWriter:
     def reset(self):
         for name in ("steering", "aforward", "abackward", "clutch"):
             self._write_float(name, 0.0)
+        self._write_bool("lblinker", False)
+        self._write_bool("rblinker", False)
 
     def close(self):
         try:

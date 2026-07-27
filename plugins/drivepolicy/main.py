@@ -1,6 +1,7 @@
 import logging
 import math
 from sdk.base_plugin import BasePlugin
+from core.navigation.route import iter_path_xz
 
 
 # === Tuning =================================================================
@@ -285,7 +286,7 @@ class Plugin(BasePlugin):
         def lateral_at(target):
             best = None
             best_d = 1e18
-            for wx, wz in path:
+            for wx, wz in iter_path_xz(path):
                 dx, dz = wx - px, wz - pz
                 a = dx * (-sin_h) + dz * (-cos_h)
                 if a < 2.0 or a > 120.0:

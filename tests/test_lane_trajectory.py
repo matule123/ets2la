@@ -37,6 +37,33 @@ def single_lane_path(coords, lane_type="road", width=4.5, uid=1):
 
 
 class LaneTrajectorySyntheticTests(unittest.TestCase):
+    def test_hundred_kilometre_route_builds_without_quadratic_failure(self):
+        synthetic = SyntheticMap()
+        node_count = 1001
+        for index in range(node_count):
+            synthetic.node(index + 1, 0.0, float(index * 100))
+        for uid in range(1, node_count):
+            synthetic.road(uid, uid + 1, 2)
+        gps = tuple(range(1, node_count + 1))
+        match = synthetic.match_on(0, 0, gps)
+        started = time.perf_counter()
+        lane_path, _ = synthetic.net.build_lane_path(
+            gps, (match.point.x, match.point.z), match.point.heading,
+            altitude=match.point.y, start_match=match)
+        trajectory = build_lane_trajectory(lane_path)
+        elapsed = time.perf_counter() - started
+        validation = validate_lane_trajectory(trajectory)
+        self.assertTrue(lane_path.valid, lane_path.failure_reason)
+        self.assertTrue(trajectory.valid, trajectory.failure_reason)
+        self.assertTrue(validation.valid, validation.failure_reason)
+        self.assertEqual(len(lane_path.segments), 1000)
+        self.assertGreater(lane_path.distance_m, 99_000.0)
+        self.assertGreater(len(trajectory.points), 49_000)
+        self.assertLessEqual(validation.max_spacing_m, 2.01)
+        # A generous regression ceiling catches an accidental O(n²) scan
+        # without making the test sensitive to normal CI machine variance.
+        self.assertLess(elapsed, 30.0)
+
     def assert_valid_trajectory(self, source):
         trajectory = build_lane_trajectory(source)
         self.assertTrue(trajectory.valid, trajectory.failure_reason)

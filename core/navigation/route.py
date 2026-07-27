@@ -20,6 +20,28 @@ from typing import List, Optional, Sequence, Tuple
 
 Point = Tuple[float, float]
 
+
+def iter_path_xz(points):
+    """Yield finite ETS2 world ``(X, Z)`` coordinates from 2D/3D paths.
+
+    Lane trajectories contain ``[X, Y, Z]`` while legacy recorded routes use
+    ``[X, Z]``. Ground-plane consumers must not unpack these formats directly.
+    """
+    for point in points or ():
+        if not isinstance(point, (list, tuple)):
+            continue
+        try:
+            if len(point) >= 3:
+                x, z = float(point[0]), float(point[2])
+            elif len(point) >= 2:
+                x, z = float(point[0]), float(point[1])
+            else:
+                continue
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(x) and math.isfinite(z):
+            yield x, z
+
 # Tuning: gentle + far lookahead so the truck anticipates curves smoothly
 # instead of jerking late into them (which caused it to crash on bends).
 #

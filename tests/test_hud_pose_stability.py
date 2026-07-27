@@ -2,6 +2,8 @@ import math
 import struct
 import unittest
 
+from PyQt6.QtCore import QPointF
+
 from core.hud import UltraPilotHUD
 from core.sdk.scs_sdk import SCSTelemetry
 from tests.test_lane_route_builder import SyntheticMap
@@ -54,6 +56,35 @@ class HudPoseStabilityTests(unittest.TestCase):
             "lane_revision": -1,
             "lane_match": {"lateral_error_m": 2.0},
         }), 0.0)
+
+    def test_driving_view_renders_authoritative_xyz_path_without_legacy_shift(self):
+        class Painter:
+            def __getattr__(self, _name):
+                return lambda *_args, **_kwargs: None
+
+        class View:
+            def top(self): return 0.0
+            def bottom(self): return 600.0
+            def left(self): return 0.0
+            def width(self): return 900.0
+            def height(self): return 600.0
+            def center(self): return QPointF(450.0, 300.0)
+
+        hud = self.make_hud()
+        hud._view_yaw = 0.0
+        hud._road_scene_shift = 2.5
+        hud._draw_low_poly_ego = lambda *_args, **_kwargs: None
+        data = {
+            "pos": (100.0, 200.0), "heading": 0.0, "speed_kmh": 20.0,
+            "altitude": 10.0, "road_segments": [], "traffic": [],
+            "nav_path": [[100.0, 10.0, 200.0],
+                         [100.0, 10.0, 180.0],
+                         [104.0, 10.0, 150.0]],
+            "lanes": 2, "lane_revision": 5,
+            "trailer_attached": False,
+        }
+        hud._draw_driving_view(Painter(), View(), data)
+        self.assertEqual(hud._road_scene_shift, 0.0)
         self.assertEqual(UltraPilotHUD._matched_ego_lateral({
             "lane_revision": 2,
             "lane_match": {"lateral_error_m": float("nan")},

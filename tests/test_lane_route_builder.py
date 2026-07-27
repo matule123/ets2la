@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from core.navigation.lane_model import LaneLocator
+from core.navigation.lane_model import LaneId, LaneLocator, LanePoint, LaneSegment
 from core.navigation.road_network import RoadNetwork
 
 
@@ -80,6 +80,33 @@ class SyntheticMap:
 
 
 class LaneRouteBuilderTests(unittest.TestCase):
+    def test_confirmed_prefab_exit_tapers_into_following_road(self):
+        prefab_id = LaneId(10, 1, 0, "junction", 3, (3,))
+        road_id = LaneId(20, 1, 0)
+        prefab = LaneSegment(
+            prefab_id, 1, 2, 1, 0, 1, 4.5, "dataset", 0, None,
+            "prefab", (
+                LanePoint(3.0, 0.0, 10.0, 0.0, 0.0, lane_id=prefab_id),
+                LanePoint(3.0, 0.0, 0.0, 10.0, 0.0, lane_id=prefab_id),
+            ))
+        road_points = tuple(
+            LanePoint(0.0, 0.0, -distance, distance, 0.0,
+                      lane_id=road_id)
+            for distance in (0.0, 10.0, 20.0, 30.0, 40.0, 50.0))
+        road = LaneSegment(
+            road_id, 2, 3, 1, 0, 1, 4.5, "derived", 0, "look",
+            "road", road_points)
+        tapered = RoadNetwork._retarget_road_start_from_prefab(prefab, road)
+        self.assertEqual((tapered.centerline[0].x, tapered.centerline[0].z),
+                         (3.0, 0.0))
+        self.assertEqual((tapered.centerline[-1].x, tapered.centerline[-1].z),
+                         (0.0, -50.0))
+        jumps = [abs(math.degrees((b.heading-a.heading+math.pi)
+                                  % (2*math.pi)-math.pi))
+                 for a, b in zip(tapered.centerline,
+                                 tapered.centerline[1:])]
+        self.assertLess(max(jumps), 10.0)
+
     def test_ets2la_lane_centres_cover_balanced_unbalanced_and_one_way(self):
         net = RoadNetwork()
         lane = "traffic_lane.road.local"

@@ -833,68 +833,11 @@ class RoadNetwork:
                                    max(1, lanes), divided, dash_on,
                                    pillar, rail_post, half_width,
                                    near_prefab_boundary))
-        # Spatial index for the overlap check below. Scanning every ordinary
-        # chord for every prefab chord made HUD publication unnecessarily
-        # expensive in large interchanges.
-        normal_bins = {}
-        overlap_cell = 12.0
-        for item in ranked:
-            _, ra, rb, rkind, *_rest = item
-            if rkind != "road":
-                continue
-            key = (math.floor(((ra[0] + rb[0]) * .5) / overlap_cell),
-                   math.floor(((ra[1] + rb[1]) * .5) / overlap_cell))
-            normal_bins.setdefault(key, []).append((ra, rb))
-
-        # Prefab curves fill the otherwise missing geometry between ordinary
-        # road objects at junctions. The HUD renders them only as an unmarked
-        # asphalt underlay, never as independent outlined lanes.
-        connected_nodes = {
-            uid for index in connected_indices for uid in self._seg_uids[index]
-        }
-        for prefab_index, (a, b) in enumerate(self.prefab_segments_3d_near(
-                pos, radius, limit * 2,
-                allowed_node_uids=connected_nodes or None)):
-            ah, bh = a[2], b[2]
-            distance2 = min((a[0]-px)**2+(a[1]-pz)**2,
-                            (b[0]-px)**2+(b[1]-pz)**2)
-            if not self._hud_chord_is_sane(a, b, altitude, distance2):
-                continue
-
-            # Prefab curves bridge gaps at junctions, but some datasets repeat
-            # an exit that is already represented by a normal road curve. Do
-            # not publish a second parallel asphalt ribbon on top/beside it.
-            pmx, pmz = (a[0] + b[0]) * .5, (a[1] + b[1]) * .5
-            pvx, pvz = b[0] - a[0], b[1] - a[1]
-            plen = math.hypot(pvx, pvz)
-            duplicate = False
-            if plen > .2:
-                cell_x = math.floor(pmx / overlap_cell)
-                cell_z = math.floor(pmz / overlap_cell)
-                candidates = []
-                for cell_dx in (-1, 0, 1):
-                    for cell_dz in (-1, 0, 1):
-                        candidates.extend(normal_bins.get(
-                            (cell_x + cell_dx, cell_z + cell_dz), ()))
-                for ra, rb in candidates:
-                    rvx, rvz = rb[0] - ra[0], rb[1] - ra[1]
-                    rlen2 = rvx * rvx + rvz * rvz
-                    if rlen2 < .04:
-                        continue
-                    t = max(0.0, min(1.0,
-                        ((pmx - ra[0]) * rvx + (pmz - ra[1]) * rvz) / rlen2))
-                    qx, qz = ra[0] + rvx * t, ra[1] + rvz * t
-                    if (pmx - qx) ** 2 + (pmz - qz) ** 2 > 3.2 ** 2:
-                        continue
-                    alignment = abs((pvx * rvx + pvz * rvz)
-                                    / (plen * math.sqrt(rlen2)))
-                    if alignment > .94:
-                        duplicate = True
-                        break
-            if duplicate:
-                continue
-            ranked.append((distance2, a, b, "lane", 1, False,
-                           False, False, False, 3.05, True))
+        # Prefab navCurves describe every legal topological movement through a
+        # junction. They are not road-surface geometry. Drawing all of them as
+        # independent asphalt strips produced overlapping blocks and a web of
+        # false lanes. Ordinary road ribbons remain the contextual road mesh;
+        # the single selected prefab movement is shown by lane_trajectory.
         ranked.sort(key=lambda item: item[0])
         return [(a, b, kind, lanes, divided, dash_on, pillar, rail_post,
                  half_width, suppress_markings)
@@ -1338,6 +1281,65 @@ class RoadNetwork:
                 lane_id=road.lane_id))
         return replace(road, centerline=tuple(rebuilt))
 
+    @staticmethod
+    def _retarget_road_start_from_prefab(prefab, road):
+        """Taper a confirmed prefab output into the following road lane.
+
+        This is the exit-side counterpart of ``_retarget_road_end_to_prefab``.
+        It removes a one-sample lateral kink only when the two real segments
+        share a UID, height and direction and the correction stays inside one
+        lane width over a sufficiently long road segment.
+        """
+        if (prefab.lane_id.prefab_token in (None, "graph")
+                or road.lane_id.prefab_token is not None
+                or prefab.end_uid != road.start_uid
+                or len(prefab.centerline) < 2 or len(road.centerline) < 3):
+            return road
+        source = road.centerline[0]
+        target = prefab.centerline[-1]
+        dx, dy, dz = (target.x-source.x, target.y-source.y,
+                      target.z-source.z)
+        gap = math.sqrt(dx*dx + dy*dy + dz*dz)
+        if gap <= 0.35:
+            return road
+        first_heading = prefab.centerline[-1].heading
+        second_heading = road.centerline[0].heading
+        heading_jump = abs((second_heading-first_heading+math.pi)
+                           % (2.0*math.pi)-math.pi)
+        forward_x, forward_z = -math.sin(second_heading), -math.cos(second_heading)
+        longitudinal = dx*forward_x + dz*forward_z
+        lateral = dx*math.cos(second_heading) - dz*math.sin(second_heading)
+        total = road.centerline[-1].s
+        if (gap > road.width_m * 1.10 or abs(dy) > 1.0
+                or heading_jump > math.radians(15.0)
+                or abs(longitudinal) > 1.5
+                or abs(lateral) > road.width_m * 1.05
+                or total < max(24.0, abs(lateral) * 7.0)):
+            return road
+
+        transition = min(total, max(36.0, abs(lateral) * 12.0))
+        shifted = []
+        for point in road.centerline:
+            progress = max(0.0, min(1.0, point.s / transition))
+            smooth = 1.0 - progress*progress*(3.0-2.0*progress)
+            shifted.append((point.x + dx*smooth,
+                            point.y + dy*smooth,
+                            point.z + dz*smooth))
+        shifted[0] = (target.x, target.y, target.z)
+        rebuilt, travelled = [], 0.0
+        for index, point in enumerate(shifted):
+            if rebuilt:
+                travelled += math.dist(shifted[index-1], point)
+            before = shifted[max(0, index-1)]
+            after = shifted[min(len(shifted)-1, index+1)]
+            tx, tz = after[0]-before[0], after[2]-before[2]
+            heading = (math.atan2(-tx, -tz) if math.hypot(tx, tz) > 1e-8
+                       else (rebuilt[-1].heading if rebuilt else second_heading))
+            rebuilt.append(LanePoint(
+                point[0], point[1], point[2], travelled, heading,
+                lane_id=road.lane_id))
+        return replace(road, centerline=tuple(rebuilt))
+
     def select_lane_sequence(self, corridor, start_match):
         """Select one continuous lane for every authoritative corridor edge."""
         if not isinstance(corridor, GpsCorridor) or not corridor.valid:
@@ -1438,6 +1440,11 @@ class RoadNetwork:
                 return tuple(selected), (
                     f"graph-only edge {edge.start_uid} -> {edge.end_uid} "
                     "has no lane-confirmed geometry")
+            if (selected and selected[-1].lane_id.prefab_token
+                    not in (None, "graph")
+                    and current.lane_id.prefab_token is None):
+                current = self._retarget_road_start_from_prefab(
+                    selected[-1], current)
             if selected:
                 connection = self._lane_connection(selected[-1], current)
                 if connection is None:

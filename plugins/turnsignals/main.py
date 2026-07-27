@@ -1,6 +1,7 @@
 import logging
 import math
 from sdk.base_plugin import BasePlugin
+from core.navigation.route import iter_path_xz
 
 
 # --- Tuning -----------------------------------------------------------------
@@ -9,7 +10,6 @@ FAR_M = 60.0            # ...and this far ahead; the bend is the difference
 LATERAL_TURN_M = 6.0    # path drifts sideways by this many metres → it's a turn
 APPROACH_M = 90.0       # only look at points within this distance ahead
 SUSTAIN_S = 3.0         # keep the signal on this long after the bend fades
-MIN_SPEED_MS = 1.5      # don't fiddle with blinkers while parked / crawling
 
 
 class Plugin(BasePlugin):
@@ -36,6 +36,7 @@ class Plugin(BasePlugin):
 
     def on_stop(self):
         self.sdk.set("ctl_blinker", "off")
+        self.sdk.set("route_blinker", "off")
         self.sdk.set("active_blinker", "off")
 
     def on_tick(self, delta_time: float):
@@ -48,7 +49,6 @@ class Plugin(BasePlugin):
                 self._set("off")
             return
 
-        speed = float(self.sdk.shared_state.get("truck_speed_ms", 0.0) or 0.0)
         pos = self.sdk.shared_state.get("truck_world_pos")
         heading = self.sdk.shared_state.get("truck_heading", 0.0) or 0.0
         system_state = self.sdk.shared_state.get("system_state", "IDLE")
@@ -56,11 +56,20 @@ class Plugin(BasePlugin):
         # and signalling it is exactly the unwanted "lane change during bypass".
         avoiding = system_state in ("AVOID_OBSTACLE", "EMERGENCY")
 
-        path = (self.sdk.shared_state.get("nav_path", [])
-                or self.sdk.shared_state.get("map_path", []) or [])
+        snapshot = self.sdk.shared_state.get("lane_trajectory", {}) or {}
+        current_revision = self.sdk.shared_state.get(
+            "lane_trajectory_revision", -1)
+        authoritative = bool(
+            snapshot.get("valid", False)
+            and snapshot.get("revision") == current_revision)
+        path = ((snapshot.get("display_points", ()) or ())
+                if authoritative else
+                (self.sdk.shared_state.get("nav_path", [])
+                 or self.sdk.shared_state.get("map_path", []) or []))
 
         target = "off"
-        if pos and not avoiding and len(path) >= 3 and abs(speed) >= MIN_SPEED_MS:
+        # Keep the route-requested signal active while waiting at a red light.
+        if pos and not avoiding and len(path) >= 3:
             target = self._signal_for_path(pos, heading, path)
 
         # Sustain: keep the signal briefly after the bend so it doesn't strobe
@@ -77,8 +86,9 @@ class Plugin(BasePlugin):
             self._set(target)
 
         self.tags.turn_signal = target
-        # Mirror for the HUD rear-cam (so it pops up on a real signal).
-        self.sdk.set("active_blinker", target)
+        # Dedicated route request. The engine arbitrates it with the legacy
+        # planner and mirrors the one physical result to active_blinker/HUD.
+        self.sdk.set("route_blinker", target)
 
         # --- Blind-spot check: is it safe to actually move into the signalled
         # lane? When a signal is on we scan the adjacent lane beside+behind us;
@@ -125,7 +135,7 @@ class Plugin(BasePlugin):
             """Lateral offset (m, +right) of the path at ~target_a metres ahead."""
             best = None
             best_d = 1e18
-            for wx, wz in path:
+            for wx, wz in iter_path_xz(path):
                 dx, dz = wx - px, wz - pz
                 a = dx * (-sin_h) + dz * (-cos_h)
                 if a < 2.0 or a > APPROACH_M:
@@ -142,13 +152,12 @@ class Plugin(BasePlugin):
         if near is None or far is None:
             return "off"
 
-        # Lateral drift of the path between near and far. The truck-frame
-        # lateral sign here is +left/−right for the heading convention used, so
-        # a negative drift means the road bends to our right.
+        # ETS2 forward=(-sin(h), -cos(h)); the lateral basis below is +right,
+        # so a positive drift requests the right indicator.
         drift = far[1] - near[1]
-        if drift <= -LATERAL_TURN_M:
-            return "right"
         if drift >= LATERAL_TURN_M:
+            return "right"
+        if drift <= -LATERAL_TURN_M:
             return "left"
         return "off"
 

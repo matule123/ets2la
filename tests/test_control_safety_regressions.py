@@ -4,6 +4,7 @@ import struct
 import sys
 import time
 import unittest
+from unittest import mock
 
 from PyQt6.QtCore import QPointF
 
@@ -17,7 +18,9 @@ from core.hud import (
     _clip_truck_road_segment,
 )
 from core.engine import UltraPilotEngine
-from core.controller import Controller as PhysicalController
+from core.controller import (
+    Controller as PhysicalController, _discover_blinker_keys,
+)
 from core.navigation.route import Route, K_CTE, K_CTE_CURVE, curve_cte_gain
 from core.sdk.scs_controller_writer import SCSControlsWriter, _FIELDS, _SIZE
 from plugins.autopilot.main import Plugin as AutopilotPlugin
@@ -47,16 +50,20 @@ class Controller:
     def __init__(self):
         self.steering = self.throttle = self.brake = 0.0
         self.drive_events = []
+        self.blinker = "off"
 
     def set_steering(self, value): self.steering = value
     def set_throttle(self, value): self.throttle = value
     def set_brake(self, value): self.brake = value
-    def set_blinker(self, value): pass
+    def set_blinker(self, value): self.blinker = value
     def pay_toll(self): pass
     def select_drive(self, pressed=True):
         self.drive = pressed
         self.drive_events.append(pressed)
         return True
+    def release_all(self):
+        self.steering = self.throttle = self.brake = 0.0
+        self.select_drive(False)
 
 
 class Telemetry:
@@ -78,6 +85,27 @@ def autopilot(truck, state):
     plugin.tags = Tags()
     plugin.on_start()
     return plugin
+
+
+def ready_navigation_state(**extra):
+    now = time.monotonic()
+    snapshot = {
+        "revision": 7, "valid": True, "confidence": 0.95,
+        "request_id": "test-request", "source_gps_uids": [11, 12],
+        "points": [[0.0, 10.0, 0.0], [0.0, 10.0, -50.0]],
+        "lane_match": {"revision": 7, "lateral_error_m": 0.0,
+                       "heading_error_rad": 0.0},
+    }
+    values = {
+        "autopilot_active": True, "lane_trajectory": snapshot,
+        "lane_trajectory_revision": 7,
+        "lane_trajectory_heartbeat": now,
+        "game_route_node_uids": [11, 12],
+        "nav_recalc_request": "test-request", "telemetry_valid": True,
+        "lane_match": snapshot["lane_match"], "game_route_distance": 500.0,
+    }
+    values.update(extra)
+    return State(values)
 
 
 class ControlSafetyRegressionTests(unittest.TestCase):
@@ -126,6 +154,7 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         writer.set_throttle(0.40)
         writer.set_brake(0.15)
         writer.select_drive()
+        writer.set_right_blinker(True)
         payload = writer._buf.getvalue()
         self.assertAlmostEqual(struct.unpack_from(
             "f", payload, offsets["steering"])[0], 0.25)
@@ -135,6 +164,8 @@ class ControlSafetyRegressionTests(unittest.TestCase):
             "f", payload, offsets["abackward"])[0], 0.15)
         self.assertTrue(struct.unpack_from(
             "?", payload, offsets["geardrive"])[0])
+        self.assertTrue(struct.unpack_from(
+            "?", payload, offsets["rblinker"])[0])
 
     def test_plugin_controller_proxy_supports_drive_selector(self):
         state = {}
@@ -154,8 +185,8 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         # Regression for "too many values to unpack (expected 2)".
         self.assertIsInstance(plugin._route_lateral_hint(), (float, type(None)))
 
-    def test_reverse_gear_is_recovered_without_disengaging(self):
-        state = State({"autopilot_active": True})
+    def test_reverse_gear_stops_then_disengages_without_selecting_drive(self):
+        state = ready_navigation_state()
         truck = {"speed": -0.5, "gear": -1}
         plugin = autopilot(truck, state)
         plugin.on_tick(0.05)
@@ -165,14 +196,12 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         plugin.sdk.telemetry.truck = truck
         plugin._drive_request_t = -1.0
         plugin.on_tick(0.05)
-        self.assertTrue(plugin.sdk.controller.drive)
-        truck["gear"] = 1
-        plugin.on_tick(0.05)
+        self.assertFalse(state.get("autopilot_active"))
         self.assertFalse(plugin._reverse_recovery)
-        self.assertNotIn(False, plugin.sdk.controller.drive_events)
+        self.assertEqual(plugin.sdk.controller.drive_events, [False])
 
     def test_neutral_selects_drive_before_throttle(self):
-        state = State({"autopilot_active": True})
+        state = ready_navigation_state()
         plugin = autopilot({"speed": 0.0, "gear": 0}, state)
         plugin.on_tick(0.05)
         self.assertTrue(state.get("autopilot_active"))
@@ -187,7 +216,7 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         self.assertEqual(plugin.sdk.controller.drive_events, [True])
 
     def test_automatic_drive_mode_with_zero_ratio_does_not_deadlock(self):
-        state = State({"autopilot_active": True})
+        state = ready_navigation_state()
         plugin = autopilot({"speed": 0.0, "gear": 0}, state)
         plugin.on_tick(0.05)
         self.assertEqual(plugin.sdk.controller.throttle, 0.0)
@@ -205,6 +234,16 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         self.assertEqual(plugin.sdk.controller.brake, 0.0)
         self.assertEqual(state.get("navigation_status"),
                          "Jazda dopredu pripravená")
+
+    def test_red_light_brake_suppresses_throttle_on_valid_route(self):
+        state = ready_navigation_state(
+            nav_active=True, nav_steering=0.0, light_brake=1.0,
+            acc_throttle=0.8, acc_brake=0.0)
+        plugin = autopilot({"speed": 8.0, "gear": 5}, state)
+        plugin.on_tick(0.10)
+        self.assertGreater(plugin.sdk.controller.brake, 0.0)
+        self.assertEqual(plugin.sdk.controller.throttle, 0.0)
+        self.assertTrue(state.get("autopilot_active"))
 
     def test_engine_turns_coalesced_drive_requests_into_real_pulses(self):
         state = State({
@@ -233,9 +272,35 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         engine._flush_controls()
         self.assertEqual(controller.drive_events, [True, False, True])
 
+    def test_route_blinker_survives_legacy_planner_frames(self):
+        state = State({
+            "autopilot_active": True, "telemetry_valid": True,
+            "autopilot_control_heartbeat": time.monotonic(),
+            CTL_STEERING: 0.0, CTL_THROTTLE: 0.0, CTL_BRAKE: 0.0,
+            "route_blinker": "right", "planner_blinker": "off",
+        })
+        controller = Controller()
+        engine = UltraPilotEngine.__new__(UltraPilotEngine)
+        engine.shared_state = state
+        engine.controller = controller
+        engine._was_active = False
+        engine._drive_selector_pressed = False
+        engine._last_output_steering = 0.0
+        engine._last_output_brake = 0.0
+        engine._last_control_flush = time.monotonic()
+        engine._flush_controls()
+        engine._flush_controls()
+        self.assertEqual(controller.blinker, "right")
+        self.assertEqual(state.get("active_blinker"), "right")
+
+        state.set("autopilot_active", False)
+        engine._flush_controls()
+        self.assertEqual(controller.blinker, "off")
+        self.assertEqual(state.get("active_blinker"), "off")
+
     def test_drive_request_survives_worker_engine_scheduling_race(self):
-        shared = {"autopilot_active": True,
-                  "telemetry": {"truck": {"speed": 0.0, "gear": 0}}}
+        shared = ready_navigation_state().values
+        shared["telemetry"] = {"truck": {"speed": 0.0, "gear": 0}}
         sdk = PluginSDK(shared, "autopilot")
         plugin = AutopilotPlugin(sdk)
         plugin.on_start()
@@ -272,6 +337,104 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         controller.scs = FakeSCS()
         controller.release_all()
         self.assertTrue(controller.scs.drive_released)
+
+    def test_scs_blinker_emits_one_frame_press_and_release(self):
+        class FakeSCS:
+            def __init__(self): self.events = []
+            def set_left_blinker(self, value):
+                self.events.append(("left", value))
+            def set_right_blinker(self, value):
+                self.events.append(("right", value))
+
+        controller = PhysicalController.__new__(PhysicalController)
+        controller.mode = "SCS_SDK"
+        controller.scs = FakeSCS()
+        controller.current_blinker = "off"
+        controller._scs_blinker_button = None
+        with mock.patch("core.controller._HAS_PDI", False):
+            controller.set_blinker("right")
+            controller.set_blinker("right")
+        self.assertEqual(controller.scs.events,
+                         [("right", True), ("right", False)])
+        with mock.patch("core.controller._HAS_PDI", False):
+            controller.set_blinker("off")
+            controller.set_blinker("off")
+        self.assertEqual(controller.scs.events[-2:],
+                         [("right", True), ("right", False)])
+
+    def test_scs_steering_is_not_disabled_when_keyboard_backend_exists(self):
+        class FakeSCS:
+            def __init__(self): self.steering = None
+            def set_steering(self, value): self.steering = value
+
+        controller = PhysicalController.__new__(PhysicalController)
+        controller.mode = "SCS_SDK"
+        controller.scs = FakeSCS()
+        with mock.patch("core.controller._HAS_PDI", True):
+            controller.set_steering(0.375)
+        self.assertAlmostEqual(controller.scs.steering, 0.375)
+
+    def test_active_profile_blinker_keys_are_read_from_controls(self):
+        profile_log = io.StringIO(
+            "Set profile finished: 'my wheel profile'\n")
+        controls = io.StringIO(
+            ' "mix lblinker `keyboard.x?0 | semantical.lblinker?0`"\n'
+            ' "mix rblinker `keyboard.c?0 | semantical.rblinker?0`"\n')
+        with (mock.patch("core.controller.os.path.isfile", return_value=True),
+              mock.patch("builtins.open",
+                         side_effect=[profile_log, controls])):
+            self.assertEqual(_discover_blinker_keys("X:\\ETS2"),
+                             {"left": "x", "right": "c"})
+
+    def test_scs_mode_uses_profile_key_for_indicator_when_available(self):
+        controller = PhysicalController.__new__(PhysicalController)
+        controller.mode = "SCS_SDK"
+        controller.current_blinker = "off"
+        controller._blinker_keys = {"left": "x", "right": "c"}
+        controller._scs_blinker_button = None
+        with (mock.patch("core.controller._HAS_PDI", True),
+              mock.patch("core.controller.pydirectinput.press") as press):
+            controller.set_blinker("right")
+            controller.set_blinker("right")
+            controller.set_blinker("off")
+        self.assertEqual(press.call_args_list,
+                         [mock.call("c"), mock.call("c")])
+
+    def test_autopilot_without_valid_route_never_selects_drive(self):
+        state = State({"autopilot_active": True})
+        plugin = autopilot({"speed": 0.0, "gear": 0}, state)
+        plugin.on_tick(0.05)
+        self.assertFalse(state.get("autopilot_active"))
+        self.assertEqual(plugin.sdk.controller.throttle, 0.0)
+        self.assertEqual(plugin.sdk.controller.drive_events, [False])
+
+    def test_engine_rejects_enable_command_without_fresh_navigation(self):
+        state = State({
+            "autopilot_active": False,
+            "autopilot_command": {"seq": 4, "enabled": True},
+        })
+        engine = UltraPilotEngine.__new__(UltraPilotEngine)
+        engine.shared_state = state
+        engine.controller = Controller()
+        engine._last_autopilot_command = None
+        engine._process_autopilot_command()
+        self.assertFalse(state.get("autopilot_active"))
+        self.assertIn("trajektória", state.get("autopilot_disable_reason"))
+
+    def test_engine_accepts_enable_only_with_fresh_navigation_authority(self):
+        state = State({
+            "autopilot_active": False,
+            "autopilot_command": {"seq": 5, "enabled": True},
+            "autopilot_navigation_readiness": {
+                "ready": True, "reason": "", "timestamp": time.monotonic(),
+            },
+        })
+        engine = UltraPilotEngine.__new__(UltraPilotEngine)
+        engine.shared_state = state
+        engine.controller = Controller()
+        engine._last_autopilot_command = None
+        engine._process_autopilot_command()
+        self.assertTrue(state.get("autopilot_active"))
 
     def test_navigation_stop_does_not_turn_off_master_autopilot(self):
         state = State({

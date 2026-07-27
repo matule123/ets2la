@@ -763,8 +763,9 @@ class Plugin(BasePlugin):
                 # Safety: if the truck is far from the snapped path (wrong map
                 # dataset, or we're off-road on a ferry / car park), the CTE is
                 # huge and Stanley saturates to full-lock. Detect that and
-                # disable nav steering instead of yanking the wheel — the
-                # autopilot then falls back to vision lane-keeping.
+                # disable nav steering instead of yanking the wheel. The
+                # autopilot treats the lost lane authority as a safe stop; it
+                # never substitutes vision steering inside GPS navigation.
                 idx = route.tracking_index(pos, heading)
                 nearest = route.points[min(idx, len(route.points)-1)]
                 off_dist = math.hypot(pos[0] - nearest[0], pos[1] - nearest[1])

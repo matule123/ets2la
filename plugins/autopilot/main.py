@@ -161,6 +161,14 @@ class Plugin(BasePlugin):
         self._last_throttle = throttle
         self.sdk.controller.set_throttle(throttle)
 
+    def _publish_control_tags(self, speed_kmh, nav_active=False):
+        """Keep HUD pedal/steering indicators present on safety early-returns."""
+        self.tags.speed_kmh = round(float(speed_kmh), 1)
+        self.tags.nav_active = bool(nav_active)
+        self.tags.steering = round(float(self._last_steering), 3)
+        self.tags.brake = round(float(self._last_brake), 2)
+        self.tags.throttle = round(float(self._last_throttle), 2)
+
     def on_tick(self, delta_time: float):
         dt = max(delta_time, 1e-3)
         self.sdk.shared_state.set("autopilot_control_heartbeat", time.monotonic())
@@ -277,6 +285,34 @@ class Plugin(BasePlugin):
                 self.sdk.shared_state.set("navigation_status", "Cieľ dosiahnutý")
                 self.sdk.shared_state.set("tts_message", "Cieľ dosiahnutý.")
                 logging.info("Navigation: destination reached; vehicle stopped and autopilot disengaged.")
+            self._publish_control_tags(speed_kmh, False)
+            return
+
+        # Fail closed before touching the gearbox or throttle. A missing,
+        # stale, low-confidence or off-lane GPS trajectory is not permission to
+        # fall back to vision driving. While moving we perform a controlled
+        # stop; once stationary we release all automation and disengage.
+        if autopilot_engaged and not lane_authority_safe:
+            self.sdk.controller.set_throttle(0.0)
+            self._last_throttle = 0.0
+            self._last_steering = self._ramp_steering(0.0, dt)
+            self.sdk.controller.set_steering(self._last_steering)
+            self.sdk.shared_state.set(
+                "navigation_status", f"Autopilot zablokovany: {authority_reason}")
+            if speed_kmh > 1.0:
+                self._set_brake(0.70, dt)
+            else:
+                self.sdk.controller.set_brake(0.0)
+                self.sdk.controller.select_drive(False)
+                self._last_brake = 0.0
+                self._drive_engage_started = 0.0
+                self._reverse_recovery = False
+                self.sdk.shared_state.set("autopilot_active", False)
+                self.sdk.shared_state.set("nav_active", False)
+                self.sdk.shared_state.set("nav_steering", 0.0)
+                self.sdk.shared_state.set(
+                    "autopilot_disable_reason", authority_reason)
+            self._publish_control_tags(speed_kmh, False)
             return
 
         reversing = bool(autopilot_engaged and
@@ -288,24 +324,24 @@ class Plugin(BasePlugin):
             self._last_throttle = 0.0
             self._last_steering = self._ramp_steering(0.0, dt)
             self.sdk.controller.set_steering(self._last_steering)
-            now = time.monotonic()
             if float(speed) < -0.10 or speed_kmh > 0.5:
                 self._set_brake(0.62, dt)
                 self.sdk.shared_state.set(
-                    "navigation_status", "Zastavujem pred zaradením jazdy dopredu")
-            elif gear < 0:
-                self._set_brake(0.18, dt)
-                if now - self._drive_request_t >= 0.7:
-                    self.sdk.controller.select_drive(True)
-                    self._drive_request_t = now
-                self.sdk.shared_state.set(
-                    "navigation_status", "Zaraďujem jazdu dopredu")
+                    "navigation_status", "Zastavujem neočakávanú spiatočku")
             else:
                 self.sdk.controller.set_brake(0.0)
+                self.sdk.controller.select_drive(False)
                 self._last_brake = 0.0
                 self._reverse_recovery = False
+                self._drive_engage_started = 0.0
+                self.sdk.shared_state.set("autopilot_active", False)
+                self.sdk.shared_state.set("nav_active", False)
+                self.sdk.shared_state.set("nav_steering", 0.0)
                 self.sdk.shared_state.set(
-                    "navigation_status", "Jazda dopredu pripravená")
+                    "autopilot_disable_reason", "unexpected reverse gear")
+                self.sdk.shared_state.set(
+                    "navigation_status", "Autopilot vypnutý po spiatočke")
+            self._publish_control_tags(speed_kmh, False)
             return
 
         # ``gear`` is the currently engaged ratio, not a reliable automatic

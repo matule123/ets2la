@@ -234,6 +234,7 @@ class UltraPilotEngine:
         """
         import math
         if not traffic or not pos:
+            self.shared_state.set("lead_distance", None)
             return 0.0
         px, pz = pos
         sin_h, cos_h = math.sin(heading), math.cos(heading)
@@ -259,6 +260,9 @@ class UltraPilotEngine:
             if best is None or ahead < best[0]:
                 best = (ahead, closing)
         if best is None:
+            # Never let a vehicle from an older frame keep red-light queue
+            # creep enabled after that vehicle has left our lane/buffer.
+            self.shared_state.set("lead_distance", None)
             return 0.0
         ahead, closing = best
         self.shared_state.set("lead_distance", ahead)
@@ -318,7 +322,12 @@ class UltraPilotEngine:
                     lead_dist = float(lead_dist)
             except (TypeError, ValueError):
                 lead_dist = None
-            queue_creep = (lead_dist is not None and lead_dist > 8.0)
+            # A queue vehicle may relax the approach only when it is provably
+            # between us and the stop line. A stale vehicle or one beyond the
+            # signal must never defeat the red-light hold.
+            queue_creep = bool(
+                lead_dist is not None and dist > 15.0
+                and 8.0 < lead_dist < dist - 3.0)
             if my_speed < 0.5 and dist <= 12.0 and not queue_creep:
                 return 1.0
             # Begin braking early; full as we reach the line.
@@ -391,8 +400,21 @@ class UltraPilotEngine:
             return
         if down and not self._hotkey_was_down and self._game_window_active():
             new_state = not bool(self.shared_state.get("autopilot_active", False))
+            rejection_reason = ""
+            if new_state:
+                rejection_reason = self._autopilot_activation_rejection_reason()
+                if rejection_reason:
+                    new_state = False
+                    self.shared_state.set(
+                        "autopilot_disable_reason", rejection_reason)
+                    self.shared_state.set(
+                        "navigation_status",
+                        f"Autopilot zablokovaný: {rejection_reason}")
             self.shared_state.set("autopilot_active", new_state)
-            msg = "Autopilot enabled." if new_state else "Autopilot disabled."
+            msg = (f"Autopilot unavailable: {rejection_reason}"
+                   if rejection_reason else
+                   ("Autopilot enabled." if new_state
+                    else "Autopilot disabled."))
             logging.info("Hotkey N -> %s", msg)
             self.shared_state.set("tts_message", msg)
             if not new_state:
@@ -407,6 +429,22 @@ class UltraPilotEngine:
                 })
         self._hotkey_was_down = down
 
+    def _autopilot_activation_rejection_reason(self):
+        """Return why a new engagement is unsafe; empty means ready."""
+        readiness = self.shared_state.get(
+            "autopilot_navigation_readiness", {}) or {}
+        if not isinstance(readiness, dict) or not readiness.get("ready", False):
+            reason = readiness.get("reason", "") if isinstance(
+                readiness, dict) else ""
+            return str(reason or "platná GPS lane trajektória nie je pripravená")
+        try:
+            timestamp = float(readiness.get("timestamp", 0.0) or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            timestamp = 0.0
+        if timestamp <= 0.0 or time.monotonic() - timestamp > 0.5:
+            return "potvrdenie navigačnej autority je zastarané"
+        return ""
+
     def _process_autopilot_command(self):
         """Apply and acknowledge the UI's explicit master-switch command."""
         command = self.shared_state.get("autopilot_command")
@@ -417,6 +455,14 @@ class UltraPilotEngine:
             return
         desired = bool(command.get("enabled", False))
         self._last_autopilot_command = seq
+        rejection_reason = (
+            self._autopilot_activation_rejection_reason() if desired else "")
+        if rejection_reason:
+            desired = False
+            self.shared_state.set("autopilot_disable_reason", rejection_reason)
+            self.shared_state.set(
+                "navigation_status",
+                f"Autopilot zablokovaný: {rejection_reason}")
         self.shared_state.set("autopilot_active", desired)
         if not desired:
             self.controller.release_all()
@@ -426,7 +472,7 @@ class UltraPilotEngine:
             self._last_output_brake = 0.0
             self.shared_state.update_batch({
                 CTL_STEERING: 0.0, CTL_THROTTLE: 0.0, CTL_BRAKE: 0.0,
-                "autopilot_disable_reason": "manual command",
+                "autopilot_disable_reason": rejection_reason or "manual command",
             })
         self.shared_state.set("autopilot_command_ack", seq)
         self.shared_state.set("autopilot_command_pending", None)
@@ -523,8 +569,14 @@ class UltraPilotEngine:
         if not self.shared_state.get("autopilot_active", False):
             if self._was_active:
                 self.controller.release_all()
+                self.shared_state.update_batch({
+                    "route_blinker": "off", "active_blinker": "off",
+                })
                 self._was_active = False
                 self._drive_selector_pressed = False
+            # Also gives the SCS button pulse its required following release
+            # frame; once released this is a no-op and does not fight the user.
+            self.controller.set_blinker("off")
             self._last_output_steering = 0.0
             self._last_output_brake = 0.0
             self._last_control_flush = time.monotonic()
@@ -595,9 +647,14 @@ class UltraPilotEngine:
         self._last_output_steering = steering
         self._last_output_brake = brake
 
-        # Blinker: a plugin may force one via ctl_blinker, otherwise follow the planner.
-        blinker = self.shared_state.get(CTL_BLINKER) or self.shared_state.get("active_blinker", "off")
+        # TurnSignals owns route-based indication. Keep its persistent request
+        # separate from the legacy planner so the planner cannot overwrite a
+        # turn signal one frame after the plugin switched it on.
+        blinker = (self.shared_state.get(CTL_BLINKER)
+                   or self.shared_state.get("route_blinker")
+                   or self.shared_state.get("planner_blinker", "off"))
         self.controller.set_blinker(blinker)
+        self.shared_state.set("active_blinker", blinker)
         if self.shared_state.get(CTL_BLINKER):
             self.shared_state.set(CTL_BLINKER, None)
 
@@ -949,7 +1006,8 @@ class UltraPilotEngine:
                     perception_data, telemetry_data, delta_time)
                 self.shared_state.set("system_state",
                                       getattr(current_state, "name", str(current_state)))
-                self.shared_state.set("active_blinker", self.planner.active_blinker)
+                self.shared_state.set("planner_blinker",
+                                      self.planner.active_blinker)
                 if voice_alert:
                     self.voice.say(voice_alert)
 
