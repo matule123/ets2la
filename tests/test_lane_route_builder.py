@@ -16,6 +16,8 @@ class SyntheticMap:
         self.net.node_alt[uid] = float(y)
         self.net.node_rot[uid] = 0.0
         self.net.node_forward[uid] = (0.0, 1.0)
+        self.net.node_forward_item[uid] = 0
+        self.net.node_backward_item[uid] = 0
         self.net._ngrid.setdefault(self.net._cell(x, z), []).append(uid)
 
     def road(self, start, end, lanes=2):
@@ -34,6 +36,7 @@ class SyntheticMap:
         self.net.segments.append((a, b))
         self.net._seg_uids.append((start, end))
         self.net._seg_road_uids.append(road_uid)
+        self.net._road_segment_by_uid[road_uid] = index
         self.net._seg_look_tokens.append(token)
         self.net._road_length[(start, end)] = math.dist(a, b)
         self.net._road_look_token[start] = token
@@ -43,7 +46,23 @@ class SyntheticMap:
             self.net._seg_grid.setdefault(self.net._cell(*b), []).append(index)
         self.net.fwd.setdefault(start, []).append(end)
         self.net.bwd.setdefault(end, []).append(start)
+        self.net.node_forward_item[start] = road_uid
+        self.net.node_backward_item[end] = road_uid
         return index
+
+    def look(self, token, left, right, offset=0.0):
+        lane = "traffic_lane.road.local"
+        self.net.road_looks[token] = {
+            "type": "local", "lanes": left + right,
+            "lanes_left": left, "lanes_right": right,
+            "lane_types_left": (lane,) * left,
+            "lane_types_right": (lane,) * right,
+            "offset_m": offset,
+        }
+
+    def set_road_look(self, segment_index, token):
+        self.net._seg_look_tokens[segment_index] = token
+        self.net._lane_cache.pop(segment_index, None)
 
     def match_on(self, segment_index, lane_index, gps):
         target = next(lane for lane in self.net._build_lane_segments(segment_index)
@@ -61,6 +80,81 @@ class SyntheticMap:
 
 
 class LaneRouteBuilderTests(unittest.TestCase):
+    def test_ets2la_lane_centres_cover_balanced_unbalanced_and_one_way(self):
+        net = RoadNetwork()
+        lane = "traffic_lane.road.local"
+        make = lambda left, right, offset=0.0: {
+            "lane_types_left": (lane,) * left,
+            "lane_types_right": (lane,) * right,
+            "offset_m": offset,
+        }
+        self.assertEqual(net._lane_center_offsets(make(1, 1)),
+                         ((-2.25,), (2.25,)))
+        self.assertEqual(net._lane_center_offsets(make(1, 2)),
+                         ((-6.75,), (-2.25, 2.25)))
+        self.assertEqual(net._lane_center_offsets(make(2, 1)),
+                         ((2.25, -2.25), (6.75,)))
+        self.assertEqual(net._lane_center_offsets(make(0, 3)),
+                         ((), (-2.25, 2.25, 6.75)))
+        self.assertEqual(net._lane_center_offsets(make(1, 1, 2.0)),
+                         ((-4.25,), (4.25,)))
+
+    def test_road_look_offset_transition_is_continuous_not_diagonal_gap(self):
+        m = SyntheticMap()
+        m.node(1, 0, 0); m.node(2, 0, 40); m.node(3, 0, 80)
+        first = m.road(1, 2, 2)
+        second = m.road(2, 3, 2)
+        m.look("normal", 1, 1, 0.0)
+        m.look("divided", 1, 1, 5.0)
+        m.set_road_look(first, "normal")
+        m.set_road_look(second, "divided")
+
+        first_lane = next(lane for lane in m.net._build_lane_segments(first)
+                          if lane.direction == 1)
+        second_lane = next(lane for lane in m.net._build_lane_segments(second)
+                           if lane.direction == 1)
+        a, b = first_lane.centerline[-1], second_lane.centerline[0]
+        self.assertLess(math.dist((a.x, a.y, a.z), (b.x, b.y, b.z)), 1e-6)
+        # The new road reaches its own +5 m road offset gradually instead of
+        # inserting a 5 m sideways chord at the junction.
+        self.assertAlmostEqual(second_lane.centerline[0].x,
+                               first_lane.centerline[-1].x, places=6)
+        self.assertAlmostEqual(abs(second_lane.centerline[-1].x
+                                   - second_lane.centerline[0].x), 5.0, places=3)
+
+    def test_non_drivable_lane_does_not_renumber_physical_continuation(self):
+        m = SyntheticMap()
+        m.node(1, 0, 0); m.node(2, 0, 40); m.node(3, 0, 80)
+        first = m.road(1, 2, 2)
+        second = m.road(2, 3, 2)
+        road = "traffic_lane.road.motorway"
+        m.net.road_looks["two"] = {
+            "type": "motorway", "lanes": 2,
+            "lanes_left": 0, "lanes_right": 2,
+            "lane_types_left": (), "lane_types_right": (road, road),
+            "offset_m": 0.0,
+        }
+        m.net.road_looks["player-only"] = {
+            "type": "motorway", "lanes": 2,
+            "lanes_left": 0, "lanes_right": 2,
+            "lane_types_left": (),
+            "lane_types_right": ("traffic_lane.no_vehicles", road),
+            "offset_m": 0.0,
+        }
+        m.set_road_look(first, "two")
+        m.set_road_look(second, "player-only")
+        match = m.match_on(first, 1, (1, 2, 3))
+        corridor = m.net.resolve_gps_corridor((1, 2, 3))
+        segments, reason = m.net.select_lane_sequence(corridor, match)
+        self.assertEqual(reason, "")
+        self.assertEqual([segment.lane_index for segment in segments], [1, 0])
+        self.assertEqual([segment.raw_lane_index for segment in segments], [1, 1])
+        self.assertLess(math.dist(
+            (segments[0].centerline[-1].x, segments[0].centerline[-1].y,
+             segments[0].centerline[-1].z),
+            (segments[1].centerline[0].x, segments[1].centerline[0].y,
+             segments[1].centerline[0].z)), 1e-6)
+
     def test_straight_multi_lane_keeps_locator_lane(self):
         m = SyntheticMap()
         m.node(1, 0, 0); m.node(2, 0, 40); m.node(3, 0, 80)

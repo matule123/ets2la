@@ -79,6 +79,26 @@ class RealMapLaneDataTests(unittest.TestCase):
         self.assertLess(match.lateral_error_m, 0.1)
         self.assertLess(match.vertical_error_m, 0.1)
 
+    def test_real_player_only_transition_keeps_raw_lane_without_spike(self):
+        """Regression for a real ProMods/SCS road→player-only boundary.
+
+        The destination look disables raw lane 0. Compressing drivable lane
+        indices connected the previous raw lane 0 to raw lane 1 and inserted a
+        4.5 m diagonal. Physical raw lane 1 must remain continuous instead.
+        """
+        first_index = self.net._road_segment_by_uid[366954835157188609]
+        second_index = self.net._road_segment_by_uid[366954883399024641]
+        first = next(lane for lane in self.net._build_lane_segments(first_index)
+                     if lane.direction == 1 and lane.raw_lane_index == 1)
+        second = next(lane for lane in self.net._build_lane_segments(second_index)
+                      if lane.direction == 1 and lane.raw_lane_index == 1)
+        self.assertEqual((first.lane_index, second.lane_index), (1, 0))
+        self.assertLess(math.dist(
+            (first.centerline[-1].x, first.centerline[-1].y,
+             first.centerline[-1].z),
+            (second.centerline[0].x, second.centerline[0].y,
+             second.centerline[0].z)), 1e-6)
+
     def test_known_prefab_pair_uses_full_lane_curve_chain(self):
         gps = (3764330771318505475, 3808790278165430272)
         corridor = self.net.resolve_gps_corridor(gps)

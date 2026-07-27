@@ -75,6 +75,10 @@ class LaneSegment:
     successors: tuple[LaneConnection, ...] = ()
     connector_curve_indices: tuple[int, ...] = ()
     gps_uids: frozenset[int] = field(default_factory=frozenset)
+    # Index in the unfiltered road-look lane array. This differs from
+    # ``lane_index`` when SCS inserts rail/no_vehicles lanes and is essential
+    # for preserving the physical lane across adjacent road items.
+    raw_lane_index: int = -1
 
 
 @dataclass(frozen=True, slots=True)

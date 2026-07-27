@@ -27,7 +27,7 @@ from core.navigation.lane_model import (
     LanePath, LanePoint, LaneSegment,
 )
 
-CACHE_VERSION = 7  # lane metadata + prefab lane graph/path identity
+CACHE_VERSION = 8  # exact node item links + ETS2LA-compatible lane transitions
 
 
 def _uid(value):
@@ -116,6 +116,8 @@ class RoadNetwork:
         self.node_rot = {}       # uid -> map yaw, needed to place prefab curves
         self.node_alt = {}       # uid -> world elevation
         self.node_forward = {}   # uid -> quaternion-accurate horizontal tangent
+        self.node_forward_item = {}   # node uid -> exact SCS map item after node
+        self.node_backward_item = {}  # node uid -> exact SCS map item before node
         self.adj = {}            # uid -> [connected uid, ...]  (road graph, from roads.json)
         self.fwd = {}            # uid -> [uid, ...]  forward neighbours (graph.json)
         self.bwd = {}            # uid -> [uid, ...]  backward neighbours (graph.json)
@@ -124,6 +126,7 @@ class RoadNetwork:
         self._seg_uids = []      # [(start_uid, end_uid), ...]  parallel to segments
         self._seg_road_uids = [] # road item uid parallel to segments
         self._seg_look_tokens = []  # exact road-look token parallel to segments
+        self._road_segment_by_uid = {}  # road map-item uid -> segment index
         self._grid = {}          # (cx,cz) -> [segment_index, ...]  (legacy, endpoint-based)
         self._seg_grid = {}      # (cx,cz) -> [segment_index, ...]  (both endpoints)
         self.road_looks = {}     # token -> type, lane counts and direction split
@@ -171,6 +174,8 @@ class RoadNetwork:
                 self.node_rot[uid] = float(n.get("rotation", 0.0) or 0.0)
                 self.node_alt[uid] = float(n.get("z", 0.0) or 0.0)
                 self.node_forward[uid] = _forward_vector(n)
+                self.node_forward_item[uid] = _uid(n.get("forwardItemUid"))
+                self.node_backward_item[uid] = _uid(n.get("backwardItemUid"))
                 self._ngrid.setdefault(self._cell(x, y), []).append(uid)
         except Exception as e:
             logging.exception("road_network: failed to load nodes: %s", e)
@@ -192,6 +197,7 @@ class RoadNetwork:
                     # segment-snapping can recover graph nodes to walk from.
                     self._seg_uids.append((su, eu))
                     self._seg_road_uids.append(_uid(r.get("uid")))
+                    self._road_segment_by_uid[self._seg_road_uids[-1]] = len(self.segments)
                     self._seg_look_tokens.append(str(r.get("roadLookToken") or ""))
                     self._seg_grid.setdefault(self._cell(*a), []).append(len(self.segments))
                     if self._cell(*a) != self._cell(*b):
@@ -264,8 +270,10 @@ class RoadNetwork:
                 return False
             data = payload["data"]
             for k in ("nodes", "node_rot", "node_alt", "node_forward",
+                      "node_forward_item", "node_backward_item",
                       "adj", "fwd", "bwd", "_ngrid", "segments",
                       "_seg_uids", "_seg_road_uids", "_seg_look_tokens",
+                      "_road_segment_by_uid",
                       "_grid", "_seg_grid", "_road_look_token",
                       "_road_length", "road_looks", "_prefab_desc", "_prefab_grid",
                       "_prefab_pairs", "_prefab_lane_data", "loaded"):
@@ -287,11 +295,14 @@ class RoadNetwork:
                 "data": {
                     "nodes": self.nodes, "node_rot": self.node_rot,
                     "node_alt": self.node_alt, "node_forward": self.node_forward,
+                    "node_forward_item": self.node_forward_item,
+                    "node_backward_item": self.node_backward_item,
                     "adj": self.adj, "fwd": self.fwd,
                     "bwd": self.bwd, "_ngrid": self._ngrid, "segments": self.segments,
                     "_seg_uids": self._seg_uids,
                     "_seg_road_uids": self._seg_road_uids,
                     "_seg_look_tokens": self._seg_look_tokens,
+                    "_road_segment_by_uid": self._road_segment_by_uid,
                     "_grid": self._grid,
                     "_seg_grid": self._seg_grid, "_road_look_token": self._road_look_token,
                     "_road_length": self._road_length,
@@ -565,7 +576,8 @@ class RoadNetwork:
                                 return result
         return result
 
-    def _road_curve_3d(self, first, second, spacing=2.5):
+    def _road_curve_3d(self, first, second, spacing=2.5,
+                       with_tangents=False):
         """Exact-ish Hermite centreline for a normal road, including height."""
         reverse = False
         tangent_length = self._road_length.get((first, second))
@@ -593,9 +605,21 @@ class RoadNetwork:
             x = h00*sx + h10*sdx*tangent_length + h01*ex + h11*edx*tangent_length
             z = h00*sz + h10*sdz*tangent_length + h01*ez + h11*edz*tangent_length
             height = sh + (eh-sh)*t
-            points.append((x, z, height))
+            if with_tangents:
+                dh00, dh10 = 6*t2-6*t, 3*t2-4*t+1
+                dh01, dh11 = -6*t2+6*t, 3*t2-2*t
+                tx = (dh00*sx + dh10*sdx*tangent_length
+                      + dh01*ex + dh11*edx*tangent_length)
+                tz = (dh00*sz + dh10*sdz*tangent_length
+                      + dh01*ez + dh11*edz*tangent_length)
+                points.append((x, z, height, tx, tz))
+            else:
+                points.append((x, z, height))
         if reverse:
             points.reverse()
+            if with_tangents:
+                points = [(x, z, y, -tx, -tz)
+                          for x, z, y, tx, tz in points]
         return points
 
     def hud_segments_3d_near(self, pos, radius: float = 280.0, limit: int = 950,
@@ -920,7 +944,14 @@ class RoadNetwork:
                                          travelled, heading))
         return tuple(lane_points)
 
-    def _prefab_lane_segment(self, edge, lane_index):
+    def _prefab_lane_segment(self, edge, lane_index, start_position=None):
+        """Resolve a GPS-selected prefab edge to one proven navCurve chain.
+
+        ETS2LA does not assume that road lane index N equals prefab input N.
+        It first enumerates topologically valid input/output paths, then picks
+        the entry navCurve nearest the actual incoming lane position.  Geometry
+        is used only to rank already-confirmed paths; it never creates an edge.
+        """
         candidates = []
         for instance in edge.prefab_instance or ():
             token = instance[0]
@@ -941,10 +972,15 @@ class RoadNetwork:
                 instance, edge.start_uid, edge.end_uid)
             preferred_curve = (input_lanes[min(lane_index, len(input_lanes)-1)]
                                if input_lanes else None)
-            preferred = [option for option in options
-                         if preferred_curve is not None
-                         and option[0] == preferred_curve]
-            chosen_options = preferred or (options if len(options) == 1 else [])
+            if start_position is not None:
+                # Match ETS2LA's GetClosestCurve: consider every proven entry
+                # curve and rank it against the live incoming lane endpoint.
+                chosen_options = options
+            else:
+                preferred = [option for option in options
+                             if preferred_curve is not None
+                             and option[0] == preferred_curve]
+                chosen_options = preferred or (options if len(options) == 1 else [])
             for indices in chosen_options:
                 points = self._prefab_curve_chain_3d(instance, indices)
                 if len(points) >= 2:
@@ -954,6 +990,21 @@ class RoadNetwork:
                     candidates.append((instance, indices, points,
                                        exit_lane_index,
                                        max(1, len(output_lanes))))
+        if len(candidates) > 1 and start_position is not None:
+            sx = float(start_position.x if hasattr(start_position, "x")
+                       else start_position[0])
+            sy = float(start_position.y if hasattr(start_position, "y")
+                       else start_position[1])
+            sz = float(start_position.z if hasattr(start_position, "z")
+                       else start_position[2])
+            ranked = sorted(candidates, key=lambda item: math.dist(
+                (sx, sy, sz),
+                (item[2][0].x, item[2][0].y, item[2][0].z)))
+            best_entry = ranked[0][1][0]
+            # Once the physical entry curve is known, GPS's end UID and the
+            # nav graph determine the exit. Paths beginning elsewhere belong
+            # to another incoming lane/arm and must not remain ambiguous.
+            candidates = [item for item in ranked if item[1][0] == best_entry]
         if len(candidates) > 1:
             # Some roundabout PPDs enumerate both the direct confirmed exit
             # and a full extra lap that returns to the same output curve. GPS
@@ -1054,6 +1105,11 @@ class RoadNetwork:
             return (), "LaneLocator did not confirm a starting lane"
         selected = []
         lane_index = start_match.lane_id.lane_index
+        matched_lane = self._lane_id_index.get(start_match.lane_id)
+        raw_lane_index = (matched_lane.raw_lane_index
+                          if matched_lane is not None
+                          and matched_lane.raw_lane_index >= 0
+                          else lane_index)
         for edge_number, edge in enumerate(corridor.edges):
             current = None
             if edge.kind == "road":
@@ -1065,19 +1121,29 @@ class RoadNetwork:
                         f"no lane geometry for directed road edge "
                         f"{edge.start_uid} -> {edge.end_uid}")
                 by_index = {lane.lane_index: lane for lane in lanes}
-                if lane_index in by_index:
+                by_raw_index = {lane.raw_lane_index: lane for lane in lanes}
+                if raw_lane_index in by_raw_index:
+                    current = by_raw_index[raw_lane_index]
+                    lane_index = current.lane_index
+                elif lane_index in by_index and not selected:
                     current = by_index[lane_index]
-                elif selected and lane_index >= len(lanes):
+                    raw_lane_index = current.raw_lane_index
+                elif selected and raw_lane_index > max(by_raw_index):
                     # A disappearing outer lane is a confirmed merge at the
                     # shared road node. Clamp only to the adjacent edge lane.
-                    lane_index = max(by_index)
-                    current = by_index[lane_index]
+                    raw_lane_index = max(by_raw_index)
+                    current = by_raw_index[raw_lane_index]
+                    lane_index = current.lane_index
                 else:
                     return tuple(selected), (
-                        f"starting lane {lane_index} is unavailable on road edge "
+                        f"starting lane {lane_index} (raw {raw_lane_index}) is "
+                        f"unavailable on road edge "
                         f"{edge.start_uid} -> {edge.end_uid}")
             elif edge.kind == "prefab":
-                current, reason = self._prefab_lane_segment(edge, lane_index)
+                incoming_point = (selected[-1].centerline[-1] if selected
+                                  else start_match.point)
+                current, reason = self._prefab_lane_segment(
+                    edge, lane_index, incoming_point)
                 if current is None:
                     return tuple(selected), (
                         f"{reason} for prefab {edge.start_uid} -> {edge.end_uid}")
@@ -1097,6 +1163,8 @@ class RoadNetwork:
                                        successors=(connection,))
             selected.append(current)
             lane_index = current.lane_index
+            raw_lane_index = (current.raw_lane_index
+                              if current.raw_lane_index >= 0 else lane_index)
         return tuple(selected), ""
 
     def connect_lane_sequence(self, segments, gps_uids):
@@ -1829,16 +1897,45 @@ class RoadNetwork:
                 and not value.startswith("traffic_lane.rail"))
 
     @staticmethod
-    def _offset_curve(curve, lateral_m, reverse=False):
-        """Offset a sampled road spline and return direction-correct 3-D points."""
+    def _offset_curve(curve, lateral_start_m, lateral_end_m=None, reverse=False,
+                      start_forward=None, end_forward=None):
+        """Offset a sampled road spline with ETS2's road-look transition.
+
+        SCS stores a road's lane offsets at its *end*.  At the start, the
+        preceding road item's offsets apply and are interpolated along this
+        road.  ETS2LA's ``ParsedRoad.InterpolateLane`` follows the same rule.
+        Keeping one fixed offset made adjacent lane centrelines miss at every
+        road-look/lane-count transition; the path joiner then exposed that miss
+        as the short sideways spikes visible near exits.
+        """
+        if lateral_end_m is None:
+            lateral_end_m = lateral_start_m
         if reverse:
             curve = list(reversed(curve))
-            lateral_m = -lateral_m
+            lateral_start_m, lateral_end_m = -lateral_end_m, -lateral_start_m
+            start_forward, end_forward = (
+                ((-end_forward[0], -end_forward[1])
+                 if end_forward is not None else None),
+                ((-start_forward[0], -start_forward[1])
+                 if start_forward is not None else None),
+            )
         result, travelled = [], 0.0
         for index, point in enumerate(curve):
+            fraction = index / max(1, len(curve) - 1)
+            lateral_m = (lateral_start_m
+                         + (lateral_end_m - lateral_start_m) * fraction)
             before = curve[max(0, index - 1)]
             after = curve[min(len(curve) - 1, index + 1)]
-            dx, dz = after[0] - before[0], after[1] - before[1]
+            if index == 0 and start_forward is not None:
+                dx, dz = start_forward
+            elif index == len(curve) - 1 and end_forward is not None:
+                dx, dz = end_forward
+            elif len(point) >= 5:
+                dx, dz = point[3], point[4]
+                if reverse:
+                    dx, dz = -dx, -dz
+            else:
+                dx, dz = after[0] - before[0], after[1] - before[1]
             length = math.hypot(dx, dz)
             if length < 1e-8:
                 ox = oz = 0.0
@@ -1854,6 +1951,71 @@ class RoadNetwork:
             result.append(LanePoint(point[0] + ox, point[2], point[1] + oz,
                                     travelled, heading))
         return tuple(result)
+
+    @staticmethod
+    def _lane_center_offsets(look):
+        """Return signed raw-lane centres using ETS2LA/TruckLib's rules.
+
+        Positive values are right of the map item's start->end centreline;
+        negative values are left.  The 1.59 extractor does not retain
+        ``lane_offsets_left/right``, so only the facts actually present in
+        roadLooks.json are used: lane order, 4.5 m SCS spacing and road offset.
+        """
+        width, half = 4.5, 2.25
+        left = tuple(look.get("lane_types_left", ()))
+        right = tuple(look.get("lane_types_right", ()))
+        has_left, has_right = bool(left), bool(right)
+        road_center = 0.0
+        if has_left and has_right and (len(left) + len(right)) % 2 == 1:
+            road_center = (len(left) - len(right)) * width
+
+        right_centers = []
+        if has_right:
+            if has_left or len(right) == 1:
+                first = road_center + half
+            elif len(right) % 2 == 1:
+                first = road_center - half
+            else:
+                first = road_center - math.ceil(len(right) / 2.0) * width + half
+            right_centers = [first + index * width
+                             for index in range(len(right))]
+
+        left_centers = []
+        if has_left:
+            if has_right:
+                first = road_center - half
+            elif len(left) == 1:
+                first = road_center - half
+            elif len(left) % 2 == 1:
+                first = road_center + half
+            else:
+                first = road_center + math.ceil(len(left) / 2.0) * width - half
+            left_centers = [first - index * width
+                            for index in range(len(left))]
+
+        # roadLooks.json's ``offset`` is the SII road_offset. ETS2LA applies
+        # the full value to each side (not half of it).
+        road_offset = float(look.get("offset_m", 0.0) or 0.0)
+        right_centers = [value + road_offset for value in right_centers]
+        left_centers = [value - road_offset for value in left_centers]
+        return tuple(left_centers), tuple(right_centers)
+
+    def _previous_road_look(self, segment_index):
+        """Exact preceding road look, or ``None`` for prefab/ambiguous data."""
+        if not (0 <= segment_index < len(self._seg_uids)):
+            return None
+        start_uid = self._seg_uids[segment_index][0]
+        previous_item = self.node_backward_item.get(start_uid, 0)
+        previous_index = self._road_segment_by_uid.get(previous_item)
+        if previous_index is None or previous_index == segment_index:
+            return None
+        previous_uids = self._seg_uids[previous_index]
+        # The item link must really terminate at this node. This prevents an
+        # arbitrary nearby or graph-only branch from influencing lane geometry.
+        if previous_uids[1] != start_uid:
+            return None
+        token = self._seg_look_tokens[previous_index]
+        return self.road_looks.get(token)
 
     def _build_lane_segments(self, segment_index):
         """Lazily derive lane centres for one ordinary road map item.
@@ -1873,12 +2035,18 @@ class RoadNetwork:
                  if segment_index < len(self._seg_look_tokens) else
                  self._road_look_token.get(start_uid, ""))
         look = self.road_looks.get(token) or {}
-        curve = self._road_curve_3d(start_uid, end_uid, spacing=3.0)
+        curve = self._road_curve_3d(start_uid, end_uid, spacing=3.0,
+                                    with_tangents=True)
         if len(curve) < 2:
             self._lane_cache[segment_index] = ()
             return ()
         width = 4.5
-        separation = max(0.0, float(look.get("offset_m", 0.0) or 0.0))
+        left_offsets, right_offsets = self._lane_center_offsets(look)
+        previous_look = self._previous_road_look(segment_index)
+        if previous_look:
+            previous_left, previous_right = self._lane_center_offsets(previous_look)
+        else:
+            previous_left, previous_right = (), ()
         groups = ((1, tuple(look.get("lane_types_right", ()))),
                   (-1, tuple(look.get("lane_types_left", ()))))
         built = []
@@ -1887,10 +2055,12 @@ class RoadNetwork:
                         for raw_index, lane_type in enumerate(lane_types)
                         if self._drivable_lane_type(lane_type)]
             for lane_index, (raw_index, lane_type) in enumerate(drivable):
-                fixed_side_offset = separation * 0.5 + width * (raw_index + 0.5)
-                # Right lanes lie right of start->end. Left lanes lie left and
-                # travel end->start; _offset_curve handles the reversal sign.
-                lateral = fixed_side_offset if direction > 0 else -fixed_side_offset
+                end_offsets = right_offsets if direction > 0 else left_offsets
+                start_offsets = previous_right if direction > 0 else previous_left
+                lateral_end = end_offsets[raw_index]
+                lateral_start = (start_offsets[raw_index]
+                                 if raw_index < len(start_offsets)
+                                 else lateral_end)
                 lane_id = LaneId(road_uid, direction, lane_index)
                 # Road-look arrays are ordered from the centre outwards.
                 # Therefore index-1 is the physical left neighbour and
@@ -1899,8 +2069,11 @@ class RoadNetwork:
                         if lane_index > 0 else None)
                 right = (LaneId(road_uid, direction, lane_index + 1)
                          if lane_index + 1 < len(drivable) else None)
-                centerline = self._offset_curve(curve, lateral,
-                                                reverse=direction < 0)
+                centerline = self._offset_curve(
+                    curve, lateral_start, lateral_end,
+                    reverse=direction < 0,
+                    start_forward=self.node_forward.get(start_uid),
+                    end_forward=self.node_forward.get(end_uid))
                 mid_y = centerline[len(centerline) // 2].y
                 lane = LaneSegment(
                     lane_id=lane_id,
@@ -1918,6 +2091,7 @@ class RoadNetwork:
                     left_neighbor=left,
                     right_neighbor=right,
                     gps_uids=frozenset((start_uid, end_uid)),
+                    raw_lane_index=raw_index,
                 )
                 built.append(lane)
                 self._lane_id_index[lane_id] = lane

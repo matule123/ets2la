@@ -142,10 +142,11 @@ class LaneGeometryAuditTests(unittest.TestCase):
         right = [lane for lane in lanes if lane.direction == 1]
         left = [lane for lane in lanes if lane.direction == -1]
         # start->end is +Z; project convention says physical right is -X.
+        # ETS2LA applies the full 2 m SII road_offset to both carriageways.
         self.assertEqual([round(l.centerline[0].x, 2) for l in right],
-                         [-3.25, -7.75])
+                         [-4.25, -8.75])
         self.assertEqual([round(l.centerline[-1].x, 2) for l in left],
-                         [3.25, 7.75])
+                         [4.25, 8.75])
         self.assertEqual(right[0].width_m, 4.5)
         self.assertEqual(right[0].width_source, "derived")
         self.assertIsNone(right[0].left_neighbor)
