@@ -247,6 +247,38 @@ class Plugin(BasePlugin):
         # immediately and return all automatic commands to a safe neutral.
         autopilot_engaged = bool(self.sdk.shared_state.get(
             "autopilot_active", False))
+
+        # Arrival is terminal and must run before reverse recovery or the
+        # automatic-D handshake. With gear 0/-1 those branches used to return
+        # first, so the autopilot stayed enabled and could start reversing.
+        arrival_pending = bool(self.sdk.shared_state.get(
+            "navigation_arrival_pending", False))
+        if arrival_pending and autopilot_engaged:
+            self.sdk.controller.set_throttle(0.0)
+            self._last_throttle = 0.0
+            self._last_steering = self._ramp_steering(0.0, dt)
+            self.sdk.controller.set_steering(self._last_steering)
+            if speed_kmh > 1.0:
+                self._set_brake(0.72, dt)
+                self.sdk.shared_state.set(
+                    "navigation_status", "Prichádzam do cieľa – zastavujem")
+            else:
+                # Release brake and any momentary D selector request before
+                # disabling authority. Never emit a new D/R pulse at arrival.
+                self.sdk.controller.set_brake(0.0)
+                self.sdk.controller.select_drive(False)
+                self._last_brake = 0.0
+                self._reverse_recovery = False
+                self._drive_engage_started = 0.0
+                self.sdk.shared_state.set("autopilot_active", False)
+                self.sdk.shared_state.set("nav_active", False)
+                self.sdk.shared_state.set("nav_steering", 0.0)
+                self.sdk.shared_state.set("navigation_arrival_pending", False)
+                self.sdk.shared_state.set("navigation_status", "Cieľ dosiahnutý")
+                self.sdk.shared_state.set("tts_message", "Cieľ dosiahnutý.")
+                logging.info("Navigation: destination reached; vehicle stopped and autopilot disengaged.")
+            return
+
         reversing = bool(autopilot_engaged and
                          (float(speed) < -0.10 or gear < 0
                           or self._reverse_recovery))
@@ -316,30 +348,6 @@ class Plugin(BasePlugin):
             # selector pulse. Publishing False here can overwrite an unconsumed
             # True in shared state before the engine process observes it.
             self._drive_engage_started = 0.0
-
-        arrival_pending = bool(self.sdk.shared_state.get(
-            "navigation_arrival_pending", False))
-        if arrival_pending and autopilot_engaged:
-            self.sdk.controller.set_throttle(0.0)
-            self._last_throttle = 0.0
-            self._last_steering = self._ramp_steering(0.0, dt)
-            self.sdk.controller.set_steering(self._last_steering)
-            if speed_kmh > 1.0:
-                self._set_brake(0.72, dt)
-                self.sdk.shared_state.set(
-                    "navigation_status", "Prichádzam do cieľa – zastavujem")
-            else:
-                # Release before disengaging so an automatic gearbox cannot
-                # interpret a held brake as a request to reverse.
-                self.sdk.controller.set_brake(0.0)
-                self._last_brake = 0.0
-                self.sdk.shared_state.set("autopilot_active", False)
-                self.sdk.shared_state.set("nav_active", False)
-                self.sdk.shared_state.set("navigation_arrival_pending", False)
-                self.sdk.shared_state.set("navigation_status", "Cieľ dosiahnutý")
-                self.sdk.shared_state.set("tts_message", "Cieľ dosiahnutý.")
-                logging.info("Navigation: destination reached; vehicle stopped and autopilot disengaged.")
-            return
 
         # 2. Safety states — these still brake hard, but through the ramp so
         #    the truck doesn't lock up and spin.

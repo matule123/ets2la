@@ -33,6 +33,7 @@ Point = Tuple[float, float]
 # which oscillated in S-bends because the two terms fought each other.
 K_HEADING = 1.0           # heading-error weight (Stanley keeps this at 1.0)
 K_CTE = 0.70              # damped lane-centre recovery; avoids right/left hunting
+K_CTE_CURVE = 1.80        # hold the mapped lane centre against curve cutting
 K_SOFT = 1.0              # softening constant → CTE term never explodes at v=0
 MIN_LOOKAHEAD = 22.0
 MAX_LOOKAHEAD = 75.0
@@ -57,6 +58,19 @@ def speed_gain(speed_ms: float) -> float:
     speed_kmh = abs(speed_ms) * 3.6
     # 1.3 at standstill → ~0.5 at 90 km/h, floored.
     return _clamp(1.3 - (speed_kmh / 90.0) * 0.8, 0.45, 1.3)
+
+
+def curve_cte_gain(radius_m: float) -> float:
+    """Strengthen cross-track recovery only inside a proven map bend.
+
+    A lookahead point lies on a chord of the lane curve. At road speed the old
+    fixed gain was too weak to cancel that inward bias, so the truck could
+    settle near the centre divider although the trajectory was lane-centred.
+    Straights retain the calm gain to avoid right/left hunting.
+    """
+    radius = float(radius_m)
+    weight = _clamp((500.0 - radius) / (500.0 - TIGHT_CURVE_RADIUS), 0.0, 1.0)
+    return K_CTE + (K_CTE_CURVE - K_CTE) * weight
 
 
 class Route:
@@ -333,9 +347,16 @@ class Route:
         through three points: the truck, a near point, a far point)."""
         if len(self.points) < 3:
             return 1e6
-        idx = self.tracking_index(pos, heading)
+        idx, projection_t, _progress, _distance2 = self._tracking_projection(
+            pos, heading)
         # Sample the path at three positions along the upcoming window.
-        p0 = (pos[0], pos[1])
+        ax0, az0 = self.points[idx]
+        bx0, bz0 = self.points[min(idx + 1, len(self.points) - 1)]
+        # Curvature belongs to the authoritative path, not to the triangle
+        # between an off-centre truck and two future points. Using the truck as
+        # p0 made a straight road look curved whenever CTE was non-zero.
+        p0 = (ax0 + (bx0-ax0) * projection_t,
+              az0 + (bz0-az0) * projection_t)
         p1 = self.lookahead_point(idx, pos, window_m * 0.5)
         p2 = self.lookahead_point(idx, pos, window_m)
         # Menger curvature: k = 4·area / (|a||b||c|), radius = 1/|k|.
@@ -460,7 +481,7 @@ class Route:
         # old pure-gain sum produced in S-bends. The speed_gain schedule scales
         # the whole command down with speed (gentle inputs at 90 km/h).
         v = max(abs(speed_ms), 0.0)
-        cte_steer = math.atan((K_CTE * cte) / (K_SOFT + v))
+        cte_steer = math.atan((curve_cte_gain(radius) * cte) / (K_SOFT + v))
         steer = K_HEADING * heading_error + cte_steer
         # Clamp the *angle* before the speed gain — without this a 90° heading
         # error + maxed CTE produced steer values > 2.0, which then became ±1.0

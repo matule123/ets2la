@@ -18,6 +18,7 @@ from core.hud import (
 )
 from core.engine import UltraPilotEngine
 from core.controller import Controller as PhysicalController
+from core.navigation.route import Route, K_CTE, K_CTE_CURVE, curve_cte_gain
 from core.sdk.scs_controller_writer import SCSControlsWriter, _FIELDS, _SIZE
 from plugins.autopilot.main import Plugin as AutopilotPlugin
 from plugins.lanecontrol.main import Plugin as LaneControlPlugin
@@ -289,17 +290,37 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         self.assertEqual(state.get("nav_steering"), 0.0)
 
     def test_arrival_stops_and_disengages(self):
-        state = State({
-            "autopilot_active": True, "navigation_arrival_pending": True,
-            "game_route_distance": 3.0,
-        })
-        plugin = autopilot({"speed": 0.1, "gear": 1}, state)
-        plugin.on_tick(0.05)
-        self.assertFalse(state.get("autopilot_active"))
-        self.assertFalse(state.get("nav_active"))
-        self.assertEqual(plugin.sdk.controller.throttle, 0.0)
-        self.assertEqual(plugin.sdk.controller.brake, 0.0)
-        self.assertEqual(state.get("navigation_status"), "Cieľ dosiahnutý")
+        for gear in (1, 0, -1):
+            with self.subTest(gear=gear):
+                state = State({
+                    "autopilot_active": True,
+                    "navigation_arrival_pending": True,
+                    "game_route_distance": 3.0,
+                })
+                plugin = autopilot({"speed": 0.1, "gear": gear}, state)
+                plugin.on_tick(0.05)
+                self.assertFalse(state.get("autopilot_active"))
+                self.assertFalse(state.get("nav_active"))
+                self.assertEqual(state.get("nav_steering"), 0.0)
+                self.assertEqual(plugin.sdk.controller.throttle, 0.0)
+                self.assertEqual(plugin.sdk.controller.brake, 0.0)
+                # Arrival only releases the momentary selector. It must never
+                # request D, including when telemetry already reports R.
+                self.assertEqual(plugin.sdk.controller.drive_events, [False])
+                self.assertEqual(state.get("navigation_status"), "Cieľ dosiahnutý")
+
+    def test_curve_cross_track_gain_holds_lane_without_straight_hunting(self):
+        self.assertAlmostEqual(curve_cte_gain(1e6), K_CTE)
+        self.assertAlmostEqual(curve_cte_gain(60.0), K_CTE_CURVE)
+        self.assertGreater(curve_cte_gain(200.0), curve_cte_gain(400.0))
+        self.assertGreater(curve_cte_gain(400.0), K_CTE)
+
+    def test_curvature_uses_path_projection_not_off_centre_truck(self):
+        straight = Route([(0.0, 0.0), (0.0, 100.0), (0.0, 200.0)])
+        # A 1.5 m CTE is still a straight road, not a fictitious bend whose
+        # gain changes as the truck approaches the centreline.
+        self.assertGreater(straight.curvature_ahead(
+            (1.5, 20.0), 3.141592653589793), 100000.0)
 
     def test_ar_width_is_compact_original_size(self):
         snapshot = {
