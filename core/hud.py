@@ -363,17 +363,13 @@ class UltraPilotHUD(QWidget):
         self._draw_driving_view(qp, scene, d)
         qp.restore()
 
-        # 4) Traffic light + countdown inside the scene (top-right of the scene).
-        if d["light"]:
-            self._draw_light(qp, scene, d["light"])
-
-        # 5) Throttle/brake strip on the panel's far-left edge.
+        # 4) Throttle/brake strip on the panel's far-left edge.
         self._draw_pedals(qp, d)
 
-        # 6) Autopilot status pill at the bottom of the panel.
+        # 5) Autopilot status pill at the bottom of the panel.
         self._draw_status_pill(qp, d)
 
-        # 7) Rear-view camera inset (bottom-right of the panel). Shows a glance
+        # 6) Rear-view camera inset (bottom-right of the panel). Shows a glance
         #    behind whenever a turn signal is on or the rear_cam flag is set.
         self._draw_rear_cam(qp, d)
 
@@ -716,30 +712,10 @@ class UltraPilotHUD(QWidget):
                 pb = self._project(b[0], b[1], view, bh)
                 if pa and pb:
                     if kind == "lane":
-                        # Prefab trajectories connect roads through junctions.
-                        # Draw one round-capped surface only. Giving every
-                        # individual trajectory its own polygon and two white
-                        # edges sliced the underlying road into rectangles.
-                        lane_half = 2.92
-                        lane_edges = []
-                        for side in (-1.0, 1.0):
-                            ea = self._project(a[0] + na * lane_half * side,
-                                               a[1] + nl * lane_half * side, view, ah)
-                            eb = self._project(b[0] + na * lane_half * side,
-                                               b[1] + nl * lane_half * side, view, bh)
-                            if ea and eb:
-                                lane_edges.append((ea, eb))
-                        if len(lane_edges) == 2:
-                            qp.setPen(Qt.PenStyle.NoPen)
-                            qp.setBrush(QColor(34, 36, 40, 255))
-                            qp.drawPolygon(QPolygonF([
-                                lane_edges[0][0], lane_edges[0][1],
-                                lane_edges[1][1], lane_edges[1][0],
-                            ]))
                         # PPD navCurves are lane connectivity, not painted road
-                        # markings. Drawing every curve as a white dash created
-                        # the dense cross-hatched "line garbage" at junctions.
-                        # Keep them solely as an unmarked asphalt infill.
+                        # markings. Their asphalt was already drawn once in the
+                        # surface pass; drawing it twice or adding white edges
+                        # produced the old blocks/cross-hatched line garbage.
                         continue
                     # ETS2LA-style schematic geometry: two precise road edges
                     # and a faint centre marking. Filled rectangles for every
@@ -937,6 +913,26 @@ class UltraPilotHUD(QWidget):
             vehs.sort(key=lambda t: -t[0])
             for a, l, ground, v in vehs:
                 self._draw_low_poly_vehicle(qp, view, a, l, v, ground, h)
+
+            # The selected ETS2LA semaphore contains an absolute ETS2 world
+            # position. Draw it there as a pole-mounted object, never as an
+            # unrelated icon fixed to a corner of the HUD.
+            light = d.get("light")
+            if isinstance(light, dict):
+                try:
+                    light_a, light_l = to_truck(
+                        float(light["x"]), float(light["z"]))
+                    light_ground = (float(light.get("y", d["altitude"]))
+                                    - float(d["altitude"]))
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    light_a = light_l = light_ground = float("nan")
+                if (all(math.isfinite(value) for value in
+                        (light_a, light_l, light_ground))
+                        and -4.0 < light_a < 240.0
+                        and abs(light_l) < 55.0
+                        and -3.0 < light_ground < 12.0):
+                    self._draw_light(qp, view, light, light_a, light_l,
+                                     light_ground)
 
         # Every world element above was transformed around truck_world_pos;
         # the ego model must therefore remain at the same zero origin.
@@ -1363,58 +1359,77 @@ class UltraPilotHUD(QWidget):
                 qp.drawPolygon(QPolygonF([a, b, c, d]))
 
     # --- Traffic light --------------------------------------------------------
-    def _draw_light(self, qp, view, light):
-        """Traffic-light with a glowing active bulb, housing + countdown.
-
-        The lit bulb gets a radial-gradient halo so it actually looks lit (the
-        flat-fill version read as three identical grey dots). Anchor: top-right
-        of the scene, like a real signal visible through the windshield."""
+    def _draw_light(self, qp, view, light, ahead, lateral, ground=0.0):
+        """Draw a traffic signal at its real world-space pole position."""
         color = light.get("color", "off")
-        cx, cy = view.right() - 64, view.top() + 12
-        # Outer frame + inner housing (two rounded rects = bevelled look).
-        qp.setPen(Qt.PenStyle.NoPen)
-        qp.setBrush(QColor(8, 10, 14, 240))
-        qp.drawRoundedRect(QRectF(cx, cy, 26, 66), 7, 7)
-        qp.setBrush(QColor(22, 26, 32, 255))
-        qp.drawRoundedRect(QRectF(cx + 2, cy + 2, 22, 62), 5, 5)
+        pole_base = self._project(ahead, lateral, view, ground)
+        pole_top = self._project(ahead, lateral, view, ground + 5.9)
+        if pole_base is None or pole_top is None:
+            return
+        qp.setPen(QPen(QColor(145, 151, 160, 245), 4.0,
+                       Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        qp.drawLine(pole_base, pole_top)
 
-        on_col = {"red": "#EF4444", "yellow": "#FBBF24", "green": "#22C55E"}.get(color)
-        for i, cname in enumerate(("red", "yellow", "green")):
-            by = cy + 4 + i * 19
-            rect = QRectF(cx + 4, by, 18, 18)
-            lit = (color == cname)
-            if lit and on_col:
-                # Glow halo: radial gradient fading from the lit colour out.
-                grad = QRadialGradient(rect.center(), 22)
+        # Physical 0.8 m wide, 1.9 m high signal housing fixed to the pole.
+        bottom_left = self._project(ahead, lateral - .40, view, ground + 5.45)
+        bottom_right = self._project(ahead, lateral + .40, view, ground + 5.45)
+        top_left = self._project(ahead, lateral - .40, view, ground + 7.35)
+        top_right = self._project(ahead, lateral + .40, view, ground + 7.35)
+        if None in (bottom_left, bottom_right, top_left, top_right):
+            return
+        qp.setPen(QPen(QColor(5, 7, 10, 255), 1.5))
+        qp.setBrush(QColor(18, 22, 28, 255))
+        qp.drawPolygon(QPolygonF([
+            bottom_left, bottom_right, top_right, top_left,
+        ]))
+
+        on_col = {"red": "#EF4444", "yellow": "#FBBF24",
+                  "green": "#22C55E"}.get(color)
+        for index, name in enumerate(("red", "yellow", "green")):
+            bulb_height = ground + 6.98 - index * .58
+            centre = self._project(ahead - .03, lateral, view, bulb_height)
+            edge = self._project(ahead - .03, lateral + .24, view,
+                                 bulb_height)
+            if centre is None or edge is None:
+                continue
+            radius = max(2.2, min(9.0, abs(edge.x() - centre.x())))
+            rect = QRectF(centre.x() - radius, centre.y() - radius,
+                          radius * 2.0, radius * 2.0)
+            if color == name and on_col:
                 c = QColor(on_col)
-                grad.setColorAt(0.0, QColor(c.red(), c.green(), c.blue(), 235))
-                grad.setColorAt(0.4, QColor(c.red(), c.green(), c.blue(), 120))
-                grad.setColorAt(1.0, QColor(c.red(), c.green(), c.blue(), 0))
-                qp.setBrush(QBrush(grad))
-                qp.drawEllipse(QRectF(cx - 10, by - 10, 38, 38))
-                # Bright core.
-                qp.setBrush(QColor(255, 255, 255, 230))
-                qp.drawEllipse(rect.adjusted(5, 5, -5, -5))
-                qp.setBrush(on_col)
+                glow = QRadialGradient(rect.center(), radius * 2.2)
+                glow.setColorAt(0.0, QColor(c.red(), c.green(), c.blue(), 235))
+                glow.setColorAt(0.4, QColor(c.red(), c.green(), c.blue(), 120))
+                glow.setColorAt(1.0, QColor(c.red(), c.green(), c.blue(), 0))
+                qp.setPen(Qt.PenStyle.NoPen)
+                qp.setBrush(QBrush(glow))
+                qp.drawEllipse(rect.adjusted(-radius, -radius,
+                                             radius, radius))
+                qp.setBrush(QColor(on_col))
                 qp.drawEllipse(rect)
+                qp.setBrush(QColor(255, 255, 255, 225))
+                qp.drawEllipse(rect.adjusted(radius * .58, radius * .58,
+                                             -radius * .58, -radius * .58))
             else:
-                off = QColor({"red": "#3A1414", "yellow": "#3A2E08",
-                              "green": "#0E3A1A"}.get(cname, "#2C3138"))
-                qp.setBrush(off)
+                qp.setPen(Qt.PenStyle.NoPen)
+                qp.setBrush(QColor({
+                    "red": "#3A1414", "yellow": "#3A2E08",
+                    "green": "#0E3A1A",
+                }.get(name, "#2C3138")))
                 qp.drawEllipse(rect)
 
-        # Countdown + next-state hint beside the housing.
-        tl = light.get("time_left", 0) or 0
-        if tl > 0:
-            qp.setPen(QColor("#FFFFFF")); qp.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
-            qp.drawText(QRectF(cx + 30, cy + 2, 64, 24), Qt.AlignmentFlag.AlignLeft,
-                        f"{tl:.1f}s")
-            nxt_col = {"red": "#F87171", "green": "#4ADE80",
-                       "yellow": "#FBBF24"}.get(color, "#D1D5DB")
-            nxt_txt = {"red": "→ ZELENÁ", "green": "→ ŽLTÁ",
-                       "yellow": "→ ČERVENÁ"}.get(color, "")
-            qp.setPen(QColor(nxt_col)); qp.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
-            qp.drawText(QRectF(cx + 30, cy + 26, 86, 14), Qt.AlignmentFlag.AlignLeft, nxt_txt)
+        # Attach the countdown to the world-space housing, not the HUD corner.
+        try:
+            time_left = float(light.get("time_left", 0.0) or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            time_left = 0.0
+        if math.isfinite(time_left) and time_left > 0.0:
+            label_x = max(top_left.x(), top_right.x()) + 5.0
+            label_y = min(top_left.y(), top_right.y())
+            qp.setPen(QColor("#FFFFFF"))
+            qp.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+            qp.drawText(QRectF(label_x, label_y, 58, 20),
+                        Qt.AlignmentFlag.AlignLeft, f"{time_left:.1f}s")
 
     # --- Pedals + status ------------------------------------------------------
     def _draw_pedals(self, qp, d):

@@ -2,7 +2,7 @@ import math
 import struct
 import unittest
 
-from PyQt6.QtCore import QPointF
+from PyQt6.QtCore import QPointF, QRectF
 
 from core.hud import UltraPilotHUD
 from core.sdk.scs_sdk import SCSTelemetry
@@ -162,6 +162,58 @@ class HudPoseStabilityTests(unittest.TestCase):
                 centre_x = (a[0] + b[0]) * .5
                 covering.append(centre_x-half <= truck.x <= centre_x+half)
         self.assertIn(True, covering)
+
+    def test_connected_prefab_curves_fill_junction_without_markings(self):
+        synthetic = SyntheticMap()
+        synthetic.node(1, 0.0, 0.0)
+        synthetic.node(2, 0.0, 80.0)
+        synthetic.road(1, 2)
+        calls = []
+
+        def prefab_segments(pos, radius, limit, allowed_node_uids):
+            calls.append(frozenset(allowed_node_uids))
+            return [((0.0, 32.0, 0.0), (7.0, 38.0, 0.0))]
+
+        synthetic.net.prefab_segments_3d_near = prefab_segments
+        segments = synthetic.net.hud_segments_3d_near(
+            (0.0, 20.0), radius=100.0, altitude=0.0)
+        prefab = [segment for segment in segments if segment[2] == "lane"]
+        self.assertEqual(len(prefab), 1)
+        self.assertEqual(calls, [frozenset((1, 2))])
+        self.assertFalse(prefab[0][5])       # no dashed line
+        self.assertTrue(prefab[0][9])        # suppress every marking
+
+    def test_traffic_light_is_world_anchored_and_never_uses_string_brush(self):
+        class StrictPainter:
+            def setBrush(self, brush):
+                if isinstance(brush, str):
+                    raise TypeError("QPainter.setBrush must not receive str")
+
+            def __getattr__(self, _name):
+                return lambda *_args, **_kwargs: None
+
+        hud = self.make_hud()
+        hud._view_yaw = 0.0
+        projections = []
+        original_project = hud._project
+
+        def project(ahead, lateral, view, height=0.0):
+            point = original_project(ahead, lateral, view, height)
+            projections.append((ahead, lateral, height, point))
+            return point
+
+        hud._project = project
+        hud._draw_light(
+            StrictPainter(), QRectF(0.0, 0.0, 900.0, 600.0),
+            {"color": "red", "time_left": 7.2},
+            ahead=30.0, lateral=5.0, ground=0.0)
+        self.assertTrue(projections)
+        self.assertTrue(all(29.9 <= ahead <= 30.0
+                            for ahead, _lateral, _height, _point in projections))
+        # A signal 5 m right of the truck projects near the scene centre. The
+        # removed overlay implementation was always pinned at x ~= 836.
+        self.assertLess(max(point.x() for *_rest, point in projections
+                            if point is not None), 700.0)
 
     def test_sdk_reads_attached_after_all_eighty_trailer_flags(self):
         sdk = SCSTelemetry()

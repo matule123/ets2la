@@ -140,6 +140,12 @@ class LaneLocatorConfig:
     max_heading_rad: float = math.radians(35.0)
     heading_weight: float = 7.0
     vertical_weight: float = 3.0
+    # SCS telemetry reports the vehicle reference point while map nodes retain
+    # the road surface/reference height. Real ProMods 1.59 samples show a
+    # stable ~0.9-1.5 m same-deck bias. Keep the strict 4 m hard gate so a
+    # bridge cannot match the road below, but do not score that expected bias
+    # as uncertainty.
+    vertical_score_deadband_m: float = 1.5
     off_route_penalty: float = 7.0
     discontinuity_penalty: float = 4.0
     derived_width_penalty: float = 0.6
@@ -218,7 +224,9 @@ class LaneLocator:
             components = (
                 ("lateral", float(distance)),
                 ("heading", float(heading_error * self.config.heading_weight)),
-                ("vertical", float(vertical * self.config.vertical_weight)),
+                ("vertical", float(max(
+                    0.0, vertical - self.config.vertical_score_deadband_m)
+                    * self.config.vertical_weight)),
                 ("off_route", float(
                     0.0 if exact_route_edge or not gps else
                     min(2.0, self.config.off_route_penalty) if on_route else

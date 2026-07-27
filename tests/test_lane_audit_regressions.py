@@ -153,6 +153,20 @@ class LaneGeometryAuditTests(unittest.TestCase):
         self.assertEqual(right[0].right_neighbor, right[1].lane_id)
         self.assertEqual(right[1].left_neighbor, right[0].lane_id)
 
+    def test_per_lane_offsets_are_applied_after_full_road_offset(self):
+        look = {
+            "lane_types_left": ("traffic_lane.road.local",) * 2,
+            "lane_types_right": ("traffic_lane.road.local",) * 2,
+            "offset_m": 5.75,
+            "lane_offsets_left_m": (-4.75, -4.75),
+            "lane_offsets_right_m": (-4.75, -4.75),
+        }
+        left, right = RoadNetwork._lane_center_offsets(look)
+        # Exact ETS2 1.59 road.blkw2c definition. Omitting lane_offsets moved
+        # both carriageways 4.75 m and made a right-lane truck look left-lane.
+        self.assertEqual(left, (-3.25, -7.75))
+        self.assertEqual(right, (3.25, 7.75))
+
     def test_lateral_and_steering_signs_are_consistent(self):
         m = SyntheticMap()
         m.node(1, 0, 0); m.node(2, 0, 40)

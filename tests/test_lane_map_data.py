@@ -57,6 +57,26 @@ class RealMapLaneDataTests(unittest.TestCase):
         self.assertEqual(len(look["lane_types_right"]), look["lanes_right"])
         self.assertIn("offset_m", look)
 
+    def test_real_blkw2c_legacy_offsets_place_truck_in_outer_lane(self):
+        look = self.net.road_looks["blkw2c"]
+        self.assertEqual(look["lane_offsets_left_m"], (-4.75, -4.75))
+        self.assertEqual(look["lane_offsets_right_m"], (-4.75, -4.75))
+        self.assertEqual(self.net._lane_center_offsets(look),
+                         ((-3.25, -7.75), (3.25, 7.75)))
+
+        # Captured from the running ETS2 1.59 session that exposed the HUD
+        # one-lane shift. With the omitted SII offsets restored, this pose is
+        # unambiguously the outer/right lane (raw lane index 1), not index 0.
+        match = LaneLocator(self.net).locate(
+            (42308.221267700195, 60.259498596191406, 61796.968002319336),
+            1.033263954791141)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.lane_id.road_uid, 5962819239990939632)
+        self.assertEqual(match.lane_id.direction, 1)
+        self.assertEqual(match.lane_id.lane_index, 1)
+        self.assertLess(abs(match.lateral_error_m), 0.35)
+        self.assertGreaterEqual(match.confidence, 0.72)
+
     def test_prefab_lane_connectivity_is_preserved(self):
         self.assertGreater(len(self.net._prefab_lane_data), 4000)
         item = next(value for value in self.net._prefab_lane_data.values()
@@ -138,6 +158,10 @@ class RealMapLaneDataTests(unittest.TestCase):
                 self.net._road_segment_by_uid[5962819239009456979])
             if lane.direction == 1 and lane.raw_lane_index == 0)
         truck = incoming.centerline[3]
+        expected_exit_lane = {
+            5962819254075415764: 0,
+            5962819254436125907: 1,
+        }
         for gps in approaches:
             with self.subTest(exit_uid=gps[2]):
                 path, match = self.net.build_lane_path(
@@ -146,7 +170,11 @@ class RealMapLaneDataTests(unittest.TestCase):
                 self.assertTrue(path.valid, path.failure_reason)
                 self.assertEqual(path.segments[1].lane_id.prefab_token,
                                  "dlc_blkw_81")
-                self.assertEqual(path.segments[2].raw_lane_index, 0)
+                # The two confirmed prefab exits terminate on different raw
+                # lanes. The dropped -4.75 m SII offsets previously collapsed
+                # this physical distinction in the legacy expectations.
+                self.assertEqual(path.segments[2].raw_lane_index,
+                                 expected_exit_lane[gps[2]])
                 boundary_gaps = [math.dist(
                     (first.centerline[-1].x, first.centerline[-1].y,
                      first.centerline[-1].z),
@@ -180,6 +208,10 @@ class RealMapLaneDataTests(unittest.TestCase):
              5962819256810101952, 5962819253060394194,
              5962819254436125907, 5962819257229532404),
         )
+        expected_exit_lane = {
+            5962819254075415764: 0,
+            5962819254436125907: 1,
+        }
         for gps in routes:
             with self.subTest(approach_uid=gps[1], exit_uid=gps[-2]):
                 corridor = self.net.resolve_gps_corridor(gps)
@@ -206,7 +238,8 @@ class RealMapLaneDataTests(unittest.TestCase):
                 trajectory = build_lane_trajectory(path)
                 self.assertTrue(trajectory.valid,
                                 trajectory.failure_reason)
-                self.assertEqual(path.segments[-1].raw_lane_index, 0)
+                self.assertEqual(path.segments[-1].raw_lane_index,
+                                 expected_exit_lane[gps[-2]])
 
     def test_live_ioannina_exit_changes_lane_before_prefab_without_heading_bump(self):
         """Regression for the reported 54.2 degree sub-kilometre failure.

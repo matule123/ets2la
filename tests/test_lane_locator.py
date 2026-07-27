@@ -53,6 +53,29 @@ class LaneLocatorTests(unittest.TestCase):
         self.assertEqual(match.lane_id, bridge.lane_id)
         self.assertLess(match.vertical_error_m, 0.3)
 
+    def test_same_deck_telemetry_height_bias_does_not_drop_confidence(self):
+        locator = LaneLocator(FakeNetwork([lane(1, 0, height=0.0)]))
+        match = locator.locate((0.0, 1.5, 15.0), math.pi, (10, 11))
+        self.assertIsNotNone(match)
+        self.assertEqual(match.vertical_error_m, 1.5)
+        self.assertGreaterEqual(match.confidence, 0.72)
+        self.assertEqual(dict(match.score_components)["vertical"], 0.0)
+
+    def test_reported_0893m_bias_stays_above_threshold_near_route_start(self):
+        # Runtime revision 3398 scored 0.707883 because the 0.893 m vehicle-vs-
+        # road reference-height bias alone contributed 2.68 points.  The lane
+        # shared the first GPS UID but was not the first directed edge, so its
+        # intentional near-route penalty must remain; only the same-deck height
+        # bias is removed from the confidence score.
+        locator = LaneLocator(FakeNetwork([lane(1, 0, height=0.0)]))
+        match = locator.locate((0.0, 0.893, 15.0), math.pi, (9, 10))
+        self.assertIsNotNone(match)
+        components = dict(match.score_components)
+        self.assertEqual(components["off_route"], 2.0)
+        self.assertEqual(components["vertical"], 0.0)
+        self.assertAlmostEqual(match.vertical_error_m, 0.893)
+        self.assertGreaterEqual(match.confidence, 0.72)
+
     def test_gps_membership_beats_near_parallel_road(self):
         wrong = lane(1, 0.0, gps=(90, 91))
         route = lane(2, 1.0, gps=(10, 11))

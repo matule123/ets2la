@@ -26,8 +26,9 @@ from core.navigation.lane_model import (
     GpsCorridor, GpsCorridorEdge, LaneConnection, LaneId, LaneLocator,
     LanePath, LanePoint, LaneSegment,
 )
+from core.navigation.road_look_offsets_159 import LANE_OFFSETS_159
 
-CACHE_VERSION = 8  # exact node item links + ETS2LA-compatible lane transitions
+CACHE_VERSION = 9  # includes per-lane road-look offsets omitted by legacy JSON
 
 
 def _uid(value):
@@ -833,11 +834,25 @@ class RoadNetwork:
                                    max(1, lanes), divided, dash_on,
                                    pillar, rail_post, half_width,
                                    near_prefab_boundary))
-        # Prefab navCurves describe every legal topological movement through a
-        # junction. They are not road-surface geometry. Drawing all of them as
-        # independent asphalt strips produced overlapping blocks and a web of
-        # false lanes. Ordinary road ribbons remain the contextual road mesh;
-        # the single selected prefab movement is shown by lane_trajectory.
+        # Road items stop at prefab boundaries. Without any prefab surface the
+        # HUD therefore showed a literal black hole where a junction or
+        # roundabout should be. PPD navCurves are not painted lane markings,
+        # but their confirmed curves are suitable as overlapping *unmarked*
+        # asphalt ribbons. Restrict them to prefabs topologically attached to
+        # the current road component and preserve their real Y coordinates.
+        connected_nodes = {
+            uid for index in connected_indices for uid in self._seg_uids[index]
+        }
+        prefab_limit = max(limit, min(limit * 3, 3000))
+        for a, b in self.prefab_segments_3d_near(
+                pos, radius=radius, limit=prefab_limit,
+                allowed_node_uids=connected_nodes):
+            distance2 = min((a[0]-px)**2 + (a[1]-pz)**2,
+                            (b[0]-px)**2 + (b[1]-pz)**2)
+            if not self._hud_chord_is_sane(a, b, altitude, distance2):
+                continue
+            ranked.append((distance2, a, b, "lane", 1, False, False,
+                           False, False, 3.05, True))
         ranked.sort(key=lambda item: item[0])
         return [(a, b, kind, lanes, divided, dash_on, pillar, rail_post,
                  half_width, suppress_markings)
@@ -2092,6 +2107,25 @@ class RoadNetwork:
         if not path:
             return
         try:
+            legacy_159 = False
+            config_path = os.path.join(data_dir, "config.json")
+            if os.path.isfile(config_path):
+                config = _loadf(config_path)
+                version = str(config.get(
+                    "game_version_major_minor", config.get("version", "")))
+                legacy_159 = version == "1.59" or version.startswith("1.59.")
+
+            def lane_offsets(record, camel, snake):
+                raw = record.get(camel, record.get(snake, ())) or ()
+                values = []
+                for item in raw:
+                    value = item[0] if isinstance(item, (list, tuple)) else item
+                    value = float(value)
+                    if not math.isfinite(value):
+                        raise ValueError(f"non-finite {camel} in {record.get('token')}")
+                    values.append(value)
+                return tuple(values)
+
             raw = _loadf(path)
             for r in raw:
                 tok = r.get("token")
@@ -2112,6 +2146,19 @@ class RoadNetwork:
                     rtype = "local"
                 else:
                     rtype = "local" if lanes <= 2 else "expressway"
+                left_offsets = lane_offsets(
+                    r, "laneOffsetsLeft", "lane_offsets_left")
+                right_offsets = lane_offsets(
+                    r, "laneOffsetsRight", "lane_offsets_right")
+                has_lane_offset_fields = any(key in r for key in (
+                    "laneOffsetsLeft", "laneOffsetsRight",
+                    "lane_offsets_left", "lane_offsets_right"))
+                # The official legacy 1.59 JSON intentionally omitted these
+                # arrays. Restore only facts verified from ETS2 1.59 defs; a
+                # new TruckLib dataset always remains authoritative.
+                if legacy_159 and not has_lane_offset_fields:
+                    left_offsets, right_offsets = LANE_OFFSETS_159.get(
+                        str(tok).removeprefix("road."), ((), ()))
                 self.road_looks[tok] = {
                     "type": rtype, "lanes": max(1, lanes),
                     "lanes_left": len(lanes_l), "lanes_right": len(lanes_r),
@@ -2121,6 +2168,8 @@ class RoadNetwork:
                     "lane_types_left": tuple(str(value) for value in lanes_l),
                     "lane_types_right": tuple(str(value) for value in lanes_r),
                     "offset_m": float(r.get("offset", 0.0) or 0.0),
+                    "lane_offsets_left_m": left_offsets,
+                    "lane_offsets_right_m": right_offsets,
                     "lane_offset_m": (float(r["laneOffset"])
                                       if r.get("laneOffset") is not None else None),
                     "shoulder_left_m": float(r.get("shoulderSpaceLeft", 0.0) or 0.0),
@@ -2250,8 +2299,9 @@ class RoadNetwork:
 
         Positive values are right of the map item's start->end centreline;
         negative values are left.  The 1.59 extractor does not retain
-        ``lane_offsets_left/right``, so only the facts actually present in
-        roadLooks.json are used: lane order, 4.5 m SCS spacing and road offset.
+        New TruckLib datasets preserve ``lane_offsets_left/right``. Legacy
+        1.59 datasets receive the same facts from the versioned compatibility
+        table loaded by ``_load_road_looks``.
         """
         width, half = 4.5, 2.25
         left = tuple(look.get("lane_types_left", ()))
@@ -2290,6 +2340,21 @@ class RoadNetwork:
         road_offset = float(look.get("offset_m", 0.0) or 0.0)
         right_centers = [value + road_offset for value in right_centers]
         left_centers = [value - road_offset for value in left_centers]
+
+        # Match ETS2LA RoadUtils.CalculateRoadLaneCenters exactly: right lane
+        # offsets add their X component, left lane offsets subtract it.
+        right_offsets = tuple(look.get("lane_offsets_right_m", ()))
+        left_offsets = tuple(look.get("lane_offsets_left_m", ()))
+        right_centers = [
+            value + (float(right_offsets[index])
+                     if index < len(right_offsets) else 0.0)
+            for index, value in enumerate(right_centers)
+        ]
+        left_centers = [
+            value - (float(left_offsets[index])
+                     if index < len(left_offsets) else 0.0)
+            for index, value in enumerate(left_centers)
+        ]
         return tuple(left_centers), tuple(right_centers)
 
     def _previous_road_look(self, segment_index):
