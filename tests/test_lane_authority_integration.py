@@ -178,6 +178,57 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
         self.assertEqual(sdk.get("nav_path"), [])
         self.assertFalse(sdk.get("nav_active"))
 
+    def test_transient_localization_miss_keeps_geometry_but_stops_control(self):
+        plugin, sdk, point = build_map_plugin()
+        original = sdk.get("lane_trajectory")
+        original_revision = original["revision"]
+        original_points = original["points"]
+        original_build = original["route_build_id"]
+        original_diagnostic = sdk.get("route_diagnostic_last_result")
+        locator = plugin.road_net._runtime_lane_locator
+        plugin.tags = Tags()
+        sdk.set("truck_world_pos", (point.x, point.z))
+        sdk.set("truck_heading", point.heading)
+        sdk.set("truck_speed_ms", 10.0)
+        sdk.set("telemetry_valid", True)
+
+        with mock.patch.object(locator, "locate", return_value=None):
+            plugin.on_tick(0.02)
+
+        held = sdk.get("lane_trajectory")
+        self.assertIs(held, original)
+        self.assertEqual(held["revision"], original_revision)
+        self.assertIs(held["points"], original_points)
+        self.assertEqual(held["route_build_id"], original_build)
+        self.assertIs(sdk.get("nav_path"), original["display_points"])
+        self.assertEqual(sdk.get("nav_path"), original_points)
+        self.assertFalse(sdk.get("lane_match")["valid"])
+        self.assertFalse(sdk.get("nav_active"))
+        self.assertEqual(sdk.get("nav_steering"), 0.0)
+        self.assertTrue(sdk.get("navigation_unreliable"))
+        hud = type("HUDReader", (), {
+            "shared_state": sdk.shared_state,
+            "_rear_cam_side": "off", "_rear_cam_until": 0.0,
+        })()
+        ar = type("ARReader", (), {"state": sdk.shared_state})()
+        self.assertIs(UltraPilotHUD._read(hud)["nav_path"],
+                      original["display_points"])
+        self.assertIs(AROverlay._current_display_points(ar)[1],
+                      original["display_points"])
+        self.assertIs(live_map_navigation_points(sdk.shared_state),
+                      original["display_points"])
+        self.assertIs(sdk.get("route_diagnostic_last_result"),
+                      original_diagnostic)
+
+        plugin.on_tick(0.02)
+        recovered = sdk.get("lane_trajectory")
+        self.assertIs(recovered, original)
+        self.assertEqual(recovered["revision"], original_revision)
+        self.assertTrue(sdk.get("lane_match")["valid"])
+        self.assertFalse(sdk.get("navigation_unreliable"))
+        self.assertEqual(sdk.get("navigation_failure_reason"), "")
+        self.assertTrue(sdk.get("nav_active"))
+
     def test_xyz_and_vertical_layers_are_preserved(self):
         plugin, sdk, _ = build_map_plugin(y=12.0)
         snapshot = sdk.get("lane_trajectory")

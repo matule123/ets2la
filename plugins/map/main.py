@@ -61,6 +61,7 @@ class Plugin(BasePlugin):
         self._lane_path = None
         self._lane_route = None
         self._lane_match = None
+        self._lane_localization_current = False
         self._lane_revision = int(self.sdk.get(
             "lane_trajectory_revision", 0) or 0)
         self._navigation_log_seq = int(self.sdk.get(
@@ -412,6 +413,7 @@ class Plugin(BasePlugin):
         if signature != self._lane_signature:
             self._lane_signature = signature
             self._lane_match = None
+            self._lane_localization_current = False
             self._lane_failure_signature = None
             self._lane_retry_at = 0.0
             locator = getattr(self.road_net, "_runtime_lane_locator", None)
@@ -466,6 +468,30 @@ class Plugin(BasePlugin):
                 uids, pos, altitude, heading, locator_started)
             safe_diagnostic_call(diagnostic, "start_phase", "LaneLocator")
         if match is None:
+            self._lane_localization_current = False
+            if not needs_build:
+                # The GPS target and its validated geometry are unchanged.
+                # A single noisy/off-centre localisation sample must stop
+                # steering, but must not erase the route from HUD/AR/map or
+                # manufacture a new trajectory revision.  The explicit
+                # out-of-gate errors keep every control consumer fail-closed
+                # until LaneLocator confirms the lane again.
+                self.sdk.shared_state.update_batch({
+                    "lane_match": {
+                        "revision": self._lane_revision,
+                        "valid": False,
+                        "lateral_error_m": 1_000_000.0,
+                        "heading_error_rad": math.pi,
+                        "failure_reason": "live lane localization unavailable",
+                    },
+                    "lane_trajectory_heartbeat": time.monotonic(),
+                    "nav_active": False,
+                    "nav_steering": 0.0,
+                    "navigation_unreliable": True,
+                    "navigation_failure_reason": (
+                        "Live lane localization is temporarily unavailable"),
+                })
+                return self._lane_path
             if diagnostic is None:
                 diagnostic = self._new_route_diagnostics(
                     uids, pos, altitude, heading, locator_started)
@@ -487,7 +513,12 @@ class Plugin(BasePlugin):
                 diagnostic, "fail_phase", "LaneLocator", technical_reason,
                 locator_capture,
                 duration_ms=(time.monotonic() - locator_started) * 1000.0)
-            self._fail_route_build(diagnostic, technical_reason, uids)
+            failure_time = time.monotonic()
+            snapshot = self._fail_route_build(
+                diagnostic, technical_reason, uids)
+            self._lane_failure_signature = (
+                uids, str(snapshot.get("failure_reason", "")))
+            self._lane_retry_at = failure_time + 1.0
             return None
         if diagnostic is not None:
             safe_diagnostic_call(diagnostic, "observe_locator",
@@ -521,11 +552,13 @@ class Plugin(BasePlugin):
                     "score_components": dict(match.score_components),
                 }, duration_ms=(time.monotonic()-locator_started)*1000.0)
         self._lane_match = match
+        self._lane_localization_current = True
         if not needs_build and self._lane_path is not None:
             # Keep the geometry snapshot immutable. Runtime localization and
             # liveness are published separately under the same revision.
             self.sdk.set("lane_match", {
                 "revision": self._lane_revision,
+                "valid": True,
                 "active_lane_id": self._lane_id_payload(match.lane_id),
                 "point": [float(match.point.x), float(match.point.y),
                           float(match.point.z)],
@@ -537,7 +570,11 @@ class Plugin(BasePlugin):
                 "score_components": dict(match.score_components),
                 "switch_reason": match.switch_reason,
             })
-            self.sdk.set("lane_trajectory_heartbeat", time.monotonic())
+            self.sdk.shared_state.update_batch({
+                "lane_trajectory_heartbeat": time.monotonic(),
+                "navigation_unreliable": False,
+                "navigation_failure_reason": "",
+            })
             return self._lane_path
 
         # A manager-backed valid snapshot can survive a plugin restart while
@@ -845,6 +882,7 @@ class Plugin(BasePlugin):
             self._lane_path = None
             self._lane_route = None
             self._lane_match = None
+            self._lane_localization_current = False
             self._lane_failure_signature = None
             self._last_logged_lane_failure = None
             self._lane_retry_at = 0.0
@@ -1223,6 +1261,7 @@ class Plugin(BasePlugin):
             snapshot = self.sdk.get("lane_trajectory", {}) or {}
             route = self._lane_route
             if (route is not None and len(route) >= 2
+                    and self._lane_localization_current
                     and bool(snapshot.get("valid", False))
                     and int(snapshot.get("revision", -1)) == self._lane_revision
                     and tuple(snapshot.get("source_gps_uids", ()) or ())
