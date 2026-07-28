@@ -4,7 +4,7 @@ import unittest
 
 from core.navigation.lane_model import LaneLocator, wrap_angle
 from core.navigation.lane_trajectory import (
-    build_lane_trajectory, derive_display_points,
+    build_lane_trajectory, derive_display_points, validate_lane_trajectory,
 )
 from core.navigation.road_network import RoadNetwork
 
@@ -48,6 +48,143 @@ class RealMapLaneDataTests(unittest.TestCase):
             f"height_continuity={max(heights, default=0):.3f}m "
             f"confidence={path.confidence:.3f} "
             f"failure_reason={path.failure_reason or '-'}")
+
+    def assert_captured_route_valid(self, gps, position, heading):
+        match = LaneLocator(self.net).locate(position, heading, gps)
+        self.assertIsNotNone(match)
+        path, returned = self.net.build_lane_path(
+            gps, (position[0], position[2]), heading,
+            altitude=position[1], start_match=match)
+        self.assertIsNotNone(returned)
+        self.assertTrue(path.valid, path.failure_reason)
+        trajectory = build_lane_trajectory(path)
+        self.assertTrue(trajectory.valid, trajectory.failure_reason)
+        validation = validate_lane_trajectory(trajectory)
+        self.assertTrue(validation.valid, validation.failure_reason)
+        return path, trajectory
+
+    def test_phase1_localizes_three_captured_prefab_boundary_poses(self):
+        captures = (
+            (
+                (5962819264745725766, 5962819261197344539,
+                 5962819257825124179, 5962819264393417967,
+                 5962819277395732982, 5962819251021962418),
+                (41933.31673049927, 59.50890350341797,
+                 61005.002868652344), 0.676961338637013,
+            ),
+            (
+                (5962819253681172399, 5962819261264473948,
+                 5962819264712191947, 5962819264636694476),
+                (41886.58908843994, 69.0354232788086,
+                 61468.78616142273), 2.5009504447960342,
+            ),
+            (
+                (5962819253597286226, 5962819260593385297,
+                 5962819260786301797),
+                (42201.28845214844, 67.72754669189453,
+                 61596.53224182129), 3.120494987404456,
+            ),
+        )
+        for gps, position, heading in captures:
+            with self.subTest(gps=gps):
+                self.assert_captured_route_valid(gps, position, heading)
+
+    def test_phase1_prefab_diagnostic_replay_does_not_mutate_lane_cache(self):
+        gps = (
+            5962819253681172399, 5962819261264473948,
+            5962819264712191947, 5962819264636694476,
+        )
+        position = (41886.58908843994, 69.0354232788086,
+                    61468.78616142273)
+        heading = 2.5009504447960342
+        locator = LaneLocator(self.net)
+        match = locator.locate(position, heading, gps)
+        self.assertIsNotNone(match)
+        lane_cache = dict(self.net._lane_cache)
+        lane_index = dict(self.net._lane_id_index)
+        road_pair_index = dict(self.net._road_pair_index_cache)
+        spatial_indexes = {
+            name: (id(getattr(self.net, name)), len(getattr(self.net, name)))
+            for name in ("_ngrid", "_grid", "_seg_grid", "_prefab_grid",
+                         "_prefab_pairs")
+        }
+        capture = {}
+        observed = locator.locate(
+            position, heading, gps, match, diagnostics=capture,
+            diagnostic_mode=True)
+        self.assertIsNotNone(observed)
+        self.assertEqual(observed.lane_id, match.lane_id)
+        self.assertEqual(observed.point, match.point)
+        self.assertIs(locator.previous, match)
+        self.assertEqual(self.net._lane_cache, lane_cache)
+        self.assertEqual(self.net._lane_id_index, lane_index)
+        self.assertEqual(self.net._road_pair_index_cache, road_pair_index)
+        self.assertEqual({
+            name: (id(getattr(self.net, name)), len(getattr(self.net, name)))
+            for name in spatial_indexes
+        }, spatial_indexes)
+
+    def test_phase1_legacy_order_restores_captured_missing_connector(self):
+        gps = (
+            5962819260727582455, 5962819266272472931,
+            5962819260870209380, 5962819259855187862,
+            5962819264846409621, 5962819270055709408,
+            5962819273662810836, 5962819260803100519,
+            5962819254058659704, 5962819259569975345,
+            5962819266264084346, 5962819254041882580,
+            5962819257288273893,
+        )
+        pair = (5962819259855187862, 5962819264846409621)
+        instance = self.net._prefab_pairs[(min(pair), max(pair))][0]
+        self.assertEqual(
+            instance[1],
+            (5962819264846409621, 5962819259855187862,
+             5962819264569585556))
+        self.assertEqual(
+            self.net._prefab_connector_options(instance, *pair), [(3, 4)])
+        self.assert_captured_route_valid(
+            gps,
+            (41966.15946960449, 59.51948165893555, 61062.694396972656),
+            -2.4511833293273426)
+
+    def test_phase1_legacy_order_removes_captured_18m_prefab_gap(self):
+        gps = (
+            5962819260593385297, 5962819260786301797,
+            5962819255727992656, 5962819266683514703,
+            5962819254075415764, 5962819253060394194,
+            5962819256810101952, 5962819261331562124,
+            5962819268579312546,
+        )
+        path, _trajectory = self.assert_captured_route_valid(
+            gps,
+            (42197.8532409668, 67.53638458251953, 61634.702560424805),
+            2.960869605749446)
+        gaps = [math.dist(
+            (first.centerline[-1].x, first.centerline[-1].y,
+             first.centerline[-1].z),
+            (second.centerline[0].x, second.centerline[0].y,
+             second.centerline[0].z))
+            for first, second in zip(path.segments, path.segments[1:])]
+        self.assertLess(max(gaps, default=0.0), 6.0)
+
+    def test_phase1_adjacent_prefab_lane_shift_remains_fail_closed(self):
+        gps = (
+            5962819255727992656, 5962819266683514703,
+            5962819254075415764, 5962819251944709334,
+            5962819252473191639, 5962819266733850743,
+            5962819280843480628, 5962819250728386678,
+        )
+        position = (42366.01986694336, 59.59323501586914,
+                    61849.797927856445)
+        heading = -2.1086505875894694
+        match = LaneLocator(self.net).locate(position, heading, gps)
+        self.assertIsNotNone(match)
+        path, _ = self.net.build_lane_path(
+            gps, (position[0], position[2]), heading,
+            altitude=position[1], start_match=match)
+        self.assertFalse(path.valid)
+        self.assertIn("prefab lane identity mismatch", path.failure_reason)
+        self.assertIn("4.50 m", path.failure_reason)
 
     def test_real_lane_metadata_is_preserved(self):
         self.assertGreater(len(self.net.road_looks), 1000)
@@ -128,9 +265,9 @@ class RealMapLaneDataTests(unittest.TestCase):
         segments, reason = self.net.select_lane_sequence(corridor, match)
         self.assertEqual(reason, "")
         self.assertEqual(segments[0].lane_id.prefab_token, "ibe94")
-        self.assertEqual(segments[0].lane_id.connector_index, 2)
+        self.assertEqual(segments[0].lane_id.connector_index, 0)
         self.assertEqual(segments[0].connector_curve_indices,
-                         (2, 4, 14, 12, 10, 11, 8, 7))
+                         (0, 5, 9, 19, 20, 21, 17, 22))
         path = self.net.connect_lane_sequence(segments, gps)
         self.print_metrics("known-prefab-pair", gps, path)
         self.assertTrue(path.valid, path.failure_reason)
@@ -138,14 +275,13 @@ class RealMapLaneDataTests(unittest.TestCase):
         self.assertLess(max(math.dist((a.x, a.y, a.z), (b.x, b.y, b.z))
                             for a, b in zip(path.points, path.points[1:])), 4.0)
 
-    def test_dlc_blkw_81_legacy_anchor_and_output_lane_are_continuous(self):
+    def test_dlc_blkw_81_descriptor_order_and_output_lane_are_continuous(self):
         """Regression for the reported 141 degree prefab-exit jump.
 
-        Legacy ETS2LA map data anchors this placed prefab at item node zero;
-        originNodeIndex is descriptor metadata and must not select another
-        world node.  Its outputLanes order also does not equal the raw road
-        lane order, so physical continuity must select the confirmed outgoing
-        lane after topology selects the road edge.
+        Legacy ETS2LA nodeUids must first be rotated into PPD descriptor order.
+        Its outputLanes order also does not equal the raw road lane order, so
+        physical continuity must select the confirmed outgoing lane after
+        topology selects the road edge.
         """
         approaches = (
             (5962819256810101952, 5962819253060394194,
@@ -468,7 +604,7 @@ class RealMapLaneDataTests(unittest.TestCase):
         segment, reason = self.net._prefab_lane_segment(corridor.edges[0], 0)
         self.assertEqual(reason, "")
         self.assertIsNotNone(segment)
-        self.assertEqual(segment.connector_curve_indices, (0, 5, 8, 7))
+        self.assertEqual(segment.connector_curve_indices, (1, 3, 21, 17, 22))
         self.assertLess(sum(math.dist(
             (a.x, a.y, a.z), (b.x, b.y, b.z))
             for a, b in zip(segment.centerline, segment.centerline[1:])), 70.0)

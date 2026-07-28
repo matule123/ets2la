@@ -129,6 +129,11 @@ class RouteDiagnosticFormatTests(unittest.TestCase):
         record = diagnostic.finish("failed")
         anonymized = anonymize_failure_record(record)
         encoded = json.dumps(anonymized, sort_keys=True)
+        self.assertEqual(anonymized["route_build_id"], "export-one")
+        self.assertEqual(anonymized["started_at"], record["started_at"])
+        self.assertEqual(
+            anonymized["context"]["environment"]["dataset_fingerprint"],
+            record["context"]["environment"]["dataset_fingerprint"])
         self.assertNotIn("987654321", encoded)
         self.assertNotIn("123456789", encoded)
         self.assertNotIn("444444444", encoded)

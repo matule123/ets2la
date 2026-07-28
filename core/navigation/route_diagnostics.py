@@ -466,8 +466,10 @@ def anonymize_failure_record(record):
     def identifier_key(key):
         key = str(key or "").lower()
         return (key in identifier_keys or key == "uid"
-                or key.endswith("_uid") or key.endswith("_token")
-                or key in ("laneid", "lane_identifier"))
+                or key.endswith("_uid") or key.endswith("_uids")
+                or key.endswith("_token")
+                or key in ("laneid", "lane_identifier", "nodeuids",
+                           "gpsuids"))
 
     def collect_identifiers(value, parent_key=None):
         key = str(parent_key or "").lower()
@@ -480,12 +482,19 @@ def anonymize_failure_record(record):
         elif (identifier_key(key) or key in (
                 "gps_uids", "source_gps_uids", "covered_gps_uids")):
             text = str(value)
-            if text:
+            # Connector indexes and lane ordinals are often one digit. Using
+            # those as arbitrary string substrings redacted timestamps, build
+            # IDs and dataset fingerprints whenever they happened to contain
+            # e.g. "1". Hash the structured field below, but only scrub a
+            # free-text occurrence when the identifier itself is distinctive.
+            numeric = text.lstrip("+-").isdigit()
+            if text and (not numeric or len(text.lstrip("+-")) >= 6):
                 sensitive_text.add(text)
 
     collect_identifiers(source)
 
-    def collect_coordinates(value):
+    def collect_coordinates(value, parent_key=None):
+        key = str(parent_key or "").lower()
         if isinstance(value, dict):
             lowered = {str(key).lower(): item for key, item in value.items()}
             if {"x", "y", "z"}.issubset(lowered):
@@ -496,11 +505,20 @@ def anonymize_failure_record(record):
                         continue
                     absolute_coordinate_text.add(str(lowered[axis]))
                     absolute_coordinate_text.add(str(number))
-            for item in value.values():
-                collect_coordinates(item)
+            for child_key, item in value.items():
+                collect_coordinates(item, child_key)
         elif isinstance(value, (list, tuple)):
+            if (any(word in key for word in (
+                    "world", "point", "position", "coordinate",
+                    "centerline", "polyline"))
+                    and len(value) >= 3
+                    and all(isinstance(item, (int, float))
+                            for item in value[:3])):
+                for item in value[:3]:
+                    absolute_coordinate_text.add(str(item))
+                    absolute_coordinate_text.add(str(float(item)))
             for item in value:
-                collect_coordinates(item)
+                collect_coordinates(item, parent_key)
 
     collect_coordinates(source)
 
@@ -566,13 +584,16 @@ def anonymize_failure_record(record):
                 else:
                     result[child_key] = clean(item, child_key)
             return result
-        if isinstance(value, list):
-            if (any(word in key for word in ("world", "point", "position"))
+        if isinstance(value, (list, tuple)):
+            if (any(word in key for word in (
+                    "world", "point", "position", "coordinate",
+                    "centerline", "polyline"))
                     and len(value) >= 3
                     and all(isinstance(item, (int, float))
                             for item in value[:3])):
                 return [round(float(value[index]) - origin[index], 2)
-                        for index in range(3)] + list(value[3:])
+                        for index in range(3)] + [
+                            clean(item, parent_key) for item in value[3:]]
             return [clean(item, parent_key) for item in value]
         if isinstance(value, str):
             return redact_text(value)

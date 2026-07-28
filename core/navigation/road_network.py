@@ -31,7 +31,7 @@ from core.navigation.route_diagnostics import (
 )
 from core.navigation.road_look_offsets_159 import LANE_OFFSETS_159
 
-CACHE_VERSION = 9  # includes per-lane road-look offsets omitted by legacy JSON
+CACHE_VERSION = 10  # normalises legacy prefab node UIDs into PPD descriptor order
 
 
 def _uid(value):
@@ -42,6 +42,17 @@ def _uid(value):
         return 0
     number = int(str(value), 16)
     return number - (1 << 64) if number >= (1 << 63) else number
+
+
+def _rotate_right(values, count):
+    """Match TruckLib's descriptor-node ordering for placed prefabs."""
+    values = tuple(values)
+    if not values:
+        return values
+    count %= len(values)
+    if count == 0:
+        return values
+    return values[-count:] + values[:-count]
 
 
 def _forward_vector(transform):
@@ -426,25 +437,29 @@ class RoadNetwork:
                     continue
                 raw_uids = tuple(_uid(value) for value in raw.get("nodeUids", ())
                                  if _uid(value))
-                descriptor_values = raw.get("descriptorNodeUids")
-                descriptor_order = descriptor_values is not None
-                uids = (tuple(_uid(value) for value in descriptor_values
-                              if _uid(value)) if descriptor_order else raw_uids)
-                if not uids:
+                if not raw_uids:
                     continue
                 origin_index = int(raw.get("originNodeIndex", 0))
-                if descriptor_order:
-                    # TruckLib exposes placed nodeUids in sector order (the
-                    # physical origin first), while PPD inputLanes/navNodes are
-                    # indexed in descriptor order.  The generator publishes
-                    # both arrays explicitly; reject a damaged permutation
-                    # instead of silently choosing a wrong junction arm.
-                    if (len(raw_uids) != len(uids)
-                            or sorted(raw_uids) != sorted(uids)
-                            or not (0 <= origin_index < len(uids))):
+                if not (0 <= origin_index < len(raw_uids)):
+                    raise ValueError(
+                        f"invalid originNodeIndex for prefab {token}")
+                # TruckLib's placed nodeUids are in map-item order. PPD
+                # inputLanes, outputLanes and navNodes are in descriptor order,
+                # which is rotateRight(raw_uids, originNodeIndex). New datasets
+                # publish that companion array explicitly; legacy datasets do
+                # not, but the same deterministic ordering contract still
+                # applies. Never infer it from proximity or connector geometry.
+                expected_uids = _rotate_right(raw_uids, origin_index)
+                descriptor_values = raw.get("descriptorNodeUids")
+                if descriptor_values is None:
+                    uids = expected_uids
+                else:
+                    uids = tuple(_uid(value) for value in descriptor_values
+                                 if _uid(value))
+                    if uids != expected_uids:
                         raise ValueError(
                             f"invalid descriptorNodeUids for prefab {token}")
-                instance = (token, uids, origin_index, descriptor_order)
+                instance = (token, uids, origin_index, True)
                 x, z = float(raw.get("x", 0)), float(raw.get("y", 0))
                 self._prefab_grid.setdefault(self._cell(x, z), []).append(instance)
                 for i in range(len(uids)):
@@ -1027,12 +1042,9 @@ class RoadNetwork:
         if not uids or not desc[0]:
             return ()
         origin_index = max(0, min(origin_index, len(desc[0]) - 1))
-        # New converter datasets store descriptorNodeUids and therefore use
-        # originNodeIndex directly. Legacy ETS2LA 1.59 nodeUids are in map
-        # item order: their world anchor is node 0 while originNodeIndex still
-        # identifies the descriptor-local origin. This must match
-        # _transform_prefab_points(), otherwise lane navCurves are placed tens
-        # of metres away from the already-correct prefab road mesh.
+        # Loaded datasets are normalised into descriptor order. The three-item
+        # instance fallback remains only for old in-memory callers/tests.
+        # Translation and rotation must match _transform_prefab_points().
         anchor_index = origin_index if descriptor_order else 0
         if anchor_index >= len(uids):
             return ()
@@ -1083,7 +1095,8 @@ class RoadNetwork:
                                          travelled, heading))
         return tuple(lane_points)
 
-    def _prefab_lane_segment(self, edge, lane_index, start_position=None):
+    def _prefab_lane_segment(self, edge, lane_index, start_position=None,
+                             register=True):
         """Resolve a GPS-selected prefab edge to one proven navCurve chain.
 
         ETS2LA does not assume that road lane index N equals prefab input N.
@@ -1179,8 +1192,157 @@ class RoadNetwork:
             None, ("roundabout" if "roundabout" in prefab_path else "prefab"),
             points, connector_curve_indices=tuple(indices),
             gps_uids=frozenset((edge.start_uid, edge.end_uid)))
-        self._lane_id_index[lane_id] = segment
+        if register:
+            self._lane_id_index[lane_id] = segment
         return segment, ""
+
+    def route_prefix_lane_segments_near(self, position, gps_uids,
+                                        radius=28.0, register=True):
+        """Return nearby proven prefab lanes entering the first GPS UID.
+
+        The rolling game GPS can drop the junction entrance before the truck
+        has physically left the preceding prefab. Only directed PPD connector
+        chains ending at the first authoritative UID are eligible. If several
+        already-passed histories have converged onto the same terminal curve,
+        that current curve is one lane and is deduplicated accordingly.
+        """
+        gps_uids = tuple(_uid(value) for value in gps_uids if _uid(value))
+        if (not self.loaded or len(position) < 3 or len(gps_uids) < 2
+                or any(uid not in self.nodes for uid in gps_uids)):
+            return ()
+        route_start_uid = gps_uids[0]
+        first_distinct_pair = next((
+            (pair_index, start_uid, end_uid)
+            for pair_index, (start_uid, end_uid) in enumerate(
+                zip(gps_uids, gps_uids[1:]))
+            if start_uid != end_uid
+        ), None)
+        if first_distinct_pair is None:
+            return ()
+        pair_index, start_uid, end_uid = first_distinct_pair
+        if self._classify_corridor_edge(
+                start_uid, end_uid, pair_index) is None:
+            # A prefix entering the first UID belongs to this GPS route only
+            # when the route's first outgoing connectivity is also proven.
+            return ()
+        px, _py, pz = position
+        cx, cz = self._cell(px, pz)
+        rings = int(radius // self.GRID) + 1
+        instances, seen_instances = [], set()
+        for dx in range(-rings, rings + 1):
+            for dz in range(-rings, rings + 1):
+                for instance in self._prefab_grid.get((cx + dx, cz + dz), ()):
+                    marker = (instance[0], instance[1])
+                    if (marker in seen_instances
+                            or route_start_uid not in instance[1]):
+                        continue
+                    seen_instances.add(marker)
+                    instances.append(instance)
+
+        result, seen_lanes = [], set()
+        for instance in instances:
+            token, uids = instance[:2]
+            lane_data = self._prefab_lane_data.get(token) or {}
+            try:
+                end_item = uids.index(route_start_uid)
+                node_data = lane_data["nodes"][end_item]
+            except (ValueError, IndexError, KeyError, TypeError):
+                continue
+            output_lanes = tuple(node_data.get("output_lanes", ()))
+            prefab_path = str(lane_data.get("path", "")).lower()
+
+            def make_segment(start_uid, indices, points):
+                exit_curve = indices[-1]
+                lane_index = (output_lanes.index(exit_curve)
+                              if exit_curve in output_lanes else 0)
+                lane_id = LaneId(
+                    min(uids), 1, lane_index, token, indices[0], indices)
+                return LaneSegment(
+                    lane_id, start_uid, route_start_uid, 1, lane_index,
+                    max(1, len(output_lanes)), 4.5, "derived",
+                    int(round(points[len(points)//2].y / 3.0)), None,
+                    ("roundabout" if "roundabout" in prefab_path
+                     else "prefab"),
+                    points, connector_curve_indices=indices,
+                    gps_uids=frozenset((route_start_uid,)))
+
+            for start_uid in uids:
+                if start_uid == route_start_uid:
+                    continue
+                for option in self._prefab_connector_options(
+                        instance, start_uid, route_start_uid):
+                    points = self._prefab_curve_chain_3d(instance, option)
+                    if len(points) < 2:
+                        continue
+                    segment = make_segment(start_uid, option, points)
+                    projected = LaneLocator._project(position, segment)
+                    if projected is None or projected[0] > radius:
+                        continue
+                    # At a converged output the entrance history is behind the
+                    # truck and cannot identify a different current lane. Use
+                    # the exact terminal navCurve as its canonical identity.
+                    terminal = (option[-1],)
+                    terminal_points = self._prefab_curve_chain_3d(
+                        instance, terminal)
+                    if len(terminal_points) >= 2:
+                        terminal_segment = make_segment(
+                            route_start_uid, terminal, terminal_points)
+                        terminal_projection = LaneLocator._project(
+                            position, terminal_segment)
+                        if (terminal_projection is not None
+                                and terminal_projection[0]
+                                    <= projected[0] + 1e-6):
+                            segment = terminal_segment
+                    lane_id = segment.lane_id
+                    if lane_id in seen_lanes:
+                        continue
+                    seen_lanes.add(lane_id)
+                    if register:
+                        self._lane_id_index[lane_id] = segment
+                    result.append(segment)
+        return tuple(result)
+
+    def gps_prefab_lane_segments_near(self, position, gps_uids, radius=28.0,
+                                      register=True):
+        """Expose only directly GPS-proven prefab lanes to LaneLocator."""
+        if not self.loaded or len(position) < 3:
+            return ()
+        gps_uids = tuple(_uid(value) for value in gps_uids if _uid(value))
+        if any(uid not in self.nodes for uid in gps_uids):
+            return ()
+        result, seen = [], set()
+        for pair_index, (start_uid, end_uid) in enumerate(
+                zip(gps_uids, gps_uids[1:])):
+            if start_uid == end_uid:
+                continue
+            edge = self._classify_corridor_edge(
+                start_uid, end_uid, pair_index)
+            if edge is None:
+                # Never jump ahead to a geometrically nearby later arm after
+                # the current GPS prefix has already lost topology.
+                break
+            if edge.kind != "prefab":
+                continue
+            lane_count = 0
+            for instance in edge.prefab_instance or ():
+                lane_data = self._prefab_lane_data.get(instance[0]) or {}
+                try:
+                    start_item = instance[1].index(start_uid)
+                    lane_count = max(lane_count, len(
+                        lane_data["nodes"][start_item]["input_lanes"]))
+                except (ValueError, IndexError, KeyError, TypeError):
+                    continue
+            for lane_index in range(max(1, lane_count)):
+                segment, _reason = self._prefab_lane_segment(
+                    edge, lane_index, position, register=register)
+                if segment is None or segment.lane_id in seen:
+                    continue
+                projected = LaneLocator._project(position, segment)
+                if projected is None or projected[0] > radius:
+                    continue
+                seen.add(segment.lane_id)
+                result.append(segment)
+        return tuple(result)
 
     def _graph_lane_segment(self, edge, previous):
         if previous is None:
@@ -1464,6 +1626,24 @@ class RoadNetwork:
                 current = self._retarget_road_start_from_prefab(
                     selected[-1], current)
             if selected:
+                if (selected[-1].lane_id.prefab_token not in (None, "graph")
+                        and current.lane_id.prefab_token not in (None, "graph")):
+                    previous_end = selected[-1].centerline[-1]
+                    current_start = current.centerline[0]
+                    heading = selected[-1].centerline[-1].heading
+                    right_x, right_z = -math.cos(heading), math.sin(heading)
+                    lateral = ((current_start.x - previous_end.x) * right_x
+                               + (current_start.z - previous_end.z) * right_z)
+                    elevation = current_start.y - previous_end.y
+                    gap = math.dist(
+                        (previous_end.x, previous_end.y, previous_end.z),
+                        (current_start.x, current_start.y, current_start.z))
+                    if gap > 0.35:
+                        return tuple(selected), (
+                            "prefab lane identity mismatch at UID "
+                            f"{current.start_uid}: geometry gap {gap:.2f} m "
+                            f"(lateral offset {abs(lateral):.2f} m, "
+                            f"elevation {abs(elevation):.2f} m)")
                 connection = self._lane_connection(selected[-1], current)
                 if connection is None:
                     return tuple(selected), (
@@ -1655,6 +1835,14 @@ class RoadNetwork:
                                 (segment.centerline[0].x,
                                  segment.centerline[0].y,
                                  segment.centerline[0].z))
+                if (gap > 0.35
+                        and previous.lane_id.prefab_token not in (None, "graph")
+                        and segment.lane_id.prefab_token not in (None, "graph")):
+                    return LanePath(
+                        segments, tuple(points), uids, valid=False,
+                        failure_reason=(
+                            "unproven prefab geometry chord of "
+                            f"{gap:.2f} m at UID {segment.start_uid}"))
                 if gap > 6.0:
                     return LanePath(segments, tuple(points), uids, valid=False,
                         failure_reason=(f"confirmed lane transition has {gap:.1f} m "
@@ -1772,7 +1960,7 @@ class RoadNetwork:
                     "gps_uid": (edge.start_uid if edge else None),
                     "road_token": (last.road_look_token if last else None),
                     "prefab_token": (
-                        edge.prefab_instance[0]
+                        edge.prefab_instance[0][0]
                         if edge and edge.prefab_instance else
                         last.lane_id.prefab_token if last else None),
                     "lane_id_after": ({
@@ -1812,8 +2000,29 @@ class RoadNetwork:
                 segments = tuple(segments[active_index:])
                 active = segments[0]
             else:
-                connection = (self._lane_connection(active, segments[0])
-                              if active.end_uid == segments[0].start_uid else None)
+                prefix = None
+                if active.end_uid != segments[0].start_uid:
+                    prefix_edge = self._classify_corridor_edge(
+                        active.end_uid, segments[0].start_uid, -1)
+                    if prefix_edge is not None and prefix_edge.kind == "prefab":
+                        prefix, _reason = self._prefab_lane_segment(
+                            prefix_edge, active.lane_index,
+                            active.centerline[-1])
+                if prefix is not None:
+                    active = self._retarget_road_end_to_prefab(active, prefix)
+                    first_connection = self._lane_connection(active, prefix)
+                    next_connection = self._lane_connection(prefix, segments[0])
+                    if first_connection is not None and next_connection is not None:
+                        active = replace(active, successors=(first_connection,))
+                        prefix = replace(prefix, successors=(next_connection,))
+                        segments = (active, prefix) + tuple(segments)
+                        connection = first_connection
+                    else:
+                        connection = None
+                else:
+                    connection = (self._lane_connection(active, segments[0])
+                                  if active.end_uid == segments[0].start_uid
+                                  else None)
                 if connection is None:
                     # The GPS buffer may start at the next anchor, but it may
                     # not start on an unrelated parallel arm.
@@ -1828,8 +2037,9 @@ class RoadNetwork:
                         safe_diagnostic_call(diagnostics, "fail_phase",
                                              "LanePath", failed.failure_reason)
                     return failed, match
-                active = replace(active, successors=(connection,))
-                segments = (active,) + tuple(segments)
+                if prefix is None:
+                    active = replace(active, successors=(connection,))
+                    segments = (active,) + tuple(segments)
 
         # Trim the actual first LaneSegment as well as the flattened LanePath.
         # build_lane_trajectory() deliberately rebuilds its control geometry

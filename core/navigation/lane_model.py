@@ -202,6 +202,45 @@ class LaneLocator:
         directed_gps_edges = frozenset(zip(gps_order, gps_order[1:]))
         candidates = self.network.lane_segments_near(
             (px, pz), self.config.search_radius_m)
+        prefix_candidates = getattr(
+            self.network, "route_prefix_lane_segments_near", None)
+        if gps_order and callable(prefix_candidates):
+            candidates = list(candidates) + list(prefix_candidates(
+                (px, py, pz), gps_order, self.config.search_radius_m,
+                register=not diagnostic_mode))
+        route_candidates = getattr(
+            self.network, "gps_prefab_lane_segments_near", None)
+        if len(gps_order) >= 2 and callable(route_candidates):
+            candidates = list(candidates) + list(route_candidates(
+                (px, py, pz), gps_order, self.config.search_radius_m,
+                register=not diagnostic_mode))
+        # The same terminal navCurve can be both the route-prefix candidate
+        # and a directly GPS-proven candidate. It is one lane, not an
+        # ambiguity merely because two conservative queries returned it.
+        unique_candidates = {}
+        candidate_signatures = {}
+        colliding_lane_ids = set()
+        for candidate in candidates:
+            signature = (
+                candidate.start_uid, candidate.end_uid, candidate.direction,
+                candidate.lane_index, candidate.lane_count,
+                candidate.width_m, candidate.width_source,
+                candidate.elevation_layer, candidate.road_look_token,
+                candidate.lane_type, candidate.connector_curve_indices,
+                candidate.raw_lane_index, candidate.centerline,
+            )
+            previous_signature = candidate_signatures.get(candidate.lane_id)
+            if previous_signature is None:
+                unique_candidates[candidate.lane_id] = candidate
+                candidate_signatures[candidate.lane_id] = signature
+            elif previous_signature != signature:
+                # One LaneId cannot identify two directions, geometries or
+                # elevation layers. Keeping either candidate would make query
+                # order decide navigation authority, so reject the collision.
+                colliding_lane_ids.add(candidate.lane_id)
+        candidates = [candidate for lane_id, candidate
+                      in unique_candidates.items()
+                      if lane_id not in colliding_lane_ids]
         if diagnostics is not None:
             diagnostics.clear()
             diagnostics.update({
@@ -216,6 +255,9 @@ class LaneLocator:
             if projected is None:
                 continue
             distance, point, segment_index, point_index, signed, vertical = projected
+            lateral = abs(signed)
+            longitudinal = math.sqrt(max(
+                0.0, distance * distance - lateral * lateral))
             heading_error = abs(wrap_angle(heading - point.heading))
             candidate_diagnostic = None
             if diagnostics is not None:
@@ -232,6 +274,7 @@ class LaneLocator:
                     "prefab_token": lane.lane_id.prefab_token,
                     "distance_m": float(distance),
                     "signed_lateral_m": float(signed),
+                    "longitudinal_overrun_m": float(longitudinal),
                     "nearest_world": {
                         "x": float(point.x), "y": float(point.y),
                         "z": float(point.z),
