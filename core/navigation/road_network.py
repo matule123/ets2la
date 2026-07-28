@@ -26,6 +26,9 @@ from core.navigation.lane_model import (
     GpsCorridor, GpsCorridorEdge, LaneConnection, LaneId, LaneLocator,
     LanePath, LanePoint, LaneSegment,
 )
+from core.navigation.route_diagnostics import (
+    lane_id_payload, safe_diagnostic_call,
+)
 from core.navigation.road_look_offsets_159 import LANE_OFFSETS_159
 
 CACHE_VERSION = 9  # includes per-lane road-look offsets omitted by legacy JSON
@@ -1694,12 +1697,36 @@ class RoadNetwork:
                         True, "", self._lane_path_revision)
 
     def build_lane_path(self, gps_uids, position, heading, altitude=None,
-                        previous_match=None, start_match=None):
+                        previous_match=None, start_match=None,
+                        diagnostics=None):
         """Convenience pipeline used by tests and the future map-plugin switch."""
+        if diagnostics is not None:
+            safe_diagnostic_call(diagnostics, "start_phase",
+                                 "resolve_gps_corridor", {
+                "gps_uid_count": len(tuple(gps_uids or ())),
+            })
         corridor = self.resolve_gps_corridor(gps_uids)
         if not corridor.valid:
+            if diagnostics is not None:
+                missing = next((
+                    (index, uid) for index, uid in enumerate(corridor.gps_uids)
+                    if uid not in self.nodes), (None, None))
+                safe_diagnostic_call(
+                    diagnostics, "fail_phase", "resolve_gps_corridor",
+                    corridor.failure_reason, {
+                        "gps_uid_index": missing[0],
+                        "gps_uid": missing[1],
+                        "resolved_edge_count": len(corridor.edges),
+                    })
             return LanePath((), (), corridor.gps_uids, valid=False,
                             failure_reason=corridor.failure_reason), None
+        if diagnostics is not None:
+            safe_diagnostic_call(diagnostics, "finish_phase",
+                                 "resolve_gps_corridor", details={
+                "gps_uid_count": len(corridor.gps_uids),
+                "edge_count": len(corridor.edges),
+                "edge_kinds": [edge.kind for edge in corridor.edges],
+            })
         if altitude is None:
             locator_position = tuple(position[:2])
         else:
@@ -1707,12 +1734,65 @@ class RoadNetwork:
                                 float(position[1]))
         match = start_match
         if match is None:
+            locator_capture = {} if diagnostics is not None else None
+            if diagnostics is not None:
+                safe_diagnostic_call(diagnostics, "start_phase", "LaneLocator")
             match = LaneLocator(self).locate(locator_position, heading,
-                                             corridor.gps_uids, previous_match)
+                                             corridor.gps_uids, previous_match,
+                                             diagnostics=locator_capture)
+            if diagnostics is not None:
+                safe_diagnostic_call(diagnostics, "observe_locator",
+                                     locator_capture, match)
+                if match is None:
+                    reason = ("LaneLocator result is ambiguous" if
+                              locator_capture.get("outcome") == "ambiguous" else
+                              "LaneLocator did not confirm a starting lane")
+                    safe_diagnostic_call(diagnostics, "fail_phase",
+                                         "LaneLocator", reason,
+                                         locator_capture)
+                else:
+                    safe_diagnostic_call(diagnostics, "finish_phase",
+                                         "LaneLocator", details={
+                        "outcome": "matched",
+                        "lane_id": lane_id_payload(match.lane_id),
+                        "confidence": float(match.confidence),
+                    })
+        if diagnostics is not None:
+            safe_diagnostic_call(diagnostics, "start_phase",
+                                 "select_lane_sequence")
         segments, reason = self.select_lane_sequence(corridor, match)
         if reason:
+            if diagnostics is not None:
+                edge_index = min(len(segments), max(0, len(corridor.edges) - 1))
+                edge = corridor.edges[edge_index] if corridor.edges else None
+                last = segments[-1] if segments else None
+                safe_diagnostic_call(diagnostics, "fail_phase",
+                                     "select_lane_sequence", reason, {
+                    "gps_uid_index": (edge.gps_pair_index if edge else None),
+                    "gps_uid": (edge.start_uid if edge else None),
+                    "road_token": (last.road_look_token if last else None),
+                    "prefab_token": (
+                        edge.prefab_instance[0]
+                        if edge and edge.prefab_instance else
+                        last.lane_id.prefab_token if last else None),
+                    "lane_id_after": ({
+                        "road_uid": int(last.lane_id.road_uid),
+                        "direction": int(last.lane_id.direction),
+                        "lane_index": int(last.lane_id.lane_index),
+                        "prefab_token": last.lane_id.prefab_token,
+                        "connector_index": last.lane_id.connector_index,
+                        "connector_path": list(last.lane_id.connector_path),
+                    } if last else None),
+                    "selected_segment_count": len(segments),
+                })
             return LanePath(segments, (), corridor.gps_uids, valid=False,
                             failure_reason=reason), match
+        if diagnostics is not None:
+            safe_diagnostic_call(diagnostics, "finish_phase",
+                                 "select_lane_sequence", details={
+                "segment_count": len(segments),
+                "lane_ids": [str(segment.lane_id) for segment in segments],
+            })
         # The rolling SDK route begins at the next GPS anchor. The truck may
         # still be on the confirmed incoming lane leading to that anchor. Add
         # this real lane segment before the first corridor edge so HUD, AR and
@@ -1737,11 +1817,17 @@ class RoadNetwork:
                 if connection is None:
                     # The GPS buffer may start at the next anchor, but it may
                     # not start on an unrelated parallel arm.
-                    return LanePath(
+                    failed = LanePath(
                         tuple(segments), (), corridor.gps_uids, valid=False,
                         failure_reason=(
                             "current truck lane does not connect to the first GPS "
-                            f"lane ({active.lane_id} -> {segments[0].lane_id})")), match
+                            f"lane ({active.lane_id} -> {segments[0].lane_id})"))
+                    if diagnostics is not None:
+                        safe_diagnostic_call(diagnostics, "observe_lane_path",
+                                             failed)
+                        safe_diagnostic_call(diagnostics, "fail_phase",
+                                             "LanePath", failed.failure_reason)
+                    return failed, match
                 active = replace(active, successors=(connection,))
                 segments = (active,) + tuple(segments)
 
@@ -1767,16 +1853,42 @@ class RoadNetwork:
                     (point.x, point.y, point.z),
                     (trimmed[-1].x, trimmed[-1].y, trimmed[-1].z)) > 1e-6)
                 if len(trimmed) < 2:
-                    return LanePath(
+                    failed = LanePath(
                         tuple(segments), (), corridor.gps_uids, valid=False,
                         failure_reason=(
                             "confirmed truck position leaves no forward "
-                            "geometry on the first GPS lane")), match
+                            "geometry on the first GPS lane"))
+                    if diagnostics is not None:
+                        safe_diagnostic_call(diagnostics, "observe_lane_path",
+                                             failed)
+                        safe_diagnostic_call(diagnostics, "fail_phase",
+                                             "LanePath", failed.failure_reason)
+                    return failed, match
                 first = replace(first, centerline=tuple(trimmed))
                 segments = (first,) + tuple(segments[1:])
+        if diagnostics is not None:
+            safe_diagnostic_call(diagnostics, "start_phase",
+                                 "connect_lane_sequence")
         path = self.connect_lane_sequence(segments, corridor.gps_uids)
+        if diagnostics is not None:
+            safe_diagnostic_call(diagnostics, "observe_lane_path", path)
+            if path.valid:
+                safe_diagnostic_call(diagnostics, "finish_phase",
+                                     "connect_lane_sequence", details={
+                    "segment_count": len(path.segments),
+                    "point_count": len(path.points),
+                    "distance_m": float(path.distance_m),
+                    "confidence": float(path.confidence),
+                })
+            else:
+                safe_diagnostic_call(diagnostics, "fail_phase",
+                                     "connect_lane_sequence",
+                                     path.failure_reason)
         if not path.valid or match is None or len(path.points) < 2:
             return path, match
+
+        if diagnostics is not None:
+            safe_diagnostic_call(diagnostics, "start_phase", "LanePath")
 
         # A valid topology is still not enough for runtime steering: the
         # published polyline must begin at the lane actually occupied by the
@@ -1789,11 +1901,17 @@ class RoadNetwork:
             (path.points[nearest].x, path.points[nearest].y, path.points[nearest].z),
             (match.point.x, match.point.y, match.point.z))
         if nearest_distance > 3.0:
-            return replace(
+            failed = replace(
                 path, valid=False,
                 failure_reason=(
                     f"first GPS lane is offset {nearest_distance:.1f} m from "
-                    "the confirmed truck lane")), match
+                    "the confirmed truck lane"))
+            if diagnostics is not None:
+                safe_diagnostic_call(diagnostics, "fail_phase",
+                                     "LanePath", failed.failure_reason, {
+                    "geometry": {"gap_m": float(nearest_distance)},
+                })
+            return failed, match
         probe = min(len(path.points) - 1, nearest + 2)
         if probe > nearest:
             dx = path.points[probe].x - path.points[nearest].x
@@ -1803,12 +1921,21 @@ class RoadNetwork:
                 heading_error = abs((path_heading - match.point.heading + math.pi)
                                     % (2.0 * math.pi) - math.pi)
                 if heading_error > math.radians(35.0):
-                    return replace(
+                    failed = replace(
                         path, valid=False,
                         failure_reason=(
                             "first GPS lane points away from the confirmed "
                             f"truck lane by {math.degrees(heading_error):.1f} "
-                            "degrees")), match
+                            "degrees"))
+                    if diagnostics is not None:
+                        safe_diagnostic_call(
+                            diagnostics, "fail_phase", "LanePath",
+                            failed.failure_reason, {
+                            "geometry": {
+                                "heading_jump_deg": math.degrees(heading_error),
+                            },
+                        })
+                    return failed, match
 
         # The native GPS buffer can begin at the entrance of a prefab while
         # the truck is already part-way through it. Publishing those points
@@ -1826,6 +1953,13 @@ class RoadNetwork:
                 rebuilt.append(replace(point, s=distance))
             path = replace(path, points=tuple(rebuilt), distance_m=distance,
                            confidence=min(path.confidence, match.confidence))
+        if diagnostics is not None:
+            safe_diagnostic_call(diagnostics, "finish_phase",
+                                 "LanePath", details={
+                "valid": True,
+                "point_count": len(path.points),
+                "nearest_truck_distance_m": float(nearest_distance),
+            })
         return path, match
 
     def refine_route(self, uids, progress=None):

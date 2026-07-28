@@ -387,6 +387,10 @@ class MapPage(QWidget):
         self.dl_status.setWordWrap(True)
         self.dl_status.setStyleSheet("color:#7B818A!important;font-size:11px;")
         ctl.addWidget(self.dl_status)
+        self.btn_diag = QPushButton("Save last route diagnostic")
+        self.btn_diag.clicked.connect(self.save_route_diagnostic)
+        self.btn_diag.setEnabled(False)
+        ctl.addWidget(self.btn_diag)
         ctl.addStretch()
         content.addWidget(controls)
 
@@ -406,6 +410,7 @@ class MapPage(QWidget):
         self.timer.timeout.connect(self.refresh)
         self.timer.start(250)
         self._last_routes = None
+        self._last_diag_export_result = None
 
     def restyle(self, theme):
         """Re-apply palette colours when the theme switches (dark ↔ light)."""
@@ -587,6 +592,16 @@ class MapPage(QWidget):
         self.state.set("nav_cmd", "stop")
         self.status.setText("Navigation stopped.")
 
+    def save_route_diagnostic(self):
+        result = self.state.get("route_diagnostic_last_result") or {}
+        build_id = result.get("route_build_id")
+        if not build_id or result.get("status") == "success":
+            self.status.setText("No failed route calculation is available.")
+            return
+        self.state.set("route_diagnostic_export_result", None)
+        self.state.set("route_diagnostic_export_request", build_id)
+        self.status.setText("Saving anonymized route diagnostic…")
+
     def refresh(self):
         # The engine may auto-select a compatible dataset after comparing live
         # GPS node UIDs. Reload that same network in the UI process as well.
@@ -647,6 +662,19 @@ class MapPage(QWidget):
             ms = self.state.get("map_status")
             if ms:
                 self.status.setText(str(ms))
+        diagnostic = self.state.get("route_diagnostic_last_result") or {}
+        self.btn_diag.setEnabled(bool(
+            diagnostic.get("route_build_id")
+            and diagnostic.get("status") != "success"))
+        export_result = self.state.get("route_diagnostic_export_result")
+        if export_result and export_result != self._last_diag_export_result:
+            self._last_diag_export_result = dict(export_result)
+            if export_result.get("ok"):
+                self.status.setText(
+                    f"Diagnostic saved: {export_result.get('path', '')}")
+            else:
+                self.status.setText(str(export_result.get(
+                    "message", "Diagnostic could not be saved.")))
         # Keep the active-map badge in sync with whatever the map plugin
         # published (so the user sees the real running map, not just the
         # last selection from the combo).

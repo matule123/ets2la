@@ -12,6 +12,7 @@ import math
 from typing import Optional, Sequence
 
 from core.navigation.lane_model import LanePath, LanePoint, LaneSegment, wrap_angle
+from core.navigation.route_diagnostics import safe_diagnostic_call
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,26 +257,43 @@ def _source_length(segments):
     return total
 
 
-def build_lane_trajectory(lane_path: LanePath, spacing_m: float = 2.0) -> LanePath:
+def build_lane_trajectory(lane_path: LanePath, spacing_m: float = 2.0,
+                          diagnostics=None) -> LanePath:
     """Build a uniformly sampled, lane-bounded control trajectory."""
+    if diagnostics is not None:
+        safe_diagnostic_call(diagnostics, "start_phase", "build_lane_trajectory", {
+            "spacing_m": float(spacing_m),
+            "input_segment_count": len(getattr(lane_path, "segments", ()) or ()),
+            "input_point_count": len(getattr(lane_path, "points", ()) or ()),
+        })
+
+    def failed(result):
+        if diagnostics is not None:
+            safe_diagnostic_call(diagnostics, "observe_lane_path", result)
+            safe_diagnostic_call(diagnostics, "fail_phase",
+                                 "build_lane_trajectory", result.failure_reason)
+        return result
+
     if not isinstance(lane_path, LanePath) or not lane_path.valid:
         reason = getattr(lane_path, "failure_reason", "") or "input LanePath is invalid"
-        return _invalid(lane_path, reason) if isinstance(lane_path, LanePath) else LanePath(
-            (), (), valid=False, failure_reason=reason)
+        return failed(
+            _invalid(lane_path, reason) if isinstance(lane_path, LanePath)
+            else LanePath((), (), valid=False, failure_reason=reason))
     if not (0.75 <= float(spacing_m) <= 3.0):
-        return _invalid(lane_path,
-                        f"control spacing {spacing_m!r} m is outside 0.75..3.0 m")
+        return failed(_invalid(lane_path,
+            f"control spacing {spacing_m!r} m is outside 0.75..3.0 m"))
     if not lane_path.segments:
-        return _invalid(lane_path, "input LanePath has no LaneSegments")
+        return failed(_invalid(lane_path, "input LanePath has no LaneSegments"))
     if any(not _finite_point(point)
            for segment in lane_path.segments for point in segment.centerline):
-        return _invalid(lane_path, "input LanePath contains non-finite geometry")
+        return failed(_invalid(
+            lane_path, "input LanePath contains non-finite geometry"))
     for segment in lane_path.segments:
         if any(math.dist(_xyz(first), _xyz(second)) <= 1e-6
                for first, second in zip(segment.centerline,
                                         segment.centerline[1:])):
-            return _invalid(lane_path,
-                            f"LaneSegment {segment.lane_id} has duplicate points")
+            return failed(_invalid(lane_path,
+                f"LaneSegment {segment.lane_id} has duplicate points"))
         vectors = [(second.x-first.x, second.z-first.z)
                    for first, second in zip(segment.centerline,
                                             segment.centerline[1:])]
@@ -284,14 +302,14 @@ def build_lane_trajectory(lane_path: LanePath, spacing_m: float = 2.0) -> LanePa
             if (first_len > 1e-6 and second_len > 1e-6
                     and (first[0]*second[0] + first[1]*second[1])
                         / (first_len*second_len) < -0.5):
-                return _invalid(lane_path,
-                    f"LaneSegment {segment.lane_id} reverses direction")
+                return failed(_invalid(lane_path,
+                    f"LaneSegment {segment.lane_id} reverses direction"))
 
     sampled_segments = []
     for segment_index, segment in enumerate(lane_path.segments):
         if len(segment.centerline) < 2:
-            return _invalid(lane_path,
-                            f"LaneSegment {segment.lane_id} has fewer than two points")
+            return failed(_invalid(lane_path,
+                f"LaneSegment {segment.lane_id} has fewer than two points"))
         fair = _fair_ordinary_segment(segment)
         sampled = _resample_polyline(fair, spacing_m, segment.lane_id,
                                      segment_index)
@@ -304,13 +322,13 @@ def build_lane_trajectory(lane_path: LanePath, spacing_m: float = 2.0) -> LanePa
             previous = lane_path.segments[segment_index-1]
             if not any(connection.target == segment.lane_id
                        for connection in previous.successors):
-                return _invalid(lane_path,
-                    f"unconfirmed topology {previous.lane_id} -> {segment.lane_id}")
+                return failed(_invalid(lane_path,
+                    f"unconfirmed topology {previous.lane_id} -> {segment.lane_id}"))
             gap = math.dist(_xyz(flattened[-1]), _xyz(sampled[0]))
             if gap > 6.0:
-                return _invalid(lane_path,
+                return failed(_invalid(lane_path,
                     f"confirmed segment boundary has {gap:.2f} m gap at "
-                    f"UID {segment.start_uid}")
+                    f"UID {segment.start_uid}"))
             if gap > 0.25:
                 interval_count = max(1, int(math.ceil(gap / spacing_m)))
                 start, end = flattened[-1], sampled[0]
@@ -333,11 +351,31 @@ def build_lane_trajectory(lane_path: LanePath, spacing_m: float = 2.0) -> LanePa
     if source_length > 1e-6:
         length_ratio = abs(result.distance_m-source_length) / source_length
         if length_ratio > MAX_LENGTH_CHANGE_RATIO:
-            return _invalid(result,
-                f"trajectory length changed by {length_ratio*100:.2f}%")
+            return failed(_invalid(result,
+                f"trajectory length changed by {length_ratio*100:.2f}%"))
+    if diagnostics is not None:
+        safe_diagnostic_call(diagnostics, "observe_lane_path", result)
+        safe_diagnostic_call(diagnostics, "finish_phase",
+                             "build_lane_trajectory", details={
+            "output_point_count": len(result.points),
+            "distance_m": float(result.distance_m),
+        })
+        safe_diagnostic_call(diagnostics, "start_phase",
+                             "validate_lane_trajectory")
     validation = validate_lane_trajectory(result)
+    if diagnostics is not None:
+        metrics = (safe_diagnostic_call(
+            diagnostics, "observe_validation", validation) or {})
     if not validation.valid:
-        return _invalid(result, validation.failure_reason)
+        invalid = _invalid(result, validation.failure_reason)
+        if diagnostics is not None:
+            safe_diagnostic_call(diagnostics, "fail_phase",
+                                 "validate_lane_trajectory",
+                                 validation.failure_reason, metrics)
+        return invalid
+    if diagnostics is not None:
+        safe_diagnostic_call(diagnostics, "finish_phase",
+                             "validate_lane_trajectory", details=metrics)
     return result
 
 

@@ -5,6 +5,11 @@ import time
 from sdk.base_plugin import BasePlugin
 from core.navigation.route import Route
 from core.navigation.lane_trajectory import build_lane_trajectory
+from core.navigation.route_diagnostics import (
+    RouteBuildDiagnostics, classify_failure, dataset_fingerprint,
+    export_anonymized_failure, friendly_failure_message,
+    safe_diagnostic_call,
+)
 from core.navigation.runtime_preflight import CONFIDENCE_THRESHOLD
 from core.paths import app_dir
 
@@ -58,12 +63,12 @@ class Plugin(BasePlugin):
         self._lane_match = None
         self._lane_revision = int(self.sdk.get(
             "lane_trajectory_revision", 0) or 0)
-        self._lane_diag_t = 0.0
         self._navigation_log_seq = int(self.sdk.get(
             "navigation_log_seq", 0) or 0)
         self._lane_failure_signature = None
         self._last_logged_lane_failure = None
         self._lane_retry_at = 0.0
+        self._last_failed_route_diagnostic = None
         # A plugin/process restart is not an explicit replay activation.
         # Manager-backed shared state can outlive this object, so discard only
         # stale recorded-route ownership while leaving a GPS snapshot intact.
@@ -101,6 +106,143 @@ class Plugin(BasePlugin):
             "lane_trajectory_revision", 0) or 0)
         self._lane_revision = max(self._lane_revision, shared_revision) + 1
         return self._lane_revision
+
+    def _next_route_build_revision(self):
+        """Return the next publishable revision without reserving runtime state."""
+        shared_revision = int(self.sdk.get(
+            "lane_trajectory_revision", 0) or 0)
+        return max(self._lane_revision, shared_revision) + 1
+
+    def _route_build_environment(self):
+        return {
+            "active_map_key": self.sdk.get("active_map_key"),
+            "active_map_name": self.sdk.get("active_map_name"),
+            "game_version": self.sdk.get("installed_game_version"),
+            "dataset_fingerprint": self.sdk.get(
+                "active_dataset_fingerprint", "unavailable") or "unavailable",
+        }
+
+    def _new_route_diagnostics(self, uids, pos, altitude, heading,
+                               started_monotonic=None):
+        return RouteBuildDiagnostics(
+            self._next_route_build_revision(), uids,
+            (float(pos[0]), float(altitude), float(pos[1])), float(heading),
+            self._route_build_environment(),
+            started_monotonic=started_monotonic)
+
+    def _remember_route_diagnostic(self, diagnostic, status):
+        record = (safe_diagnostic_call(diagnostic, "finish", status)
+                  or getattr(diagnostic, "record", {}) or {})
+        try:
+            failure = record.get("failure") or {}
+            summary = {
+                "route_build_id": record.get("route_build_id"),
+                "revision": record.get("revision"),
+                "status": record.get("status", status),
+                "failure_code": failure.get("code"),
+                "failure_phase": failure.get("phase"),
+                "message": failure.get("friendly_message"),
+                "duration_ms": record.get("duration_ms"),
+                "phases": [{
+                    "name": phase.get("name"),
+                    "status": phase.get("status"),
+                    "duration_ms": phase.get("duration_ms"),
+                } for phase in record.get("phases", ())],
+            }
+            self.sdk.set("route_diagnostic_last_result", summary)
+            if status != "success":
+                self._last_failed_route_diagnostic = record
+        except Exception:
+            # Diagnostic publication is never part of navigation authority.
+            pass
+        return record
+
+    def _fail_route_build(self, diagnostic, reason, uids, status=None):
+        record = getattr(diagnostic, "record", {}) or {}
+        failure = record.get("failure") or {}
+        if failure.get("code") is None:
+            safe_diagnostic_call(diagnostic, "fail_phase", "route_build", reason)
+            failure = (getattr(diagnostic, "record", {}) or {}).get(
+                "failure") or {}
+        failure_code = failure.get("code") or classify_failure(
+            "route_build", reason)
+        friendly = (failure.get("friendly_message")
+                    or friendly_failure_message(failure_code))
+        safe_diagnostic_call(diagnostic, "start_phase", "publish_snapshot", {
+            "valid": False, "failure_code": failure_code,
+        })
+        snapshot = self._publish_invalid_lane_trajectory(
+            reason, uids, status or friendly,
+            revision=diagnostic.revision,
+            route_build_id=diagnostic.build_id,
+            failure_code=failure_code)
+        safe_diagnostic_call(diagnostic, "finish_phase", "publish_snapshot",
+                             details={
+            "published_revision": snapshot["revision"], "valid": False,
+            "point_count": 0,
+        })
+        self._remember_route_diagnostic(diagnostic, "failed")
+        return snapshot
+
+    def _finish_stale_route_build(self, diagnostic, reason,
+                                  source_revision=None):
+        safe_diagnostic_call(diagnostic, "fail_phase", "stale_revision", reason, {
+            "source_revision": source_revision,
+            "target_revision": diagnostic.revision,
+            "current_revision": int(self.sdk.get(
+                "lane_trajectory_revision", -1) or -1),
+        })
+        self._remember_route_diagnostic(diagnostic, "stale")
+
+    def _handle_diagnostic_export(self):
+        request = self.sdk.get("route_diagnostic_export_request")
+        if not request:
+            return
+        record = self._last_failed_route_diagnostic
+        requested_id = None if request is True else str(request)
+        if record is None or (requested_id and requested_id != str(
+                record.get("route_build_id"))):
+            result = {
+                "ok": False,
+                "message": "Požadovaný neúspešný výpočet už nie je dostupný.",
+                "route_build_id": requested_id,
+                "path": None,
+            }
+        else:
+            try:
+                path = export_anonymized_failure(record)
+                result = {
+                    "ok": True,
+                    "message": "Anonymizovaná diagnostika bola uložená.",
+                    "route_build_id": record["route_build_id"],
+                    "path": path,
+                }
+                try:
+                    logging.info(
+                        "route-build diagnostic exported id=%s path=%s",
+                        record["route_build_id"], path)
+                except Exception:
+                    pass
+            except Exception as exc:
+                try:
+                    logging.exception(
+                        "route-build diagnostic export failed: %s", exc)
+                except Exception:
+                    pass
+                result = {
+                    "ok": False,
+                    "message": "Diagnostiku sa nepodarilo uložiť.",
+                    "route_build_id": record.get("route_build_id"),
+                    "path": None,
+                }
+        try:
+            self.sdk.shared_state.update_batch({
+                "route_diagnostic_export_request": None,
+                "route_diagnostic_export_result": result,
+            })
+        except Exception:
+            # Export reporting is optional and cannot gate route calculation.
+            pass
 
     @staticmethod
     def _normalise_gps_uids(raw_uids):
@@ -193,8 +335,12 @@ class Plugin(BasePlugin):
             and self.sdk.get("nav_recalc_request") == request_id)
 
     def _publish_invalid_lane_trajectory(self, reason, uids=(), status=None,
-                                         log_failure=True):
-        revision = self._next_lane_revision()
+                                         log_failure=True, revision=None,
+                                         route_build_id=None,
+                                         failure_code=None):
+        revision = (self._next_lane_revision() if revision is None
+                    else int(revision))
+        self._lane_revision = max(self._lane_revision, revision)
         snapshot = {
             "revision": revision, "valid": False, "confidence": 0.0,
             "active_lane_id": None, "lane_match": None,
@@ -202,6 +348,8 @@ class Plugin(BasePlugin):
             "failure_reason": str(reason or "Navigačná trajektória nie je platná"),
             "source_gps_uids": [int(uid) for uid in uids],
             "request_id": self.sdk.get("nav_recalc_request"),
+            "route_build_id": route_build_id,
+            "failure_code": failure_code,
         }
         gps_navigation_present = self._game_gps_navigation_present(
             include_snapshot=False)
@@ -221,7 +369,9 @@ class Plugin(BasePlugin):
         })
         if status:
             technical = str(status)
-            friendly = ("Trasu sa nepodarilo bezpečne zostaviť"
+            friendly = (friendly_failure_message(failure_code)
+                        if failure_code else
+                        "Trasu sa nepodarilo bezpečne zostaviť"
                         if any(word in technical.lower() for word in
                                ("geometry gap", "lane transition", "laneconnection",
                                 "topology", "corridor edge"))
@@ -232,16 +382,22 @@ class Plugin(BasePlugin):
             failure_signature = (tuple(int(uid) for uid in uids), technical_reason)
             if getattr(self, "_last_logged_lane_failure", None) != failure_signature:
                 self._last_logged_lane_failure = failure_signature
-                logging.error(
-                    "Navigation calculation failed: %s (GPS UID count=%d, revision=%d)",
-                    technical_reason, len(tuple(uids)), revision)
+                try:
+                    logging.error(
+                        "Navigation calculation failed: %s "
+                        "(GPS UID count=%d, revision=%d)",
+                        technical_reason, len(tuple(uids)), revision)
+                except Exception:
+                    pass
                 self._navigation_log_seq += 1
                 self.sdk.shared_state.update_batch({
                     "navigation_log_seq": self._navigation_log_seq,
                     "navigation_log_event": {
                         "seq": self._navigation_log_seq,
                         "level": "ERROR",
-                        "message": f"Výpočet navigácie zlyhal: {technical_reason}",
+                        "message": (friendly_failure_message(failure_code)
+                                    if failure_code else
+                                    "Výpočet navigácie zlyhal. Podrobnosti sú v logu."),
                     },
                 })
         self._lane_path = None
@@ -288,18 +444,82 @@ class Plugin(BasePlugin):
         if locator is None:
             from core.navigation.lane_model import LaneLocator
             locator = self.road_net._runtime_lane_locator = LaneLocator(self.road_net)
+        locator_started = time.monotonic()
+        diagnostic_requested = needs_build
+        locator_capture = {} if diagnostic_requested else None
         match = locator.locate((pos[0], altitude, pos[1]), heading, build_uids,
-                               self._lane_match)
+                               self._lane_match, diagnostics=locator_capture)
         if not self._build_is_current(uids, build_revision, build_request):
+            if diagnostic_requested:
+                diagnostic = self._new_route_diagnostics(
+                    uids, pos, altitude, heading, locator_started)
+                safe_diagnostic_call(diagnostic, "start_phase", "LaneLocator")
+                safe_diagnostic_call(diagnostic, "observe_locator",
+                                     locator_capture, match)
+                self._finish_stale_route_build(
+                    diagnostic, "GPS revision changed during LaneLocator",
+                    build_revision)
             return None
+        diagnostic = None
+        if diagnostic_requested:
+            diagnostic = self._new_route_diagnostics(
+                uids, pos, altitude, heading, locator_started)
+            safe_diagnostic_call(diagnostic, "start_phase", "LaneLocator")
         if match is None:
-            self._publish_invalid_lane_trajectory(
-                "Kamión sa nepodarilo spoľahlivo lokalizovať na GPS pruhu",
-                uids, "Kamión nie je na potvrdenom jazdnom pruhu")
+            if diagnostic is None:
+                diagnostic = self._new_route_diagnostics(
+                    uids, pos, altitude, heading, locator_started)
+                safe_diagnostic_call(diagnostic, "start_phase", "LaneLocator")
+                locator_capture = {}
+                locator.locate(
+                    (pos[0], altitude, pos[1]), heading, build_uids,
+                    self._lane_match, diagnostics=locator_capture,
+                    diagnostic_mode=True)
+            outcome = locator_capture.get("outcome", "no_match")
+            safe_diagnostic_call(diagnostic, "observe_locator",
+                                 locator_capture, None)
+            technical_reason = (
+                "LaneLocator found ambiguous candidate lanes"
+                if outcome == "ambiguous" else
+                "LaneLocator found no candidate satisfying route, distance, "
+                "heading, elevation and topology gates")
+            safe_diagnostic_call(
+                diagnostic, "fail_phase", "LaneLocator", technical_reason,
+                locator_capture,
+                duration_ms=(time.monotonic() - locator_started) * 1000.0)
+            self._fail_route_build(diagnostic, technical_reason, uids)
             return None
+        if diagnostic is not None:
+            safe_diagnostic_call(diagnostic, "observe_locator",
+                                 locator_capture, match)
+            safe_diagnostic_call(diagnostic, "finish_phase", "LaneLocator",
+                                 details={
+                "outcome": "matched",
+                "lane_id": self._lane_id_payload(match.lane_id),
+                "confidence": float(match.confidence),
+                "score_components": dict(match.score_components),
+            })
         if (self._lane_match is not None
                 and match.lane_id != self._lane_match.lane_id):
             needs_build = True
+            if diagnostic is None:
+                diagnostic = self._new_route_diagnostics(
+                    uids, pos, altitude, heading, locator_started)
+                safe_diagnostic_call(diagnostic, "start_phase", "LaneLocator")
+                locator_capture = {}
+                locator.locate(
+                    (pos[0], altitude, pos[1]), heading, build_uids,
+                    self._lane_match, diagnostics=locator_capture,
+                    diagnostic_mode=True)
+                safe_diagnostic_call(diagnostic, "observe_locator",
+                                     locator_capture, match)
+                safe_diagnostic_call(
+                    diagnostic, "finish_phase", "LaneLocator", details={
+                    "outcome": "lane_transition",
+                    "lane_id": self._lane_id_payload(match.lane_id),
+                    "confidence": float(match.confidence),
+                    "score_components": dict(match.score_components),
+                }, duration_ms=(time.monotonic()-locator_started)*1000.0)
         self._lane_match = match
         if not needs_build and self._lane_path is not None:
             # Keep the geometry snapshot immutable. Runtime localization and
@@ -320,30 +540,104 @@ class Plugin(BasePlugin):
             self.sdk.set("lane_trajectory_heartbeat", time.monotonic())
             return self._lane_path
 
+        # A manager-backed valid snapshot can survive a plugin restart while
+        # the in-process Route/LanePath objects do not. Rebuilding that missing
+        # runtime object is still one real calculation and therefore needs its
+        # own build id and target revision.
+        if diagnostic is None:
+            diagnostic = self._new_route_diagnostics(
+                uids, pos, altitude, heading, locator_started)
+            safe_diagnostic_call(diagnostic, "start_phase", "LaneLocator")
+            locator_capture = {}
+            locator.locate(
+                (pos[0], altitude, pos[1]), heading, build_uids,
+                self._lane_match, diagnostics=locator_capture,
+                diagnostic_mode=True)
+            safe_diagnostic_call(diagnostic, "observe_locator",
+                                 locator_capture, match)
+            safe_diagnostic_call(
+                diagnostic, "finish_phase", "LaneLocator", details={
+                "outcome": "matched_runtime_rebuild",
+                "lane_id": self._lane_id_payload(match.lane_id),
+                "confidence": float(match.confidence),
+                "score_components": dict(match.score_components),
+            }, duration_ms=(time.monotonic()-locator_started)*1000.0)
+
         self.sdk.set("navigation_status", "Vyberám jazdné pruhy")
-        lane_path, _ = self.road_net.build_lane_path(
-            build_uids, pos, heading, altitude=altitude, start_match=match)
+        try:
+            lane_path, _ = self.road_net.build_lane_path(
+                build_uids, pos, heading, altitude=altitude, start_match=match,
+                diagnostics=diagnostic)
+        except Exception as exc:
+            failure_time = time.monotonic()
+            technical_reason = (
+                f"{type(exc).__name__} while building LanePath: {exc}")
+            try:
+                logging.exception("route-build failed unexpectedly: %s",
+                                  technical_reason)
+            except Exception:
+                pass
+            safe_diagnostic_call(diagnostic, "fail_phase", "route_build",
+                                 technical_reason, {
+                "failure_code": "INTERNAL_ERROR",
+            })
+            snapshot = self._fail_route_build(
+                diagnostic, technical_reason, uids)
+            self._lane_failure_signature = (
+                uids, str(snapshot.get("failure_reason", "")))
+            self._lane_retry_at = failure_time + 1.0
+            return None
         if not self._build_is_current(uids, build_revision, build_request):
+            self._finish_stale_route_build(
+                diagnostic, "GPS revision changed while building LanePath",
+                build_revision)
             return None
         if not lane_path.valid:
-            snapshot = self._publish_invalid_lane_trajectory(
-                lane_path.failure_reason, uids, lane_path.failure_reason)
+            failure_time = time.monotonic()
+            snapshot = self._fail_route_build(
+                diagnostic, lane_path.failure_reason, uids)
             self._lane_failure_signature = (
                 uids, str(snapshot.get("failure_reason", "")))
-            self._lane_retry_at = time.monotonic() + 1.0
+            self._lane_retry_at = failure_time + 1.0
             return None
         self.sdk.set("navigation_status", "Vytváram trajektóriu")
-        trajectory = build_lane_trajectory(lane_path, spacing_m=2.0)
-        if not trajectory.valid:
-            snapshot = self._publish_invalid_lane_trajectory(
-                trajectory.failure_reason, uids, trajectory.failure_reason)
+        try:
+            trajectory = build_lane_trajectory(
+                lane_path, spacing_m=2.0, diagnostics=diagnostic)
+        except Exception as exc:
+            failure_time = time.monotonic()
+            technical_reason = (
+                f"{type(exc).__name__} while building trajectory: {exc}")
+            try:
+                logging.exception("route-build failed unexpectedly: %s",
+                                  technical_reason)
+            except Exception:
+                pass
+            safe_diagnostic_call(
+                diagnostic, "fail_phase", "build_lane_trajectory",
+                technical_reason, {
+                "failure_code": "INTERNAL_ERROR",
+            })
+            snapshot = self._fail_route_build(
+                diagnostic, technical_reason, uids)
             self._lane_failure_signature = (
                 uids, str(snapshot.get("failure_reason", "")))
-            self._lane_retry_at = time.monotonic() + 1.0
+            self._lane_retry_at = failure_time + 1.0
+            return None
+        if not trajectory.valid:
+            failure_time = time.monotonic()
+            snapshot = self._fail_route_build(
+                diagnostic, trajectory.failure_reason, uids)
+            self._lane_failure_signature = (
+                uids, str(snapshot.get("failure_reason", "")))
+            self._lane_retry_at = failure_time + 1.0
             return None
         if not self._build_is_current(uids, build_revision, build_request):
+            self._finish_stale_route_build(
+                diagnostic, "GPS revision changed after trajectory validation",
+                build_revision)
             return None
-        revision = self._next_lane_revision()
+        revision = diagnostic.revision
         control_points = [[float(p.x), float(p.y), float(p.z)]
                           for p in trajectory.points]
         # Phase 4 requires controller, HUD and AR to consume geometrically
@@ -380,8 +674,13 @@ class Plugin(BasePlugin):
             "covered_gps_uids": [int(uid) for uid in build_uids],
             "route_horizon_complete": len(build_uids) == len(uids),
             "request_id": build_request,
+            "route_build_id": diagnostic.build_id,
+            "failure_code": None,
         }
         # One shared-state assignment publishes one coherent geometry revision.
+        safe_diagnostic_call(diagnostic, "start_phase", "publish_snapshot", {
+            "valid": True, "point_count": len(control_points),
+        })
         self.sdk.shared_state.update_batch({
             "lane_trajectory_revision": revision,
             "lane_trajectory": snapshot,
@@ -397,6 +696,7 @@ class Plugin(BasePlugin):
             "nav_active": False,
             "nav_steering": 0.0,
         })
+        self._lane_revision = max(self._lane_revision, revision)
         self.sdk.set("navigation_unreliable", False)
         self.sdk.set("navigation_failure_reason", "")
         self.sdk.set("navigation_recalculating", False)
@@ -418,6 +718,13 @@ class Plugin(BasePlugin):
         self._lane_failure_signature = None
         self._last_logged_lane_failure = None
         self._lane_retry_at = 0.0
+        safe_diagnostic_call(diagnostic, "finish_phase", "publish_snapshot",
+                             details={
+            "published_revision": revision, "valid": True,
+            "point_count": len(control_points),
+            "nav_path_point_count": len(display_points),
+        })
+        self._remember_route_diagnostic(diagnostic, "success")
         return trajectory
 
     # --- Helpers --------------------------------------------------------------
@@ -552,6 +859,7 @@ class Plugin(BasePlugin):
             self.sdk.shared_state.update_batch({
                 "active_map_key": None,
                 "active_map_name": None,
+                "active_dataset_fingerprint": "unavailable",
                 "map_path": [],
                 "map_road_segments": [],
                 "map_road_segments_revision": self._roads_revision,
@@ -604,7 +912,8 @@ class Plugin(BasePlugin):
                         self.sdk.set("navigation_unreliable", True)
                         self.sdk.set("map_status", reason)
                         self._publish_invalid_lane_trajectory(
-                            reason, (), reason, log_failure=False)
+                            reason, (), reason, log_failure=False,
+                            failure_code="DATASET_VERSION_MISMATCH")
                         logging.error("Navigation: %s", reason)
                         return
                     if chosen["key"] != wanted:
@@ -623,16 +932,20 @@ class Plugin(BasePlugin):
                         self.sdk.set("navigation_unreliable", True)
                         self.sdk.set("map_status", reason)
                         self._publish_invalid_lane_trajectory(
-                            reason, (), reason, log_failure=False)
+                            reason, (), reason, log_failure=False,
+                            failure_code="DATASET_VERSION_MISMATCH")
                         logging.error("Navigation: %s", reason)
                         return
                     self.sdk.set("active_map_key", chosen["key"])
                     self.sdk.set("active_map_name",
                                  chosen.get("name") or chosen["key"])
+                    data_dir = map_data.dataset_dir(chosen["key"])
+                    self.sdk.set("active_dataset_fingerprint",
+                                 dataset_fingerprint(data_dir))
                     self.sdk.set("map_status",
                                  f"Loading road network ({chosen['key']})…")
                     net = RoadNetwork()
-                    if net.load(map_data.dataset_dir(chosen["key"])):
+                    if net.load(data_dir):
                         if generation != self._map_load_generation:
                             logging.info(
                                 "Navigation: discarded stale map load for %s.",
@@ -652,14 +965,16 @@ class Plugin(BasePlugin):
                                      "Map data unreadable — will retry.")
                         self._publish_invalid_lane_trajectory(
                             "Map data is unreadable", (),
-                            "Map data is unreadable", log_failure=False)
+                            "Map data is unreadable", log_failure=False,
+                            failure_code="INTERNAL_ERROR")
                 except Exception as e:
                     logging.error("Navigation: engine-side road network load failed: %s", e)
                     self.sdk.set("navigation_unreliable", True)
                     self.sdk.set("map_status", f"Map load error: {e}")
                     self._publish_invalid_lane_trajectory(
                         f"Map load error: {e}", (),
-                        f"Map load error: {e}", log_failure=False)
+                        f"Map load error: {e}", log_failure=False,
+                        failure_code="INTERNAL_ERROR")
                 finally:
                     if generation == self._map_load_generation:
                         self._net_loading = False
@@ -743,6 +1058,11 @@ class Plugin(BasePlugin):
         speed = self.sdk.get("truck_speed_ms", 0.0) or 0.0
 
         self._handle_command(pos)
+        try:
+            self._handle_diagnostic_export()
+        except Exception:
+            # A diagnostics/export defect cannot suppress this navigation tick.
+            pass
 
         # GPS and replay are mutually exclusive states.  Disarming (rather
         # than merely suspending) is intentional: after a GPS target is
@@ -943,28 +1263,3 @@ class Plugin(BasePlugin):
             else:
                 self.sdk.set("nav_active", False)
                 self.sdk.set("nav_steering", 0.0)
-
-        self._lane_diag_t += delta_time
-        if self._lane_diag_t >= 1.0:
-            self._lane_diag_t = 0.0
-            snapshot = self.sdk.get("lane_trajectory", {}) or {}
-            match = self.sdk.get("lane_match") or snapshot.get("lane_match") or {}
-            confidence_components = snapshot.get("confidence_components") or {}
-            logging.info(
-                "lane-trajectory: revision=%s valid=%s confidence=%.3f lane=%s "
-                "lateral=%.3f heading=%.3f vertical=%.3f control=%d display=%d "
-                "gps_distance=%.1f lane_distance=%.1f score_components=%s "
-                "confidence_components=%s switch=%s failure=%s",
-                snapshot.get("revision", 0), bool(snapshot.get("valid", False)),
-                float(snapshot.get("confidence", 0.0) or 0.0),
-                snapshot.get("active_lane_id"),
-                float(match.get("lateral_error_m", 0.0) or 0.0),
-                float(match.get("heading_error_rad", 0.0) or 0.0),
-                float(match.get("vertical_error_m", 0.0) or 0.0),
-                len(snapshot.get("points", ()) or ()),
-                len(snapshot.get("display_points", ()) or ()),
-                float(self.sdk.get("game_route_distance", 0.0) or 0.0),
-                float(snapshot.get("distance_m", 0.0) or 0.0),
-                match.get("score_components", {}), confidence_components,
-                match.get("switch_reason", ""),
-                snapshot.get("failure_reason", ""))

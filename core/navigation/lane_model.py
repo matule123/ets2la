@@ -187,7 +187,10 @@ class LaneLocator:
 
     def locate(self, position: Sequence[float], heading: float,
                gps_uids: Sequence[int] = (),
-               previous: Optional[LaneMatch] = None) -> Optional[LaneMatch]:
+               previous: Optional[LaneMatch] = None,
+               diagnostics: Optional[dict] = None,
+               diagnostic_mode: bool = False) -> Optional[LaneMatch]:
+        """Locate the lane; diagnostic mode never mutates locator history."""
         if len(position) == 2:
             px, pz = position
             py = float(self.network.altitude_near((px, pz)) or 0.0)
@@ -199,6 +202,14 @@ class LaneLocator:
         directed_gps_edges = frozenset(zip(gps_order, gps_order[1:]))
         candidates = self.network.lane_segments_near(
             (px, pz), self.config.search_radius_m)
+        if diagnostics is not None:
+            diagnostics.clear()
+            diagnostics.update({
+                "world": {"x": px, "y": py, "z": pz},
+                "truck_heading_rad": float(heading),
+                "candidate_lanes": [],
+                "outcome": "pending",
+            })
         ranked = []
         for lane in candidates:
             projected = self._project((px, py, pz), lane)
@@ -206,9 +217,49 @@ class LaneLocator:
                 continue
             distance, point, segment_index, point_index, signed, vertical = projected
             heading_error = abs(wrap_angle(heading - point.heading))
+            candidate_diagnostic = None
+            if diagnostics is not None:
+                candidate_diagnostic = {
+                    "lane_id": {
+                        "road_uid": int(lane.lane_id.road_uid),
+                        "direction": int(lane.lane_id.direction),
+                        "lane_index": int(lane.lane_id.lane_index),
+                        "prefab_token": lane.lane_id.prefab_token,
+                        "connector_index": lane.lane_id.connector_index,
+                        "connector_path": list(lane.lane_id.connector_path),
+                    },
+                    "road_token": lane.road_look_token,
+                    "prefab_token": lane.lane_id.prefab_token,
+                    "distance_m": float(distance),
+                    "signed_lateral_m": float(signed),
+                    "nearest_world": {
+                        "x": float(point.x), "y": float(point.y),
+                        "z": float(point.z),
+                    },
+                    "lane_heading_rad": float(point.heading),
+                    "lane_heading_deg": math.degrees(point.heading),
+                    "heading_error_rad": float(heading_error),
+                    "heading_error_deg": math.degrees(heading_error),
+                    "elevation_difference_m": float(vertical),
+                    "accepted": False,
+                    "rejection": None,
+                    "score": None,
+                    "confidence": None,
+                    "score_components": {},
+                }
+                diagnostics["candidate_lanes"].append(candidate_diagnostic)
             if (distance > self.config.max_lateral_m
                     or vertical > self.config.max_vertical_m
                     or heading_error > self.config.max_heading_rad):
+                if candidate_diagnostic is not None:
+                    rejected = []
+                    if distance > self.config.max_lateral_m:
+                        rejected.append("lateral")
+                    if vertical > self.config.max_vertical_m:
+                        rejected.append("elevation")
+                    if heading_error > self.config.max_heading_rad:
+                        rejected.append("heading")
+                    candidate_diagnostic["rejection"] = "+".join(rejected)
                 continue
             exact_route_edge = ((lane.start_uid, lane.end_uid)
                                 in directed_gps_edges)
@@ -220,6 +271,8 @@ class LaneLocator:
             if previous is not None and not continuous:
                 # Hysteresis is not permission to teleport to a nearby road.
                 # A transition must be topologically confirmed by the network.
+                if candidate_diagnostic is not None:
+                    candidate_diagnostic["rejection"] = "topology"
                 continue
             components = (
                 ("lateral", float(distance)),
@@ -237,10 +290,20 @@ class LaneLocator:
             )
             score = sum(value for _, value in components)
             confidence = max(0.0, min(1.0, 1.0 - score / 18.0))
+            if candidate_diagnostic is not None:
+                candidate_diagnostic.update({
+                    "accepted": True,
+                    "score": float(score),
+                    "confidence": float(confidence),
+                    "score_components": dict(components),
+                })
             ranked.append((score, lane, point, segment_index, point_index, signed,
                            vertical, heading_error, confidence, components))
         if not ranked:
-            self.previous = None
+            if diagnostics is not None:
+                diagnostics["outcome"] = "no_match"
+            if not diagnostic_mode:
+                self.previous = None
             return None
         ranked.sort(key=lambda item: (item[0], item[1].lane_id.sort_key()))
         # An initial exact/near tie is not a reliable lane match. Silently
@@ -248,7 +311,12 @@ class LaneLocator:
         if (previous is None and len(ranked) > 1
                 and ranked[1][0] - ranked[0][0]
                     <= self.config.ambiguity_margin):
-            self.previous = None
+            if diagnostics is not None:
+                diagnostics["outcome"] = "ambiguous"
+                diagnostics["ambiguity_margin"] = float(
+                    ranked[1][0] - ranked[0][0])
+            if not diagnostic_mode:
+                self.previous = None
             return None
         chosen = ranked[0]
         reason = "best_score" if previous is None else "better_lane"
@@ -267,5 +335,16 @@ class LaneLocator:
         match = LaneMatch(lane.lane_id, point, segment_index, point_index,
                           signed, vertical, wrap_angle(heading - point.heading),
                           score, confidence, reason, components)
-        self.previous = match
+        if diagnostics is not None:
+            diagnostics["outcome"] = "matched"
+            diagnostics["selected_lane_id"] = {
+                "road_uid": int(lane.lane_id.road_uid),
+                "direction": int(lane.lane_id.direction),
+                "lane_index": int(lane.lane_id.lane_index),
+                "prefab_token": lane.lane_id.prefab_token,
+                "connector_index": lane.lane_id.connector_index,
+                "connector_path": list(lane.lane_id.connector_path),
+            }
+        if not diagnostic_mode:
+            self.previous = match
         return match
