@@ -51,6 +51,50 @@ def _live_route_suffix(planned_items, route_distance):
     return list(planned_items[matched_index:]), matched_index, matched_distance
 
 
+def _telemetry_loss_navigation_payload(state):
+    """Build one fail-closed navigation batch for a missing telemetry frame."""
+    old_lane = state.get("lane_trajectory", {}) or {}
+    telemetry_reason = "Telemetria vozidla nie je dostupná"
+    current_revision = int(state.get(
+        "lane_trajectory_revision", old_lane.get("revision", 0)) or 0)
+    lane_already_invalid = bool(
+        not old_lane.get("valid", False)
+        and old_lane.get("failure_reason") == telemetry_reason
+        and not (old_lane.get("source_gps_uids", []) or [])
+        and int(old_lane.get("revision", -1) or -1) == current_revision)
+    if lane_already_invalid:
+        lane_revision = current_revision
+        invalid_lane = old_lane
+    else:
+        lane_revision = max(
+            int(old_lane.get("revision", 0) or 0),
+            current_revision) + 1
+        invalid_lane = {
+            "revision": lane_revision, "valid": False,
+            "confidence": 0.0, "active_lane_id": None,
+            "lane_match": None, "points": [], "display_points": [],
+            "distance_m": 0.0, "failure_reason": telemetry_reason,
+            "source_gps_uids": [],
+            "request_id": state.get("nav_recalc_request"),
+        }
+    return {
+        "game_gps_navigation_active": False,
+        "game_route_node_uids": [],
+        "game_route_points": [], "game_route_meta": [],
+        "navigation_arrival_pending": False,
+        "lane_trajectory_revision": lane_revision,
+        "lane_trajectory": invalid_lane,
+        "lane_trajectory_heartbeat": 0.0,
+        "map_path": [], "nav_path": [],
+        "nav_active": False, "nav_steering": 0.0,
+        "nav_trajectory_revision": -1,
+        "navigation_source": "none",
+        "recorded_route_active": False,
+        "navigation_unreliable": True,
+        "navigation_failure_reason": telemetry_reason,
+    }
+
+
 class UltraPilotEngine:
     """
     The main engine for ETS2-UltraPilot.
@@ -1006,11 +1050,14 @@ class UltraPilotEngine:
                 camera_snapshot = self.camera_snapshot_producer.read(
                     0, telemetry_timestamp)
                 self._camera_diagnostic(camera_snapshot, False)
+                telemetry_loss = _telemetry_loss_navigation_payload(
+                    self.shared_state)
                 self.shared_state.update_batch({
                     "game_in_truck": False,
                     "telemetry_valid": False,
                     "telemetry_timestamp": telemetry_timestamp,
                     "camera_snapshot": camera_snapshot,
+                    **telemetry_loss,
                 })
 
             # A transient error in any one frame must NOT kill the engine — log

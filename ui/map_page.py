@@ -70,6 +70,14 @@ def live_map_navigation_points(state, now=None):
     return []
 
 
+def rejected_navigation_command_message(state):
+    """Return a persistent user-facing reason for a rejected command."""
+    result = state.get("nav_command_result") or {}
+    if result and not result.get("ok", False):
+        return str(result.get("message") or "Navigation command was rejected.")
+    return ""
+
+
 class MapDownloadWorker(QThread):
     """Downloads + extracts a map dataset in the background."""
     progress = pyqtSignal(float, str)
@@ -94,7 +102,6 @@ class MapView(QWidget):
     def __init__(self, state):
         super().__init__()
         self.state = state
-        self.route_points = []   # [(x, z), ...] drawn route (loaded for display)
         # Bounded display-only snapshot from the map plugin. Loading another
         # complete RoadNetwork here doubles memory and can terminate the UI.
         self.road_segments = []
@@ -147,10 +154,6 @@ class MapView(QWidget):
             self._pal = palette(self.state.get("ui_theme", "light") or "light")
         self.setStyleSheet(
             "background-color:#151515;border:1px solid #303238;border-radius:10px;")
-
-    def set_route(self, points):
-        self.route_points = points or []
-        self.update()
 
     def set_road_segments(self, payload):
         """Keep only finite X/Z endpoints from the lightweight live snapshot."""
@@ -557,11 +560,13 @@ class MapPage(QWidget):
     # --- Actions --------------------------------------------------------------
     def start_record(self):
         name = (self.name_edit.text().strip() or "route").replace(" ", "_")
+        self.state.set("nav_command_result", None)
         self.state.set("nav_arg", name)
         self.state.set("nav_cmd", "record")
         self.status.setText(f"Recording '{name}'… drive the route, then Stop & Save.")
 
     def stop_record(self):
+        self.state.set("nav_command_result", None)
         self.state.set("nav_cmd", "stop_record")
         self.status.setText("Route saved.")
 
@@ -569,17 +574,17 @@ class MapPage(QWidget):
         name = self.route_combo.currentText()
         if not name:
             return
+        self.state.set("nav_command_result", None)
         self.state.set("nav_arg", name)
         self.state.set("nav_cmd", "load")
         # The map plugin validates exclusive ownership. Do not preview JSON
         # directly here: that drew replay geometry over an active GPS snapshot
         # even when the plugin correctly rejected the load command.
-        self.view.set_route([])
         self.status.setText(f"Requesting recorded route '{name}'.")
 
     def stop_nav(self):
+        self.state.set("nav_command_result", None)
         self.state.set("nav_cmd", "stop")
-        self.view.set_route([])
         self.status.setText("Navigation stopped.")
 
     def refresh(self):
@@ -627,7 +632,10 @@ class MapPage(QWidget):
             if current in routes:
                 self.route_combo.setCurrentText(current)
 
-        if self.state.get("nav_active"):
+        command_error = rejected_navigation_command_message(self.state)
+        if command_error:
+            self.status.setText(command_error)
+        elif self.state.get("nav_active"):
             dist = self.state.get("distance_to_dest")
             if dist is not None:
                 self.status.setText(f"Navigating — {float(dist) / 1000:.2f} km to destination.")

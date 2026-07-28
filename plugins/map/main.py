@@ -81,9 +81,7 @@ class Plugin(BasePlugin):
 
     def on_stop(self):
         logging.info("Map (navigation) plugin stopped.")
-        self.sdk.set("nav_active", False)
-        self.sdk.set("nav_steering", 0.0)
-        self.sdk.set("nav_trajectory_revision", -1)
+        self._deactivate_recorded_route(clear_outputs=True)
 
     @staticmethod
     def _lane_id_payload(lane_id):
@@ -146,14 +144,20 @@ class Plugin(BasePlugin):
         """Disarm replay so it cannot resume after a GPS ownership interval."""
         was_active = getattr(self, "active_route", None) is not None
         self.active_route = None
-        self.sdk.set("recorded_route_active", False)
+        payload = {"recorded_route_active": False}
         if self.sdk.get("navigation_source") == "recorded_route":
-            self.sdk.set("navigation_source", "none")
+            payload["navigation_source"] = "none"
         if clear_outputs:
-            self.sdk.set("nav_path", [])
-            self.sdk.set("nav_active", False)
-            self.sdk.set("nav_steering", 0.0)
-            self.sdk.set("nav_trajectory_revision", -1)
+            payload.update({
+                "nav_path": [], "nav_active": False,
+                "nav_steering": 0.0, "nav_trajectory_revision": -1,
+            })
+        shared_state = getattr(self.sdk, "shared_state", None)
+        if shared_state is not None and hasattr(shared_state, "update_batch"):
+            shared_state.update_batch(payload)
+        else:
+            for key, value in payload.items():
+                self.sdk.set(key, value)
         if was_active and reason:
             logging.info("Navigation: recorded route disarmed: %s", reason)
 
@@ -387,6 +391,11 @@ class Plugin(BasePlugin):
             "lane_trajectory_heartbeat": time.monotonic(),
             "navigation_source": "gps_lane",
             "recorded_route_active": False,
+            # A new revision must never coexist with steering derived from the
+            # previous geometry. The control branch publishes the new command
+            # only after constructing Route from these exact points.
+            "nav_active": False,
+            "nav_steering": 0.0,
         })
         self.sdk.set("navigation_unreliable", False)
         self.sdk.set("navigation_failure_reason", "")
@@ -481,9 +490,14 @@ class Plugin(BasePlugin):
         elif cmd == "load":
             if self._game_gps_navigation_present():
                 self._deactivate_recorded_route(clear_outputs=False)
-                self.sdk.set(
-                    "navigation_status",
-                    "Recorded route cannot start while game GPS is active")
+                message = "Recorded route cannot start while game GPS is active"
+                self.sdk.shared_state.update_batch({
+                    "navigation_status": message,
+                    "nav_command_result": {
+                        "command": "load", "route": arg,
+                        "ok": False, "message": message,
+                    },
+                })
                 logging.info(
                     "Navigation: ignored recorded route '%s'; game GPS owns navigation.",
                     arg)
@@ -491,21 +505,31 @@ class Plugin(BasePlugin):
             path = os.path.join(ROUTES_DIR, f"{arg}.json")
             try:
                 self.active_route = Route.load(path)
-                self.sdk.set("recorded_route_active", True)
-                self.sdk.set("navigation_source", "recorded_route")
-                self.sdk.set("nav_trajectory_revision", -1)
+                self.sdk.set("nav_command_result", {
+                    "command": "load", "route": arg, "ok": True,
+                    "message": f"Recorded route '{arg}' loaded.",
+                })
                 logging.info("Navigation: loaded route '%s' (%d points).",
                              arg, len(self.active_route))
                 self.sdk.set("tts_message", f"Route {arg} loaded. Navigation active.")
             except Exception as e:
                 logging.error("Navigation: failed to load '%s': %s", arg, e)
                 self._deactivate_recorded_route(clear_outputs=True)
+                self.sdk.set("nav_command_result", {
+                    "command": "load", "route": arg, "ok": False,
+                    "message": f"Recorded route '{arg}' could not be loaded.",
+                })
 
         elif cmd in ("clear", "stop"):
             self._deactivate_recorded_route(clear_outputs=True)
+            self.sdk.set("nav_command_result", {
+                "command": cmd, "ok": True,
+                "message": "Recorded navigation stopped.",
+            })
             logging.info("Navigation: stopped.")
 
         elif cmd == "switch_map":
+            self._deactivate_recorded_route(clear_outputs=True)
             self._map_load_generation += 1
             self.road_net = None
             self._net_attempted = False
@@ -517,21 +541,23 @@ class Plugin(BasePlugin):
             self._lane_failure_signature = None
             self._last_logged_lane_failure = None
             self._lane_retry_at = 0.0
-            self.sdk.set("active_map_key", None)
-            self.sdk.set("active_map_name", None)
-            self.sdk.set("map_path", [])
-            self._roads_revision += 1
-            self.sdk.shared_state.update_batch({
-                "map_road_segments": [],
-                "map_road_segments_revision": self._roads_revision,
-            })
             self._roads_pos = None
-            self.sdk.set("lane_match", None)
-            self.sdk.set("nav_active", False)
-            self.sdk.set("nav_steering", 0.0)
+            # Invalidate control geometry before publishing any map metadata;
+            # another process must never observe a switched dataset alongside
+            # steering from the previous one.
             self._publish_invalid_lane_trajectory(
                 "Map dataset is changing", (),
                 "Načítavam zvolenú mapu", log_failure=False)
+            self._roads_revision += 1
+            self.sdk.shared_state.update_batch({
+                "active_map_key": None,
+                "active_map_name": None,
+                "map_path": [],
+                "map_road_segments": [],
+                "map_road_segments_revision": self._roads_revision,
+                "lane_match": None,
+                "nav_command_result": None,
+            })
             self.sdk.set("map_status", f"Loading map dataset {arg}...")
             logging.info("Navigation: switching map dataset to %s.", arg)
 
@@ -732,15 +758,35 @@ class Plugin(BasePlugin):
                 reason="game GPS became authoritative")
 
         if self.sdk.get("telemetry_valid", True) is False:
+            self._deactivate_recorded_route(clear_outputs=True)
+            # Backward-compatible safety for an older engine that does not yet
+            # publish the explicit GPS-presence flag in the same telemetry-loss
+            # batch. Clearing the target first makes every old snapshot stale.
+            self.sdk.shared_state.update_batch({
+                "game_gps_navigation_active": False,
+                "game_route_node_uids": [],
+                "game_route_points": [], "game_route_meta": [],
+                "navigation_arrival_pending": False,
+            })
             current = self.sdk.get("lane_trajectory", {}) or {}
-            if current.get("valid", False):
+            if (current.get("valid", False)
+                    or current.get("failure_reason")
+                        != "Telemetria vozidla nie je dostupná"
+                    or int(current.get("revision", -1) or -1)
+                        != int(self.sdk.get(
+                            "lane_trajectory_revision", -2) or -2)):
                 self._publish_invalid_lane_trajectory(
                     "Telemetria vozidla nie je dostupná",
                     self.sdk.get("game_route_node_uids", []) or (),
                     "Telemetria vozidla nie je dostupná")
             else:
-                self.sdk.set("nav_active", False)
-                self.sdk.set("nav_steering", 0.0)
+                self.sdk.shared_state.update_batch({
+                    "nav_path": [], "map_path": [],
+                    "nav_active": False, "nav_steering": 0.0,
+                    "nav_trajectory_revision": -1,
+                    "navigation_source": "none",
+                    "recorded_route_active": False,
+                })
             return
 
         if not pos:
@@ -821,8 +867,6 @@ class Plugin(BasePlugin):
         if (not gps_navigation_present and self.active_route is not None
                 and len(self.active_route) >= 2):
             if self.active_route.is_finished(pos):
-                self.sdk.set("nav_active", False)
-                self.sdk.set("nav_steering", 0.0)
                 self.sdk.set("tts_message", "Destination reached.")
                 logging.info("Navigation: destination reached.")
                 self._deactivate_recorded_route(clear_outputs=True)
@@ -830,9 +874,15 @@ class Plugin(BasePlugin):
 
             steer = self.active_route.steering(pos, heading, speed,
                                                lane_offset_m=self._lane_offset())
+            idx = self.active_route.closest_index(pos)
+            upcoming = self._distance_window(
+                self.active_route.points[idx:], 220.0)
+            visible = [list(p) for p in self._driving_line(
+                upcoming, self._lane_offset())]
             self.sdk.shared_state.update_batch({
                 "nav_steering": float(steer),
                 "nav_active": True,
+                "nav_path": visible,
                 "navigation_source": "recorded_route",
                 "recorded_route_active": True,
                 "nav_trajectory_revision": -1,
@@ -847,11 +897,6 @@ class Plugin(BasePlugin):
                          self.active_route.curvature_ahead(pos, heading))
             self.tags.nav_steering = round(steer, 3)
 
-            # Publish the upcoming path points so the HUD can draw "where to go".
-            idx = self.active_route.closest_index(pos)
-            upcoming = self._distance_window(self.active_route.points[idx:], 220.0)
-            visible = self._driving_line(upcoming, self._lane_offset())
-            self.sdk.set("nav_path", [list(p) for p in visible])
         else:
             # No recorded route: drive by the downloaded MAP. This is automatic
             # map-based driving — no recording needed.
@@ -879,15 +924,17 @@ class Plugin(BasePlugin):
                 nearest = route.points[min(idx, len(route.points)-1)]
                 off_dist = math.hypot(pos[0] - nearest[0], pos[1] - nearest[1])
                 if off_dist > 50.0:
-                    self.sdk.set("nav_active", False)
-                    self.sdk.set("nav_steering", 0.0)
+                    self.sdk.shared_state.update_batch({
+                        "nav_active": False, "nav_steering": 0.0,
+                    })
                     self.sdk.set("map_status",
                                  f"Truck is {off_dist:.0f}m from the nearest road — "
                                  "map dataset may not match the game. Switch maps on the Map page.")
                     self.tags.nav_steering = 0.0
                 else:
-                    self.sdk.set("nav_steering", float(steer))
-                    self.sdk.set("nav_active", True)
+                    self.sdk.shared_state.update_batch({
+                        "nav_steering": float(steer), "nav_active": True,
+                    })
                 # Curvature radius (m) of the road ahead — lets the autopilot
                 # anticipate bends (brake before, not during).
                 self.sdk.set("path_curvature_radius",

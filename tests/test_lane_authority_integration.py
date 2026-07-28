@@ -10,13 +10,17 @@ from plugins.autopilot.main import Plugin as AutopilotPlugin
 from plugins.map.main import (
     RUNTIME_ROUTE_HORIZON_M, RUNTIME_ROUTE_MAX_UIDS, Plugin as MapPlugin,
 )
-from UI.map_page import live_map_navigation_points
+from UI.map_page import (
+    MapView, live_map_navigation_points,
+    rejected_navigation_command_message,
+)
 from tests.test_lane_route_builder import SyntheticMap
 
 
 class State:
     def __init__(self, values=None):
         self.data = dict(values or {})
+        self.batches = []
 
     def get(self, key, default=None):
         return self.data.get(key, default)
@@ -25,6 +29,7 @@ class State:
         self.data[key] = value
 
     def update_batch(self, values):
+        self.batches.append(dict(values))
         self.data.update(values)
 
 
@@ -149,6 +154,18 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
         self.assertEqual(readiness["revision"], snapshot["revision"])
         self.assertEqual(sdk.get("autopilot_lane_revision"), snapshot["revision"])
 
+        publication = next(
+            batch for batch in sdk.shared_state.batches
+            if (batch.get("lane_trajectory") or {}).get("valid", False))
+        self.assertEqual(publication["lane_trajectory_revision"],
+                         snapshot["revision"])
+        self.assertIs(publication["lane_trajectory"], snapshot)
+        self.assertIs(publication["nav_path"], snapshot["display_points"])
+        self.assertEqual(publication["nav_trajectory_revision"],
+                         snapshot["revision"])
+        self.assertFalse(publication["nav_active"])
+        self.assertEqual(publication["nav_steering"], 0.0)
+
     def test_destination_change_removes_old_revision_and_unproven_route(self):
         plugin, sdk, point = build_map_plugin()
         old_revision = sdk.get("lane_trajectory")["revision"]
@@ -251,6 +268,12 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
         load.assert_not_called()
         self.assertIsNone(plugin.active_route)
         self.assertFalse(sdk.get("recorded_route_active"))
+        result = sdk.get("nav_command_result")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["command"], "load")
+        self.assertIn("game GPS", result["message"])
+        self.assertEqual(rejected_navigation_command_message(sdk.shared_state),
+                         result["message"])
 
     def test_recorded_route_runs_only_after_explicit_load_without_gps(self):
         sdk = MapSDK({
@@ -276,6 +299,13 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
         self.assertTrue(sdk.get("nav_active"))
         self.assertGreaterEqual(len(sdk.get("nav_path")), 2)
         self.assertEqual(sdk.get("nav_trajectory_revision"), -1)
+        publication = next(
+            batch for batch in sdk.shared_state.batches
+            if batch.get("navigation_source") == "recorded_route"
+            and batch.get("nav_active") is True)
+        self.assertEqual(publication["nav_path"], sdk.get("nav_path"))
+        self.assertIn("nav_steering", publication)
+        self.assertTrue(publication["recorded_route_active"])
 
         # Replay is a real, explicit no-GPS authority for the autopilot, not a
         # hidden fallback from an invalid GPS snapshot.
@@ -335,6 +365,118 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
         self.assertFalse(sdk.get("recorded_route_active"))
         self.assertFalse(sdk.get("nav_active"))
         self.assertEqual(sdk.get("nav_path"), [])
+
+    def test_stop_atomically_clears_recorded_geometry_and_steering(self):
+        sdk = MapSDK({
+            "navigation_source": "none", "recorded_route_active": False,
+            "nav_path": [], "nav_active": False, "nav_steering": 0.0,
+        })
+        plugin = MapPlugin(sdk)
+        plugin.on_start()
+        plugin.active_route = Route([(0.0, 0.0), (0.0, 100.0)], "legacy")
+        sdk.shared_state.update_batch({
+            "navigation_source": "recorded_route",
+            "recorded_route_active": True,
+            "nav_path": [[0.0, 0.0], [0.0, 100.0]],
+            "nav_active": True, "nav_steering": 0.7,
+            "nav_trajectory_revision": -1,
+        })
+        sdk.set("nav_cmd", "stop")
+
+        plugin._handle_command((0.0, 0.0))
+
+        self.assertIsNone(plugin.active_route)
+        self.assertEqual(sdk.get("navigation_source"), "none")
+        self.assertFalse(sdk.get("recorded_route_active"))
+        self.assertEqual(sdk.get("nav_path"), [])
+        self.assertFalse(sdk.get("nav_active"))
+        self.assertEqual(sdk.get("nav_steering"), 0.0)
+        cleared = next(
+            batch for batch in reversed(sdk.shared_state.batches)
+            if batch.get("recorded_route_active") is False
+            and "nav_path" in batch)
+        self.assertEqual(cleared["nav_path"], [])
+        self.assertFalse(cleared["nav_active"])
+        self.assertEqual(cleared["nav_steering"], 0.0)
+
+    def test_switch_map_disarms_recorded_and_invalidates_gps_geometry(self):
+        sdk = MapSDK({
+            "game_gps_navigation_active": True,
+            "game_route_node_uids": [1, 2], "lane_trajectory_revision": 3,
+            "lane_trajectory": {
+                "revision": 3, "valid": True,
+                "source_gps_uids": [1, 2],
+                "points": [[0.0, 0.0, 0.0], [0.0, 0.0, 10.0]],
+                "display_points": [[0.0, 0.0, 0.0], [0.0, 0.0, 10.0]],
+            },
+            "navigation_source": "none", "recorded_route_active": False,
+        })
+        plugin = MapPlugin(sdk)
+        plugin.on_start()
+        plugin.active_route = Route([(0.0, 0.0), (0.0, 100.0)], "legacy")
+        sdk.shared_state.update_batch({
+            "navigation_source": "recorded_route",
+            "recorded_route_active": True,
+            "nav_path": [[0.0, 0.0], [0.0, 100.0]],
+            "nav_active": True, "nav_steering": 0.4,
+        })
+        sdk.set("nav_cmd", "switch_map")
+        sdk.set("nav_arg", "europe-1.60")
+
+        plugin._handle_command((0.0, 0.0))
+
+        snapshot = sdk.get("lane_trajectory")
+        self.assertIsNone(plugin.active_route)
+        self.assertFalse(snapshot["valid"])
+        self.assertEqual(snapshot["points"], [])
+        self.assertEqual(sdk.get("nav_path"), [])
+        self.assertFalse(sdk.get("recorded_route_active"))
+        self.assertFalse(sdk.get("nav_active"))
+        self.assertEqual(sdk.get("nav_steering"), 0.0)
+
+    def test_telemetry_loss_clears_both_navigation_authorities(self):
+        sdk = MapSDK({
+            "truck_world_pos": (0.0, 0.0), "telemetry_valid": False,
+            "game_gps_navigation_active": True,
+            "game_route_node_uids": [1, 2],
+            "lane_trajectory_revision": 5,
+            "lane_trajectory": {
+                "revision": 5, "valid": True, "source_gps_uids": [1, 2],
+                "points": [[0.0, 0.0, 0.0], [0.0, 0.0, 10.0]],
+                "display_points": [[0.0, 0.0, 0.0], [0.0, 0.0, 10.0]],
+            },
+            "navigation_source": "recorded_route",
+            "recorded_route_active": True,
+            "nav_path": [[50.0, 0.0], [50.0, 100.0]],
+            "nav_active": True, "nav_steering": 0.8,
+        })
+        plugin = MapPlugin(sdk)
+        plugin.on_start()
+        plugin.tags = Tags()
+        plugin.active_route = Route([(50.0, 0.0), (50.0, 100.0)], "legacy")
+
+        plugin.on_tick(0.02)
+
+        snapshot = sdk.get("lane_trajectory")
+        self.assertFalse(sdk.get("game_gps_navigation_active"))
+        self.assertEqual(sdk.get("game_route_node_uids"), [])
+        self.assertEqual(sdk.get("navigation_source"), "none")
+        self.assertFalse(sdk.get("recorded_route_active"))
+        self.assertIsNone(plugin.active_route)
+        self.assertFalse(snapshot["valid"])
+        self.assertEqual(snapshot["points"], [])
+        self.assertEqual(sdk.get("nav_path"), [])
+        self.assertFalse(sdk.get("nav_active"))
+        self.assertEqual(sdk.get("nav_steering"), 0.0)
+
+    def test_new_authority_flags_default_fail_closed_for_older_state(self):
+        sdk = MapSDK({})
+        plugin = MapPlugin(sdk)
+        plugin.on_start()
+        self.assertFalse(plugin._game_gps_navigation_present())
+        self.assertFalse(sdk.get("recorded_route_active"))
+        self.assertEqual(live_map_navigation_points(sdk.shared_state), [])
+        self.assertFalse(hasattr(MapView, "set_route"))
 
     def test_stale_or_invalid_snapshot_hides_hud_and_ar(self):
         plugin, sdk, _ = build_map_plugin()

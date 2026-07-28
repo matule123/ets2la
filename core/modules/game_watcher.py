@@ -47,6 +47,18 @@ class GameWatcher(BaseModule):
         state = self.engine.shared_state
         self.engine.controller.release_all()
         reason = "game session restarted" if starting else "game closed"
+        old_lane = state.get("lane_trajectory", {}) or {}
+        lane_revision = max(
+            int(old_lane.get("revision", 0) or 0),
+            int(state.get("lane_trajectory_revision", 0) or 0)) + 1
+        invalid_lane = {
+            "revision": lane_revision, "valid": False,
+            "confidence": 0.0, "active_lane_id": None,
+            "lane_match": None, "points": [], "display_points": [],
+            "distance_m": 0.0, "failure_reason": reason,
+            "source_gps_uids": [],
+            "request_id": state.get("nav_recalc_request"),
+        }
         state.update_batch({
             "autopilot_active": False,
             "autopilot_disable_reason": reason,
@@ -61,7 +73,12 @@ class GameWatcher(BaseModule):
             "recorded_route_active": False,
             "navigation_source": "none",
             "nav_trajectory_revision": -1,
+            "lane_trajectory_revision": lane_revision,
+            "lane_trajectory": invalid_lane,
+            "lane_trajectory_heartbeat": 0.0,
             "navigation_unreliable": True,
+            "navigation_failure_reason": reason,
+            "nav_command_result": None,
             "game_session_id": self.session_id,
         })
         if not starting:
