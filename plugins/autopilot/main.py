@@ -95,6 +95,43 @@ def lane_authority_rejection_reason(state, snapshot, now=None):
     return ""
 
 
+def game_gps_navigation_present(state, snapshot=None):
+    """Detect game-GPS ownership even when its native UID buffer is invalid."""
+    snapshot = snapshot or {}
+    if bool(state.get("game_gps_navigation_active", False)):
+        return True
+    if bool(state.get("navigation_arrival_pending", False)):
+        return True
+    if state.get("dest_city"):
+        return True
+    try:
+        if float(state.get("game_route_distance", 0.0) or 0.0) > 0.0:
+            return True
+    except (TypeError, ValueError, OverflowError):
+        return True
+    return bool(len(state.get("game_route_node_uids", []) or []) >= 2
+                or len(snapshot.get("source_gps_uids", []) or []) >= 2)
+
+
+def recorded_route_rejection_reason(state):
+    """Validate the explicitly activated, GPS-exclusive replay authority."""
+    if state.get("navigation_source") != "recorded_route":
+        return "recorded route is not the selected navigation source"
+    if not state.get("recorded_route_active", False):
+        return "recorded route was not explicitly activated"
+    points = state.get("nav_path", []) or []
+    if len(points) < 2:
+        return "recorded route has fewer than two points"
+    try:
+        for point in points:
+            if (not isinstance(point, (list, tuple)) or len(point) < 2
+                    or not all(math.isfinite(float(value)) for value in point[:3])):
+                return "recorded route contains malformed or non-finite points"
+    except (TypeError, ValueError, OverflowError):
+        return "recorded route metadata is malformed"
+    return ""
+
+
 class Plugin(BasePlugin):
     """
     Autopilot plugin — the single authority that turns perception + ACC outputs
@@ -192,15 +229,31 @@ class Plugin(BasePlugin):
         try:
             snapshot_revision = int(snapshot.get("revision", -1) or -1)
             snapshot_confidence = float(snapshot.get("confidence", 0.0) or 0.0)
-            game_route_distance = float(self.sdk.shared_state.get(
-                "game_route_distance", 0.0) or 0.0)
         except (TypeError, ValueError, OverflowError):
-            snapshot_revision, snapshot_confidence, game_route_distance = -1, 0.0, 0.0
-        gps_navigation_present = bool(
-            len(snapshot.get("source_gps_uids", ()) or ()) >= 2
-            or game_route_distance > 25.0)
-        authority_reason = lane_authority_rejection_reason(
+            snapshot_revision, snapshot_confidence = -1, 0.0
+        gps_navigation_present = game_gps_navigation_present(
             self.sdk.shared_state, snapshot)
+        recorded_route_requested = bool(
+            self.sdk.shared_state.get("navigation_source") == "recorded_route"
+            or self.sdk.shared_state.get("recorded_route_active", False))
+        if gps_navigation_present:
+            authority_reason = lane_authority_rejection_reason(
+                self.sdk.shared_state, snapshot)
+            authority_revision = snapshot_revision
+            authority_source = "gps_lane"
+        elif recorded_route_requested:
+            authority_reason = recorded_route_rejection_reason(
+                self.sdk.shared_state)
+            authority_revision = -1
+            authority_source = "recorded_route"
+        else:
+            # No route is not navigation authority.  Preserve the existing
+            # fail-closed engagement rule; vision may assist perception but
+            # cannot by itself authorize the autopilot.
+            authority_reason = lane_authority_rejection_reason(
+                self.sdk.shared_state, snapshot)
+            authority_revision = -1
+            authority_source = "none"
         active_requested = bool(self.sdk.shared_state.get(
             "autopilot_active", False))
         # Starting steering on a boundary or while facing a neighbouring arm
@@ -210,7 +263,8 @@ class Plugin(BasePlugin):
         if not active_requested:
             self._lane_lock_acquired = False
             self._drive_engage_started = 0.0
-        elif not authority_reason and not self._lane_lock_acquired:
+        elif (gps_navigation_present and not authority_reason
+              and not self._lane_lock_acquired):
             live_match = (self.sdk.shared_state.get("lane_match")
                           or snapshot.get("lane_match"))
             # Legacy/offline consumers can exercise confidence handling
@@ -233,21 +287,26 @@ class Plugin(BasePlugin):
                     "truck is not centred and aligned in the confirmed GPS lane")
             elif not self._lane_lock_acquired:
                 self._lane_lock_acquired = True
-        lane_authority_safe = not authority_reason
+        navigation_authority_safe = not authority_reason
         self.sdk.shared_state.set(
             "autopilot_lane_revision",
-            snapshot_revision if lane_authority_safe else -1)
+            (authority_revision if navigation_authority_safe
+             and authority_source == "gps_lane" else -1))
         self.sdk.shared_state.set("autopilot_navigation_readiness", {
-            "ready": lane_authority_safe,
+            "ready": navigation_authority_safe,
             "reason": authority_reason,
-            "revision": snapshot_revision if lane_authority_safe else -1,
+            "revision": (authority_revision
+                         if navigation_authority_safe else -1),
+            "source": authority_source,
             "confidence": snapshot_confidence,
             "threshold": MIN_LANE_TRAJECTORY_CONFIDENCE,
             "timestamp": time.monotonic(),
         })
         navigation_unreliable = bool(
-            self.sdk.shared_state.get("navigation_unreliable", False)
-            or (gps_navigation_present and not lane_authority_safe))
+            (gps_navigation_present
+             and (self.sdk.shared_state.get("navigation_unreliable", False)
+                  or not navigation_authority_safe))
+            or (recorded_route_requested and not navigation_authority_safe))
 
         # Never feed throttle to a reversing truck.  In ETS2's automatic
         # gearbox a brake held after stopping can select reverse; the old
@@ -292,7 +351,7 @@ class Plugin(BasePlugin):
         # stale, low-confidence or off-lane GPS trajectory is not permission to
         # fall back to vision driving. While moving we perform a controlled
         # stop; once stationary we release all automation and disengage.
-        if autopilot_engaged and not lane_authority_safe:
+        if autopilot_engaged and not navigation_authority_safe:
             self.sdk.controller.set_throttle(0.0)
             self._last_throttle = 0.0
             self._last_steering = self._ramp_steering(0.0, dt)
@@ -373,7 +432,7 @@ class Plugin(BasePlugin):
                 self.tags.speed_kmh = round(speed_kmh, 1)
                 self.tags.nav_active = bool(
                     self.sdk.shared_state.get("nav_active", False)
-                    and lane_authority_safe)
+                    and navigation_authority_safe)
                 self.tags.brake = 0.0
                 self.tags.throttle = 0.0
                 return
@@ -484,7 +543,7 @@ class Plugin(BasePlugin):
 
         # 5. Lateral control.
         nav_active = bool(self.sdk.shared_state.get("nav_active", False)
-                          and lane_authority_safe)
+                          and navigation_authority_safe)
 
         # Soft-start: detect the rising edge of autopilot_active and fade the
         # steering authority in from 0 → 1 over ~1.2 s. This kills the jerk that

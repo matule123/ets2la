@@ -64,6 +64,18 @@ class Plugin(BasePlugin):
         self._lane_failure_signature = None
         self._last_logged_lane_failure = None
         self._lane_retry_at = 0.0
+        # A plugin/process restart is not an explicit replay activation.
+        # Manager-backed shared state can outlive this object, so discard only
+        # stale recorded-route ownership while leaving a GPS snapshot intact.
+        if self.sdk.get("navigation_source") == "recorded_route":
+            self.sdk.shared_state.update_batch({
+                "navigation_source": "none",
+                "recorded_route_active": False,
+                "nav_path": [], "nav_active": False,
+                "nav_steering": 0.0, "nav_trajectory_revision": -1,
+            })
+        else:
+            self.sdk.set("recorded_route_active", False)
         os.makedirs(ROUTES_DIR, exist_ok=True)
         self._publish_route_list()
 
@@ -99,6 +111,51 @@ class Plugin(BasePlugin):
             return tuple(_uid(uid) for uid in (raw_uids or ()) if _uid(uid))
         except Exception:
             return ()
+
+    def _game_gps_navigation_present(self, *, include_snapshot=True):
+        """Return whether the game owns navigation, independent of UID health.
+
+        UID count alone is insufficient: the native route buffer can be empty
+        or rejected while a destination still exists.  During that interval a
+        recorded route must remain disarmed rather than becoming a fallback.
+        The redundant compatibility checks also keep fail-closed behaviour
+        with older engine state and across inter-process update boundaries.
+        """
+        if bool(self.sdk.get("game_gps_navigation_active", False)):
+            return True
+        if bool(self.sdk.get("navigation_arrival_pending", False)):
+            return True
+        if self.sdk.get("dest_city"):
+            return True
+        try:
+            if float(self.sdk.get("game_route_distance", 0.0) or 0.0) > 0.0:
+                return True
+        except (TypeError, ValueError, OverflowError):
+            return True
+        if len(self._normalise_gps_uids(
+                self.sdk.get("game_route_node_uids", []) or [])) >= 2:
+            return True
+        if include_snapshot:
+            snapshot = self.sdk.get("lane_trajectory", {}) or {}
+            if len(self._normalise_gps_uids(
+                    snapshot.get("source_gps_uids", []) or [])) >= 2:
+                return True
+        return False
+
+    def _deactivate_recorded_route(self, *, clear_outputs=False, reason=None):
+        """Disarm replay so it cannot resume after a GPS ownership interval."""
+        was_active = getattr(self, "active_route", None) is not None
+        self.active_route = None
+        self.sdk.set("recorded_route_active", False)
+        if self.sdk.get("navigation_source") == "recorded_route":
+            self.sdk.set("navigation_source", "none")
+        if clear_outputs:
+            self.sdk.set("nav_path", [])
+            self.sdk.set("nav_active", False)
+            self.sdk.set("nav_steering", 0.0)
+            self.sdk.set("nav_trajectory_revision", -1)
+        if was_active and reason:
+            logging.info("Navigation: recorded route disarmed: %s", reason)
 
     def _runtime_gps_window(self, uids):
         """Return an ordered, bounded prefix for live control geometry.
@@ -140,18 +197,24 @@ class Plugin(BasePlugin):
             "points": [], "display_points": [], "distance_m": 0.0,
             "failure_reason": str(reason or "Navigačná trajektória nie je platná"),
             "source_gps_uids": [int(uid) for uid in uids],
+            "request_id": self.sdk.get("nav_recalc_request"),
         }
+        gps_navigation_present = self._game_gps_navigation_present(
+            include_snapshot=False)
+        navigation_source = (
+            "gps_lane" if gps_navigation_present
+            else "recorded_route" if getattr(self, "active_route", None) is not None
+            else "none")
         self.sdk.shared_state.update_batch({
             "lane_trajectory_revision": revision,
             "lane_trajectory": snapshot,
+            "nav_path": [], "map_path": [],
+            "nav_active": False, "nav_steering": 0.0,
+            "nav_trajectory_revision": -1,
+            "navigation_unreliable": True,
+            "navigation_failure_reason": snapshot["failure_reason"],
+            "navigation_source": navigation_source,
         })
-        self.sdk.set("nav_path", [])
-        self.sdk.set("map_path", [])
-        self.sdk.set("nav_active", False)
-        self.sdk.set("nav_steering", 0.0)
-        self.sdk.set("nav_trajectory_revision", -1)
-        self.sdk.set("navigation_unreliable", True)
-        self.sdk.set("navigation_failure_reason", snapshot["failure_reason"])
         if status:
             technical = str(status)
             friendly = ("Trasu sa nepodarilo bezpečne zostaviť"
@@ -322,6 +385,8 @@ class Plugin(BasePlugin):
             "map_path": control_points,
             "nav_trajectory_revision": revision,
             "lane_trajectory_heartbeat": time.monotonic(),
+            "navigation_source": "gps_lane",
+            "recorded_route_active": False,
         })
         self.sdk.set("navigation_unreliable", False)
         self.sdk.set("navigation_failure_reason", "")
@@ -414,20 +479,30 @@ class Plugin(BasePlugin):
             self.recording = None
 
         elif cmd == "load":
+            if self._game_gps_navigation_present():
+                self._deactivate_recorded_route(clear_outputs=False)
+                self.sdk.set(
+                    "navigation_status",
+                    "Recorded route cannot start while game GPS is active")
+                logging.info(
+                    "Navigation: ignored recorded route '%s'; game GPS owns navigation.",
+                    arg)
+                return
             path = os.path.join(ROUTES_DIR, f"{arg}.json")
             try:
                 self.active_route = Route.load(path)
+                self.sdk.set("recorded_route_active", True)
+                self.sdk.set("navigation_source", "recorded_route")
+                self.sdk.set("nav_trajectory_revision", -1)
                 logging.info("Navigation: loaded route '%s' (%d points).",
                              arg, len(self.active_route))
                 self.sdk.set("tts_message", f"Route {arg} loaded. Navigation active.")
             except Exception as e:
                 logging.error("Navigation: failed to load '%s': %s", arg, e)
-                self.active_route = None
+                self._deactivate_recorded_route(clear_outputs=True)
 
         elif cmd in ("clear", "stop"):
-            self.active_route = None
-            self.sdk.set("nav_active", False)
-            self.sdk.set("nav_steering", 0.0)
+            self._deactivate_recorded_route(clear_outputs=True)
             logging.info("Navigation: stopped.")
 
         elif cmd == "switch_map":
@@ -643,6 +718,19 @@ class Plugin(BasePlugin):
 
         self._handle_command(pos)
 
+        # GPS and replay are mutually exclusive states.  Disarming (rather
+        # than merely suspending) is intentional: after a GPS target is
+        # removed an old recorded route may restart only after a new explicit
+        # UI ``load`` command.
+        gps_navigation_present = self._game_gps_navigation_present()
+        if (gps_navigation_present
+                and (getattr(self, "active_route", None) is not None
+                     or self.sdk.get("navigation_source") == "recorded_route")):
+            self._deactivate_recorded_route(
+                clear_outputs=(
+                    self.sdk.get("navigation_source") == "recorded_route"),
+                reason="game GPS became authoritative")
+
         if self.sdk.get("telemetry_valid", True) is False:
             current = self.sdk.get("lane_trajectory", {}) or {}
             if current.get("valid", False):
@@ -729,22 +817,28 @@ class Plugin(BasePlugin):
         # A live game-GPS route always wins over legacy recorded-route replay.
         # Otherwise replay could overwrite nav_steering/nav_path while HUD and
         # AR still displayed a valid lane snapshot from a different route.
-        gps_lane_requested = len(self._normalise_gps_uids(
-            self.sdk.get("game_route_node_uids", []) or [])) >= 2
-        if (not gps_lane_requested and self.active_route is not None
+        gps_navigation_present = self._game_gps_navigation_present()
+        if (not gps_navigation_present and self.active_route is not None
                 and len(self.active_route) >= 2):
             if self.active_route.is_finished(pos):
                 self.sdk.set("nav_active", False)
                 self.sdk.set("nav_steering", 0.0)
                 self.sdk.set("tts_message", "Destination reached.")
                 logging.info("Navigation: destination reached.")
-                self.active_route = None
+                self._deactivate_recorded_route(clear_outputs=True)
                 return
 
             steer = self.active_route.steering(pos, heading, speed,
                                                lane_offset_m=self._lane_offset())
-            self.sdk.set("nav_steering", float(steer))
-            self.sdk.set("nav_active", True)
+            self.sdk.shared_state.update_batch({
+                "nav_steering": float(steer),
+                "nav_active": True,
+                "navigation_source": "recorded_route",
+                "recorded_route_active": True,
+                "nav_trajectory_revision": -1,
+                "navigation_unreliable": False,
+                "navigation_failure_reason": "",
+            })
             self.sdk.set("distance_to_dest", self.active_route.distance_to_end(pos, heading))
             # Publish the upcoming path curvature so the autopilot can brake
             # BEFORE a sharp bend (anticipatory) instead of reacting to its own

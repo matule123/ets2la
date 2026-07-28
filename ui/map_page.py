@@ -1,6 +1,6 @@
 import os
-import json
 import math
+import time
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit, QComboBox,
@@ -11,6 +11,63 @@ from PyQt6.QtCore import Qt, QTimer, QPointF, QPoint, QThread, pyqtSignal
 from core.paths import app_dir
 
 ROUTES_DIR = os.path.join(app_dir(), "routes")
+
+
+def live_map_navigation_points(state, now=None):
+    """Return the sole geometry that the live map may draw in this state."""
+    snapshot = state.get("lane_trajectory", {}) or {}
+    try:
+        game_uids = tuple(int(uid) for uid in
+                          (state.get("game_route_node_uids", []) or []))
+        snapshot_uids = tuple(int(uid) for uid in
+                              (snapshot.get("source_gps_uids", []) or []))
+        route_distance = float(state.get("game_route_distance", 0.0) or 0.0)
+        gps_present = bool(
+            state.get("game_gps_navigation_active", False)
+            or state.get("navigation_arrival_pending", False)
+            or state.get("dest_city") or route_distance > 0.0
+            or len(game_uids) >= 2 or len(snapshot_uids) >= 2)
+    except (TypeError, ValueError, OverflowError):
+        return []
+
+    if gps_present:
+        try:
+            revision = int(snapshot.get("revision", -2) or -2)
+            current_revision = int(state.get(
+                "lane_trajectory_revision", -1) or -1)
+            heartbeat = float(state.get(
+                "lane_trajectory_heartbeat", 0.0) or 0.0)
+            now = time.monotonic() if now is None else float(now)
+            points = snapshot.get("display_points", []) or []
+            if (not snapshot.get("valid", False)
+                    or revision != current_revision
+                    or snapshot_uids != game_uids
+                    or snapshot.get("request_id") != state.get("nav_recalc_request")
+                    or heartbeat <= 0.0 or now - heartbeat > 0.5
+                    or state.get("telemetry_valid", True) is False
+                    or state.get("navigation_recalculating", False)
+                    or len(points) < 2):
+                return []
+            if any(not isinstance(point, (list, tuple)) or len(point) < 3
+                   or not all(math.isfinite(float(value)) for value in point[:3])
+                   for point in points):
+                return []
+            return points
+        except (TypeError, ValueError, OverflowError):
+            return []
+
+    if (state.get("navigation_source") == "recorded_route"
+            and state.get("recorded_route_active", False)):
+        points = state.get("nav_path", []) or []
+        try:
+            if len(points) >= 2 and all(
+                    isinstance(point, (list, tuple)) and len(point) >= 2
+                    and all(math.isfinite(float(value)) for value in point[:3])
+                    for point in points):
+                return points
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return []
 
 
 class MapDownloadWorker(QThread):
@@ -130,7 +187,10 @@ class MapView(QWidget):
             self._paint_map(qp, w, h, truck, heading)
             return
 
-        pts = list(self.route_points)
+        pts = [point for point in (
+            self._to_xz(point)
+            for point in live_map_navigation_points(self.state))
+            if point is not None]
         all_pts = pts + ([truck] if truck else [])
         if not all_pts:
             qp.setPen(QColor(self._pal['muted']))
@@ -184,41 +244,21 @@ class MapView(QWidget):
             sy = h / 2 - (cz - p[1]) * scale   # flip Z so north is up
             return QPointF(sx, sy)
 
-        def to_xz(point):
-            """Accept both legacy X/Z and authoritative lane X/Y/Z points."""
-            if not isinstance(point, (list, tuple)):
-                return None
-            if len(point) >= 3:
-                return float(point[0]), float(point[2])
-            if len(point) >= 2:
-                return float(point[0]), float(point[1])
-            return None
-
         # Nearby roads (grey).
         qp.setPen(QPen(QColor("#555B63"), 2, Qt.PenStyle.SolidLine,
                        Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         for a, b in self.road_segments:
             qp.drawLine(to_screen(a), to_screen(b))
 
-        # Blue is reserved for the route selected in the game's GPS.
-        snapshot = self.state.get("lane_trajectory", {}) or {}
-        ahead = ((snapshot.get("display_points", [])
-                  if snapshot.get("valid", False) else [])
-                 or self.state.get("nav_path", [])
-                 or self.state.get("game_route_points", []) or [])
-        ahead = [point for point in (to_xz(point) for point in ahead)
+        # GPS uses only current-revision snapshot geometry. Recorded replay is
+        # admitted only by live_map_navigation_points() in its exclusive mode.
+        ahead = live_map_navigation_points(self.state)
+        ahead = [point for point in (self._to_xz(point) for point in ahead)
                  if point is not None]
         if len(ahead) >= 2:
             qp.setPen(QPen(QColor("#1597F5"), 6, Qt.PenStyle.SolidLine,
                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
             qp.drawPolyline(QPolygonF([to_screen(p) for p in ahead]))
-
-        # Recorded/loaded route on top (green).
-        pts = list(self.route_points)
-        if len(pts) >= 2:
-            qp.setPen(QPen(QColor("#1597F5"), 6, Qt.PenStyle.SolidLine,
-                           Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-            qp.drawPolyline(QPolygonF([to_screen(p) for p in pts]))
 
         # Truck arrow at centre.
         c = to_screen(truck)
@@ -234,6 +274,19 @@ class MapView(QWidget):
         qp.setPen(QColor(185, 190, 198, 155))
         qp.drawText(14, h - 12, "koliesko: zoom  •  potiahnuť: posun  •  dvojklik: kamión")
 
+    @staticmethod
+    def _to_xz(point):
+        """Accept legacy X/Z and authoritative lane X/Y/Z points."""
+        if not isinstance(point, (list, tuple)):
+            return None
+        try:
+            if len(point) >= 3:
+                return float(point[0]), float(point[2])
+            if len(point) >= 2:
+                return float(point[0]), float(point[1])
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return None
 
 class MapPage(QWidget):
     """Navigation page: record / replay routes and watch the truck follow them."""
@@ -518,13 +571,11 @@ class MapPage(QWidget):
             return
         self.state.set("nav_arg", name)
         self.state.set("nav_cmd", "load")
-        # Load the polyline into the view for display.
-        try:
-            with open(os.path.join(ROUTES_DIR, f"{name}.json")) as f:
-                self.view.set_route(json.load(f).get("points", []))
-        except Exception:
-            self.view.set_route([])
-        self.status.setText(f"Navigating route '{name}'.")
+        # The map plugin validates exclusive ownership. Do not preview JSON
+        # directly here: that drew replay geometry over an active GPS snapshot
+        # even when the plugin correctly rejected the load command.
+        self.view.set_route([])
+        self.status.setText(f"Requesting recorded route '{name}'.")
 
     def stop_nav(self):
         self.state.set("nav_cmd", "stop")

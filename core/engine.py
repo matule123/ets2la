@@ -746,6 +746,17 @@ class UltraPilotEngine:
                 # destination actually exists; never plan from buffer contents
                 # alone.
                 has_game_destination = bool(route_distance > 25.0 or dest_city)
+                # Publish destination presence before touching any derived
+                # route geometry.  The map plugin runs in another process and
+                # must be able to suppress a recorded-route replay even while
+                # the native UID buffer is empty, stale, or being rebuilt.
+                # Keep the arrival interval authoritative as well: a waypoint
+                # 20 m away is still an active game-GPS route.
+                game_gps_navigation_active = bool(
+                    has_game_destination or arrival_pending)
+                self.shared_state.set(
+                    "game_gps_navigation_active",
+                    game_gps_navigation_active)
                 first_route = bool(has_game_destination and route_distance > 0
                                    and prev_distance in (None, 0))
                 planned_items = (self.ets2la_route.read()
@@ -754,30 +765,49 @@ class UltraPilotEngine:
                     if (self._had_game_destination
                             or self.shared_state.get("game_route_node_uids", [])):
                         logging.info("Navigation: in-game destination cleared; discarding SDK route buffer.")
-                    for key, value in (
-                            ("game_route_node_uids", []),
-                            ("game_route_points", []),
-                            ("game_route_meta", []),
-                            ("map_path", []), ("nav_path", [])):
-                        self.shared_state.set(key, value)
-                    self.shared_state.set("nav_active", False)
-                    old_lane = self.shared_state.get("lane_trajectory", {}) or {}
-                    lane_revision = max(
-                        int(old_lane.get("revision", 0) or 0),
-                        int(self.shared_state.get(
-                            "lane_trajectory_revision", 0) or 0)) + 1
-                    invalid_lane = {
-                        "revision": lane_revision, "valid": False,
-                        "confidence": 0.0, "active_lane_id": None,
-                        "lane_match": None, "points": [], "display_points": [],
-                        "distance_m": 0.0,
-                        "failure_reason": "V hernom GPS nie je zvolený cieľ",
-                        "source_gps_uids": [],
+                    recorded_route_owns_navigation = bool(
+                        self.shared_state.get("navigation_source")
+                            == "recorded_route"
+                        and self.shared_state.get(
+                            "recorded_route_active", False))
+                    cleared = {
+                        "game_route_node_uids": [],
+                        "game_route_points": [],
+                        "game_route_meta": [],
+                        "map_path": [],
                     }
-                    self.shared_state.update_batch({
-                        "lane_trajectory_revision": lane_revision,
-                        "lane_trajectory": invalid_lane,
-                    })
+                    if not recorded_route_owns_navigation:
+                        cleared.update({
+                            "nav_path": [], "nav_active": False,
+                            "nav_steering": 0.0,
+                            "nav_trajectory_revision": -1,
+                        })
+                    self.shared_state.update_batch(cleared)
+                    old_lane = self.shared_state.get("lane_trajectory", {}) or {}
+                    no_target_reason = "V hernom GPS nie je zvolený cieľ"
+                    lane_already_cleared = bool(
+                        not old_lane.get("valid", False)
+                        and old_lane.get("failure_reason") == no_target_reason
+                        and not (old_lane.get("source_gps_uids", []) or []))
+                    if not lane_already_cleared:
+                        lane_revision = max(
+                            int(old_lane.get("revision", 0) or 0),
+                            int(self.shared_state.get(
+                                "lane_trajectory_revision", 0) or 0)) + 1
+                        invalid_lane = {
+                            "revision": lane_revision, "valid": False,
+                            "confidence": 0.0, "active_lane_id": None,
+                            "lane_match": None, "points": [], "display_points": [],
+                            "distance_m": 0.0,
+                            "failure_reason": no_target_reason,
+                            "source_gps_uids": [],
+                            "request_id": self.shared_state.get(
+                                "nav_recalc_request"),
+                        }
+                        self.shared_state.update_batch({
+                            "lane_trajectory_revision": lane_revision,
+                            "lane_trajectory": invalid_lane,
+                        })
                     self.shared_state.set("navigation_recalculating", False)
                     self.shared_state.set("navigation_progress", 0.0)
                     self.shared_state.set("navigation_status", "V hernom GPS nie je zvolený cieľ")
@@ -861,15 +891,12 @@ class UltraPilotEngine:
                     self.shared_state.set("game_route_points", [])
                     if len(planned_uids) < 2:
                         self.shared_state.set("game_route_meta", [])
-                    self.shared_state.set("map_path", [])
-                    self.shared_state.set("nav_path", [])
-                    self.shared_state.set("nav_active", False)
-                    self.shared_state.set("nav_steering", 0.0)
                     old_lane = self.shared_state.get("lane_trajectory", {}) or {}
                     lane_revision = max(
                         int(old_lane.get("revision", 0) or 0),
                         int(self.shared_state.get(
                             "lane_trajectory_revision", 0) or 0)) + 1
+                    request = f"{time.time():.3f}:{dest_city}:{route_distance:.0f}"
                     invalid_lane = {
                         "revision": lane_revision, "valid": False,
                         "confidence": 0.0, "active_lane_id": None,
@@ -877,13 +904,18 @@ class UltraPilotEngine:
                         "distance_m": 0.0,
                         "failure_reason": "Načítavam GPS trasu",
                         "source_gps_uids": list(planned_uids),
+                        "request_id": request,
                     }
                     self.shared_state.update_batch({
                         "lane_trajectory_revision": lane_revision,
                         "lane_trajectory": invalid_lane,
+                        "map_path": [], "nav_path": [],
+                        "nav_active": False, "nav_steering": 0.0,
+                        "nav_trajectory_revision": -1,
+                        "navigation_source": "gps_lane",
+                        "recorded_route_active": False,
+                        "nav_recalc_request": request,
                     })
-                    request = f"{time.time():.3f}:{dest_city}:{route_distance:.0f}"
-                    self.shared_state.set("nav_recalc_request", request)
                     self.shared_state.set("nav_destination", dest_city or "nový cieľ")
                     logging.info("Navigation: new in-game destination detected (%s, %.1f km).",
                                  dest_city or "map waypoint", route_distance / 1000.0)
@@ -922,6 +954,7 @@ class UltraPilotEngine:
                     # Destination city of the current job (for the gantry sign).
                     "dest_city": dest_city,
                     "game_route_distance": route_distance,
+                    "game_gps_navigation_active": game_gps_navigation_active,
                     "navigation_arrival_pending": arrival_pending,
                     "game_route_time": float(truck.get("routeTime", 0.0) or 0.0),
                 })

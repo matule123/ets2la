@@ -1,5 +1,7 @@
 import unittest
 import time
+import math
+from unittest import mock
 
 from core.ar_overlay import AROverlay
 from core.hud import UltraPilotHUD
@@ -8,6 +10,7 @@ from plugins.autopilot.main import Plugin as AutopilotPlugin
 from plugins.map.main import (
     RUNTIME_ROUTE_HORIZON_M, RUNTIME_ROUTE_MAX_UIDS, Plugin as MapPlugin,
 )
+from UI.map_page import live_map_navigation_points
 from tests.test_lane_route_builder import SyntheticMap
 
 
@@ -120,10 +123,31 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
         hud_data = UltraPilotHUD._read(hud)
         ar = type("ARReader", (), {"state": sdk.shared_state})()
         ar_revision, ar_points = AROverlay._current_display_points(ar)
+        live_map_points = live_map_navigation_points(sdk.shared_state)
         self.assertIs(hud_data["nav_path"], snapshot["display_points"])
         self.assertIs(ar_points, snapshot["display_points"])
+        self.assertIs(live_map_points, snapshot["display_points"])
         self.assertEqual(hud_data["lane_revision"], snapshot["revision"])
         self.assertEqual(ar_revision, snapshot["revision"])
+
+        # The map controller is built from the same control samples, and the
+        # autopilot acknowledges exactly that lane revision before accepting
+        # its derived steering output.
+        sdk.set("system_state", "CRUISE")
+        sdk.set("danger_level", 0.0)
+        sdk.set("traffic", [])
+        sdk.set("autopilot_active", False)
+        sdk.controller = Controller()
+        sdk.telemetry = Telemetry()
+        autopilot = AutopilotPlugin(sdk)
+        autopilot.tags = Tags()
+        autopilot.on_start()
+        autopilot.on_tick(0.02)
+        readiness = sdk.get("autopilot_navigation_readiness")
+        self.assertTrue(readiness["ready"], readiness["reason"])
+        self.assertEqual(readiness["source"], "gps_lane")
+        self.assertEqual(readiness["revision"], snapshot["revision"])
+        self.assertEqual(sdk.get("autopilot_lane_revision"), snapshot["revision"])
 
     def test_destination_change_removes_old_revision_and_unproven_route(self):
         plugin, sdk, point = build_map_plugin()
@@ -156,6 +180,161 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
         plugin.on_tick(0.02)
         self.assertEqual(sdk.get("nav_path"), snapshot["display_points"])
         self.assertEqual(sdk.get("nav_trajectory_revision"), snapshot["revision"])
+        self.assertIsNone(plugin.active_route)
+        self.assertEqual(sdk.get("navigation_source"), "gps_lane")
+
+    def test_live_map_rejects_recorded_geometry_during_invalid_gps(self):
+        now = time.monotonic()
+        state = State({
+            "game_gps_navigation_active": True,
+            "game_route_distance": 900.0,
+            "game_route_node_uids": [],
+            "lane_trajectory_revision": 8,
+            "lane_trajectory_heartbeat": now,
+            "lane_trajectory": {
+                "revision": 8, "valid": False,
+                "failure_reason": "GPS topology is invalid",
+                "source_gps_uids": [], "display_points": [],
+            },
+            "navigation_source": "recorded_route",
+            "recorded_route_active": True,
+            "nav_path": [[90.0, 0.0], [90.0, 100.0]],
+        })
+        self.assertEqual(live_map_navigation_points(state, now), [])
+
+    def test_invalid_game_gps_without_uids_disarms_recorded_route(self):
+        sdk = MapSDK({
+            "truck_world_pos": (0.0, 0.0), "truck_heading": 0.0,
+            "truck_speed_ms": 5.0, "truck_altitude": 0.0,
+            "telemetry_valid": True,
+            "game_gps_navigation_active": True,
+            "game_route_distance": 1200.0,
+            "game_route_node_uids": [],
+            "lane_trajectory_revision": 4,
+            "lane_trajectory": {
+                "revision": 4, "valid": False,
+                "failure_reason": "native route buffer is stale",
+                "source_gps_uids": [], "points": [], "display_points": [],
+            },
+            "navigation_source": "recorded_route",
+            "recorded_route_active": True,
+            "nav_path": [[50.0, 0.0], [50.0, 100.0]],
+            "nav_active": True, "nav_steering": 0.8,
+        })
+        plugin = MapPlugin(sdk)
+        plugin.on_start()
+        plugin.tags = Tags()
+        plugin._net_attempted = True
+        plugin.active_route = Route([(50.0, 0.0), (50.0, 100.0)], "legacy")
+
+        plugin.on_tick(0.02)
+
+        self.assertIsNone(plugin.active_route)
+        self.assertFalse(sdk.get("recorded_route_active"))
+        self.assertEqual(sdk.get("navigation_source"), "gps_lane")
+        self.assertEqual(sdk.get("nav_path"), [])
+        self.assertFalse(sdk.get("nav_active"))
+        self.assertEqual(sdk.get("nav_steering"), 0.0)
+        self.assertEqual(sdk.get("nav_trajectory_revision"), -1)
+
+    def test_recorded_route_load_is_rejected_while_game_gps_exists(self):
+        sdk = MapSDK({
+            "nav_cmd": "load", "nav_arg": "legacy",
+            "game_gps_navigation_active": True,
+            "game_route_distance": 500.0,
+            "game_route_node_uids": [],
+        })
+        plugin = MapPlugin(sdk)
+        plugin.on_start()
+        with mock.patch.object(Route, "load") as load:
+            plugin._handle_command((0.0, 0.0))
+        load.assert_not_called()
+        self.assertIsNone(plugin.active_route)
+        self.assertFalse(sdk.get("recorded_route_active"))
+
+    def test_recorded_route_runs_only_after_explicit_load_without_gps(self):
+        sdk = MapSDK({
+            "nav_cmd": "load", "nav_arg": "legacy",
+            "truck_world_pos": (0.0, 0.0), "truck_heading": math.pi,
+            "truck_speed_ms": 5.0, "truck_altitude": 0.0,
+            "telemetry_valid": True,
+            "game_gps_navigation_active": False,
+            "game_route_distance": 0.0, "game_route_node_uids": [],
+            "lane_trajectory_revision": 0,
+        })
+        plugin = MapPlugin(sdk)
+        plugin.on_start()
+        plugin.tags = Tags()
+        plugin._net_attempted = True
+        recorded = Route([(0.0, 0.0), (0.0, 100.0), (0.0, 200.0)], "legacy")
+        with mock.patch.object(Route, "load", return_value=recorded) as load:
+            plugin.on_tick(0.02)
+        load.assert_called_once()
+        self.assertIs(plugin.active_route, recorded)
+        self.assertTrue(sdk.get("recorded_route_active"))
+        self.assertEqual(sdk.get("navigation_source"), "recorded_route")
+        self.assertTrue(sdk.get("nav_active"))
+        self.assertGreaterEqual(len(sdk.get("nav_path")), 2)
+        self.assertEqual(sdk.get("nav_trajectory_revision"), -1)
+
+        # Replay is a real, explicit no-GPS authority for the autopilot, not a
+        # hidden fallback from an invalid GPS snapshot.
+        sdk.set("system_state", "CRUISE")
+        sdk.set("danger_level", 0.0)
+        sdk.set("traffic", [])
+        sdk.set("autopilot_active", True)
+        sdk.controller = Controller()
+        sdk.telemetry = Telemetry()
+        autopilot = AutopilotPlugin(sdk)
+        autopilot.tags = Tags()
+        autopilot.on_start()
+        autopilot.on_tick(0.05)
+        readiness = sdk.get("autopilot_navigation_readiness")
+        self.assertTrue(readiness["ready"], readiness["reason"])
+        self.assertEqual(readiness["source"], "recorded_route")
+
+    def test_recorded_route_does_not_resume_after_gps_is_removed(self):
+        sdk = MapSDK({
+            "truck_world_pos": (0.0, 0.0), "truck_heading": math.pi,
+            "truck_speed_ms": 5.0, "truck_altitude": 0.0,
+            "telemetry_valid": True,
+            "game_gps_navigation_active": False,
+            "game_route_distance": 0.0, "game_route_node_uids": [],
+            "lane_trajectory_revision": 0,
+            "navigation_source": "recorded_route",
+            "recorded_route_active": True,
+        })
+        plugin = MapPlugin(sdk)
+        plugin.on_start()
+        plugin.tags = Tags()
+        plugin._net_attempted = True
+        plugin.active_route = Route(
+            [(0.0, 0.0), (0.0, 100.0), (0.0, 200.0)], "legacy")
+        sdk.set("navigation_source", "recorded_route")
+        sdk.set("recorded_route_active", True)
+        plugin.on_tick(0.02)
+        self.assertTrue(sdk.get("nav_active"))
+
+        sdk.set("game_gps_navigation_active", True)
+        sdk.set("game_route_distance", 1000.0)
+        plugin.on_tick(0.02)
+        self.assertIsNone(plugin.active_route)
+
+        sdk.set("game_gps_navigation_active", False)
+        sdk.set("game_route_distance", 0.0)
+        sdk.set("game_route_node_uids", [])
+        sdk.set("lane_trajectory", {
+            "revision": sdk.get("lane_trajectory_revision", 0) + 1,
+            "valid": False, "failure_reason": "no GPS target",
+            "source_gps_uids": [], "points": [], "display_points": [],
+        })
+        sdk.set("lane_trajectory_revision",
+                sdk.get("lane_trajectory")["revision"])
+        plugin.on_tick(0.02)
+        self.assertIsNone(plugin.active_route)
+        self.assertFalse(sdk.get("recorded_route_active"))
+        self.assertFalse(sdk.get("nav_active"))
+        self.assertEqual(sdk.get("nav_path"), [])
 
     def test_stale_or_invalid_snapshot_hides_hud_and_ar(self):
         plugin, sdk, _ = build_map_plugin()

@@ -57,6 +57,10 @@ class GameWatcher(BaseModule):
             "game_route_node_uids": [],
             "game_route_points": [],
             "game_route_meta": [],
+            "game_gps_navigation_active": False,
+            "recorded_route_active": False,
+            "navigation_source": "none",
+            "nav_trajectory_revision": -1,
             "navigation_unreliable": True,
             "game_session_id": self.session_id,
         })
