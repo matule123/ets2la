@@ -4,6 +4,7 @@ import math
 import time
 
 from core.camera import camera_snapshot_reason
+from core.navigation.navigation_intent import snapshot_matches_navigation_intent
 
 
 CONFIDENCE_THRESHOLD = 0.72
@@ -39,9 +40,7 @@ def build_runtime_preflight(state, now=None):
         revision, current_revision, snapshot_uids = -1, -2, ()
         confidence, xyz_ok = 0.0, False
     revision_ok = bool(revision == current_revision
-                       and snapshot_uids == game_uids
-                       and snapshot.get("request_id")
-                           == state.get("nav_recalc_request"))
+                       and snapshot_matches_navigation_intent(state, snapshot))
     try:
         heartbeat = float(state.get("lane_trajectory_heartbeat", 0.0) or 0.0)
         telemetry_timestamp = float(state.get(

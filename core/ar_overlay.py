@@ -8,6 +8,7 @@ geometry repair.  It renders only current ``display_points`` through the exact
 import sys
 import math
 import time
+from core.navigation.navigation_intent import snapshot_matches_navigation_intent
 
 from PyQt6.QtCore import QPointF, QTimer, Qt
 from PyQt6.QtGui import QColor, QPainter, QPen
@@ -275,10 +276,6 @@ class AROverlay(QWidget):
             snapshot_revision = int(snapshot.get("revision", -2) or -2)
             heartbeat = float(self.state.get(
                 "lane_trajectory_heartbeat", 0.0) or 0.0)
-            snapshot_uids = tuple(int(uid) for uid in
-                                  (snapshot.get("source_gps_uids", ()) or ()))
-            game_uids = tuple(int(uid) for uid in
-                              (self.state.get("game_route_node_uids", []) or []))
         except (TypeError, ValueError, OverflowError):
             return -1, [], "lane trajectory metadata is malformed"
         if not snapshot.get("valid", False):
@@ -286,10 +283,8 @@ class AROverlay(QWidget):
                                or "lane trajectory is invalid")
         if snapshot_revision != current_revision:
             return -1, [], "lane trajectory revision is stale"
-        if snapshot_uids != game_uids:
-            return -1, [], "lane trajectory belongs to a different GPS target"
-        if snapshot.get("request_id") != self.state.get("nav_recalc_request"):
-            return -1, [], "lane trajectory request is stale"
+        if not snapshot_matches_navigation_intent(self.state, snapshot):
+            return -1, [], "lane trajectory belongs to a different navigation intent"
         if heartbeat <= 0.0 or time.monotonic() - heartbeat > 0.5:
             return -1, [], "map plugin heartbeat is stale"
         if self.state.get("telemetry_valid", True) is False:

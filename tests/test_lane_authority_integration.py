@@ -1,12 +1,16 @@
 import unittest
 import time
 import math
+from dataclasses import replace
 from unittest import mock
 
 from core.ar_overlay import AROverlay
 from core.hud import UltraPilotHUD
 from core.navigation.route import Route
-from plugins.autopilot.main import Plugin as AutopilotPlugin
+from core.navigation.lane_model import LaneId
+from plugins.autopilot.main import (
+    Plugin as AutopilotPlugin, lane_authority_rejection_reason,
+)
 from plugins.map.main import (
     LANE_MATCH_GRACE_FRAMES, RUNTIME_ROUTE_HORIZON_M,
     RUNTIME_ROUTE_MAX_UIDS, Plugin as MapPlugin,
@@ -119,6 +123,26 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
             and not batch["lane_trajectory"].get("valid", False)
             for batch in new_batches))
 
+    def test_normal_active_lane_segment_change_does_not_schedule_build(self):
+        plugin, sdk, _point = build_map_plugin()
+        snapshot = sdk.get("lane_trajectory")
+        revision = snapshot["revision"]
+        build_id = snapshot["route_build_id"]
+        segments = plugin._lane_path.segments
+
+        near_end = segments[0].centerline[-2]
+        plugin._update_lane_trajectory(
+            (near_end.x, near_end.z), near_end.heading)
+        on_next = segments[1].centerline[1]
+        plugin._update_lane_trajectory(
+            (on_next.x, on_next.z), on_next.heading)
+
+        current = sdk.get("lane_trajectory")
+        self.assertEqual(current["revision"], revision)
+        self.assertEqual(current["route_build_id"], build_id)
+        self.assertEqual(current["points"], snapshot["points"])
+        self.assertEqual(plugin._lane_match.lane_id, segments[1].lane_id)
+
     def test_rolling_rebase_refreshes_only_near_horizon_end(self):
         plugin, sdk, _point = build_map_plugin()
         snapshot = dict(sdk.get("lane_trajectory"))
@@ -151,6 +175,42 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
         changed_session, _refresh = plugin._rebase_rolling_snapshot(
             snapshot, (2, 3), request)
         self.assertIsNone(changed_session)
+
+    def test_horizon_refresh_accepts_proven_lane_change_and_prefab_entry(self):
+        plugin, sdk, _point = build_map_plugin()
+        snapshot = sdk.get("lane_trajectory")
+        previous = plugin._lane_path
+        old_first, common_segment = previous.segments
+
+        lane_ids = (
+            LaneId(old_first.lane_id.road_uid, old_first.direction, 1),
+            LaneId(old_first.lane_id.road_uid, old_first.direction, 0,
+                   prefab_token="audit-prefab", connector_index=2,
+                   connector_path=(2,)),
+        )
+        for lane_id in lane_ids:
+            with self.subTest(lane_id=lane_id):
+                entered = replace(
+                    old_first, lane_id=lane_id,
+                    lane_index=lane_id.lane_index)
+                refreshed = replace(
+                    previous, segments=(entered, common_segment))
+                live_match = replace(plugin._lane_match, lane_id=lane_id)
+                self.assertEqual(plugin._horizon_continuity_reason(
+                    snapshot, previous, refreshed, (1, 2, 3),
+                    live_match), "")
+
+    def test_horizon_refresh_rejects_common_lane_without_shared_uid_edge(self):
+        plugin, sdk, _point = build_map_plugin()
+        snapshot = sdk.get("lane_trajectory")
+        original = plugin._lane_path.segments[0]
+        fake_common = replace(original, start_uid=90, end_uid=91)
+        previous = replace(plugin._lane_path, segments=(fake_common,))
+        refreshed = replace(plugin._lane_path, segments=(fake_common,))
+        live_match = replace(plugin._lane_match, lane_id=fake_common.lane_id)
+        reason = plugin._horizon_continuity_reason(
+            snapshot, previous, refreshed, (1, 2, 3), live_match)
+        self.assertIn("shared UID edge", reason)
 
     def test_100_km_gps_route_uses_ordered_rolling_runtime_horizon(self):
         plugin = MapPlugin.__new__(MapPlugin)
@@ -231,6 +291,41 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
         self.assertFalse(publication["nav_active"])
         self.assertEqual(publication["nav_steering"], 0.0)
 
+    def test_all_consumers_use_intent_and_revision_not_moving_uid_equality(self):
+        plugin, sdk, _ = build_map_plugin()
+        snapshot = sdk.get("lane_trajectory")
+        sdk.set("game_route_node_uids", [2, 3])
+        hud = type("HUDReader", (), {
+            "shared_state": sdk.shared_state,
+            "_rear_cam_side": "off", "_rear_cam_until": 0.0,
+        })()
+        ar = type("ARReader", (), {"state": sdk.shared_state})()
+
+        self.assertIs(UltraPilotHUD._read(hud)["nav_path"],
+                      snapshot["display_points"])
+        self.assertIs(AROverlay._current_display_points(ar)[1],
+                      snapshot["display_points"])
+        self.assertIs(live_map_navigation_points(sdk.shared_state),
+                      snapshot["display_points"])
+        self.assertEqual(lane_authority_rejection_reason(
+            sdk.shared_state, snapshot), "")
+
+        sdk.set("navigation_intent_id", "different-intent")
+        self.assertEqual(UltraPilotHUD._read(hud)["nav_path"], [])
+        self.assertEqual(AROverlay._current_display_points(ar), (-1, []))
+        self.assertEqual(live_map_navigation_points(sdk.shared_state), [])
+        self.assertIn("different navigation intent",
+                      lane_authority_rejection_reason(
+                          sdk.shared_state, snapshot))
+
+        sdk.set("navigation_intent_id", snapshot["navigation_intent_id"])
+        sdk.set("lane_trajectory_revision", snapshot["revision"] + 1)
+        self.assertEqual(UltraPilotHUD._read(hud)["nav_path"], [])
+        self.assertEqual(AROverlay._current_display_points(ar), (-1, []))
+        self.assertEqual(live_map_navigation_points(sdk.shared_state), [])
+        self.assertIn("stale", lane_authority_rejection_reason(
+            sdk.shared_state, snapshot))
+
     def test_destination_change_removes_old_revision_and_unproven_route(self):
         plugin, sdk, point = build_map_plugin()
         old_revision = sdk.get("lane_trajectory")["revision"]
@@ -301,7 +396,7 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
         self.assertEqual(sdk.get("navigation_failure_reason"), "")
         self.assertTrue(sdk.get("nav_active"))
 
-    def test_localization_grace_expires_and_invalidates_geometry(self):
+    def test_repeated_localization_miss_revokes_control_not_route_identity(self):
         plugin, sdk, point = build_map_plugin()
         original_revision = sdk.get("lane_trajectory_revision")
         locator = plugin.road_net._runtime_lane_locator
@@ -314,21 +409,24 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
                 self.assertEqual(sdk.get("nav_steering"), 0.0)
             plugin._update_lane_trajectory((point.x, point.z), point.heading)
 
-        expired = sdk.get("lane_trajectory")
-        self.assertFalse(expired["valid"])
-        self.assertEqual(expired["points"], [])
-        self.assertGreater(expired["revision"], original_revision)
-        self.assertEqual(expired["failure_code"], "LOCALIZATION_NO_MATCH")
+        held = sdk.get("lane_trajectory")
+        self.assertTrue(held["valid"])
+        self.assertEqual(held["revision"], original_revision)
+        self.assertTrue(held["points"])
+        self.assertFalse(sdk.get("lane_match")["valid"])
+        self.assertFalse(sdk.get("nav_active"))
+        self.assertEqual(sdk.get("nav_steering"), 0.0)
 
-    def test_localization_grace_also_has_a_time_limit(self):
+    def test_long_localization_miss_still_cannot_create_a_new_build(self):
         plugin, sdk, point = build_map_plugin()
         locator = plugin.road_net._runtime_lane_locator
         plugin._lane_loss_started_at = time.monotonic() - 1.0
         plugin._lane_loss_frames = 1
         with mock.patch.object(locator, "locate", return_value=None):
             plugin._update_lane_trajectory((point.x, point.z), point.heading)
-        self.assertFalse(sdk.get("lane_trajectory")["valid"])
-        self.assertEqual(sdk.get("lane_trajectory")["points"], [])
+        original = sdk.get("lane_trajectory")
+        self.assertTrue(original["valid"])
+        self.assertTrue(original["points"])
         self.assertFalse(sdk.get("nav_active"))
         self.assertEqual(sdk.get("nav_steering"), 0.0)
 
@@ -384,9 +482,9 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
         for _ in range(LANE_MATCH_GRACE_FRAMES + 1):
             plugin._update_lane_trajectory((point.x, point.z), opposite)
         current = sdk.get("lane_trajectory")
-        self.assertIsNot(current, original)
-        self.assertFalse(current["valid"])
-        self.assertEqual(current["points"], [])
+        self.assertIs(current, original)
+        self.assertTrue(current["valid"])
+        self.assertFalse(sdk.get("lane_match")["valid"])
         self.assertFalse(sdk.get("nav_active"))
 
     def test_xyz_and_vertical_layers_are_preserved(self):
@@ -645,7 +743,7 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
         self.assertFalse(sdk.get("nav_active"))
         self.assertEqual(sdk.get("nav_steering"), 0.0)
 
-    def test_telemetry_loss_clears_both_navigation_authorities(self):
+    def test_transient_telemetry_loss_preserves_gps_intent_but_stops_control(self):
         sdk = MapSDK({
             "truck_world_pos": (0.0, 0.0), "telemetry_valid": False,
             "game_gps_navigation_active": True,
@@ -669,13 +767,12 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
         plugin.on_tick(0.02)
 
         snapshot = sdk.get("lane_trajectory")
-        self.assertFalse(sdk.get("game_gps_navigation_active"))
-        self.assertEqual(sdk.get("game_route_node_uids"), [])
-        self.assertEqual(sdk.get("navigation_source"), "none")
+        self.assertTrue(sdk.get("game_gps_navigation_active"))
+        self.assertEqual(sdk.get("game_route_node_uids"), [1, 2])
         self.assertFalse(sdk.get("recorded_route_active"))
         self.assertIsNone(plugin.active_route)
-        self.assertFalse(snapshot["valid"])
-        self.assertEqual(snapshot["points"], [])
+        self.assertTrue(snapshot["valid"])
+        self.assertTrue(snapshot["points"])
         self.assertEqual(sdk.get("nav_path"), [])
         self.assertFalse(sdk.get("nav_active"))
         self.assertEqual(sdk.get("nav_steering"), 0.0)

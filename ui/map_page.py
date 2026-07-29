@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QPainter, QColor, QPen, QPolygonF
 from PyQt6.QtCore import Qt, QTimer, QPointF, QPoint, QThread, pyqtSignal
+from core.navigation.navigation_intent import snapshot_matches_navigation_intent
 from core.paths import app_dir
 
 ROUTES_DIR = os.path.join(app_dir(), "routes")
@@ -41,8 +42,7 @@ def live_map_navigation_points(state, now=None):
             points = snapshot.get("display_points", []) or []
             if (not snapshot.get("valid", False)
                     or revision != current_revision
-                    or snapshot_uids != game_uids
-                    or snapshot.get("request_id") != state.get("nav_recalc_request")
+                    or not snapshot_matches_navigation_intent(state, snapshot)
                     or heartbeat <= 0.0 or now - heartbeat > 0.5
                     or state.get("telemetry_valid", True) is False
                     or state.get("navigation_recalculating", False)

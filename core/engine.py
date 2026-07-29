@@ -15,7 +15,10 @@ from core.modules.traffic_analysis import TrafficAnalysis
 from core.planner import UltraPilotPlanner
 from core.camera import CameraSnapshotProducer
 from core.navigation.runtime_preflight import build_runtime_preflight
-from core.navigation.lane_model import gps_uids_are_rolling_suffix
+from core.navigation.navigation_intent import (
+    NavigationBufferClass, NavigationIntentTracker,
+    destination_identity,
+)
 from sdk.plugin_sdk import (
     CTL_STEERING, CTL_THROTTLE, CTL_BRAKE, CTL_BLINKER, CTL_PAY_TOLL,
     CTL_SELECT_DRIVE,
@@ -52,59 +55,42 @@ def _live_route_suffix(planned_items, route_distance):
     return list(planned_items[matched_index:]), matched_index, matched_distance
 
 
-def _game_route_distance_reset(previous, current):
-    """Return only a large upward route-distance reset, never normal progress."""
-    try:
-        previous = float(previous or 0.0)
-        current = float(current or 0.0)
-    except (TypeError, ValueError, OverflowError):
-        return False
-    return bool(
-        previous > 0.0 and current > 0.0
-        and current - previous > max(5000.0, previous * 0.25))
-
-
 def _telemetry_loss_navigation_payload(state):
-    """Build one fail-closed navigation batch for a missing telemetry frame."""
+    """Stop controls without turning one missing frame into a new route."""
     old_lane = state.get("lane_trajectory", {}) or {}
     telemetry_reason = "Telemetria vozidla nie je dostupná"
     current_revision = int(state.get(
         "lane_trajectory_revision", old_lane.get("revision", 0)) or 0)
-    lane_already_invalid = bool(
-        not old_lane.get("valid", False)
-        and old_lane.get("failure_reason") == telemetry_reason
-        and not (old_lane.get("source_gps_uids", []) or [])
-        and int(old_lane.get("revision", -1) or -1) == current_revision)
-    if lane_already_invalid:
-        lane_revision = current_revision
-        invalid_lane = old_lane
-    else:
-        lane_revision = max(
-            int(old_lane.get("revision", 0) or 0),
-            current_revision) + 1
-        invalid_lane = {
-            "revision": lane_revision, "valid": False,
-            "confidence": 0.0, "active_lane_id": None,
-            "lane_match": None, "points": [], "display_points": [],
-            "distance_m": 0.0, "failure_reason": telemetry_reason,
-            "source_gps_uids": [],
-            "request_id": state.get("nav_recalc_request"),
-        }
+    intent_id = state.get("navigation_intent_id")
+    try:
+        route_distance = float(state.get("game_route_distance", 0.0) or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        route_distance = 0.0
+    gps_evidence = bool(
+        state.get("game_gps_navigation_active", False)
+        or state.get("dest_city")
+        or route_distance > 0.0
+        or len(state.get("game_route_node_uids", ()) or ()) >= 2
+        or len(old_lane.get("source_gps_uids", ()) or ()) >= 2)
+    gps_owns_navigation = bool(intent_id and gps_evidence)
     return {
-        "game_gps_navigation_active": False,
-        "game_route_node_uids": [],
-        "game_route_points": [], "game_route_meta": [],
+        # Retain immutable geometry and the last observed UID window. Runtime
+        # authority is nevertheless fail-closed through telemetry_valid=False,
+        # a zero heartbeat and atomic zero control outputs.
+        "game_gps_navigation_active": gps_owns_navigation,
         "navigation_arrival_pending": False,
-        "lane_trajectory_revision": lane_revision,
-        "lane_trajectory": invalid_lane,
+        "lane_trajectory_revision": current_revision,
+        "lane_trajectory": old_lane,
         "lane_trajectory_heartbeat": 0.0,
-        "map_path": [], "nav_path": [],
         "nav_active": False, "nav_steering": 0.0,
-        "nav_trajectory_revision": -1,
-        "navigation_source": "none",
+        "navigation_source": "gps_lane" if gps_owns_navigation else "none",
         "recorded_route_active": False,
         "navigation_unreliable": True,
         "navigation_failure_reason": telemetry_reason,
+        "navigation_buffer_classification":
+            NavigationBufferClass.TEMPORARILY_UNAVAILABLE.value,
+        "navigation_buffer_available": False,
+        "navigation_buffer_reason": "telemetry frame is temporarily unavailable",
     }
 
 
@@ -165,9 +151,10 @@ class UltraPilotEngine:
         self._engine_start_attempt = 0
         self._last_engine_start = 0.0
         self._last_game_route_distance = None
-        self._last_game_destination = ""
         self._last_route_signature = None
-        self._last_planned_route_uids = ()
+        self._navigation_intent_tracker = NavigationIntentTracker(
+            self.shared_state.get("navigation_intent_id"))
+        self._last_navigation_buffer_log = None
         self._had_game_destination = False
         self._last_navigation_log_seq = None
         self._last_runtime_preflight = 0.0
@@ -805,15 +792,11 @@ class UltraPilotEngine:
                         and route_distance <= prev_distance + 5.0))
                 if route_distance > 60.0:
                     arrival_pending = False
-                destination_changed = bool(
-                    dest_city and dest_city != self._last_game_destination)
                 # routeDistance normally decreases while driving and can move
                 # by more than one sparse SDK-node interval between usable
                 # telemetry frames. It is never a destination identity. Only
                 # a large reset upwards is an early invalidation signal while
                 # waiting for the UID buffer to expose the new target.
-                distance_reset = _game_route_distance_reset(
-                    prev_distance, route_distance)
                 # A Local\ETS2LARoute mapping can retain its previous UIDs after
                 # the player removes the waypoint. The live SCS route distance
                 # (or an active job destination) is the gate that tells us a
@@ -831,8 +814,6 @@ class UltraPilotEngine:
                 self.shared_state.set(
                     "game_gps_navigation_active",
                     game_gps_navigation_active)
-                first_route = bool(has_game_destination and route_distance > 0
-                                   and prev_distance in (None, 0))
                 planned_items = (self.ets2la_route.read()
                                  if has_game_destination else [])
                 if not has_game_destination:
@@ -939,6 +920,43 @@ class UltraPilotEngine:
                         "Navigation: rejecting stale SDK route %.1f km; game GPS is %.1f km.",
                         buffer_distance / 1000.0, route_distance / 1000.0)
                     planned_uids = []
+                navigation_context = (
+                    self.shared_state.get("game_session_id"),
+                    self.shared_state.get("active_map_key"),
+                    self.shared_state.get("active_dataset_fingerprint"),
+                )
+                target_identity = destination_identity(
+                    dest_city, planned_items)
+                decision = self._navigation_intent_tracker.update(
+                    planned_items if not buffer_stale else (),
+                    destination_present=game_gps_navigation_active,
+                    destination=target_identity,
+                    context=navigation_context)
+                buffer_available = bool(len(planned_uids) >= 2)
+                decision_payload = {
+                    "navigation_intent_id": decision.intent_id,
+                    "navigation_buffer_classification":
+                        decision.classification.value,
+                    "navigation_buffer_available": buffer_available,
+                    "navigation_buffer_overlap": decision.overlap,
+                    "navigation_buffer_trimmed": decision.trimmed,
+                    "navigation_buffer_extended": decision.extended,
+                    "navigation_buffer_reason": decision.reason,
+                }
+                decision_log = (
+                    decision.classification.value, decision.intent_id)
+                if decision_log != self._last_navigation_buffer_log:
+                    snapshot = self.shared_state.get("lane_trajectory", {}) or {}
+                    logging.info(
+                        "Navigation buffer: classification=%s intent=%s "
+                        "build=%s revision=%s old_count=%d new_count=%d "
+                        "overlap=%d trimmed=%d extended=%d reason=%s",
+                        decision.classification.value, decision.intent_id,
+                        snapshot.get("route_build_id"),
+                        snapshot.get("revision"), decision.old_count,
+                        decision.new_count, decision.overlap,
+                        decision.trimmed, decision.extended, decision.reason)
+                    self._last_navigation_buffer_log = decision_log
                 route_signature = None
                 if len(planned_uids) >= 2:
                     # Do not include routeDistance: it changes continuously and
@@ -947,37 +965,37 @@ class UltraPilotEngine:
                         len(planned_uids), planned_uids[0],
                         planned_uids[len(planned_uids) // 2], planned_uids[-1],
                     )
-                    if route_signature != self._last_route_signature:
-                        self.shared_state.set("game_route_points", [])
-                    self.shared_state.set("game_route_node_uids", planned_uids)
-                    self.shared_state.set("game_route_meta", planned_items)
-                else:
-                    self.shared_state.set("game_route_node_uids", [])
-                    self.shared_state.set("game_route_points", [])
-                planned_uid_tuple = tuple(planned_uids)
-                planned_route_changed = bool(
-                    route_signature
-                    and planned_uid_tuple != self._last_planned_route_uids)
-                rolling_route_advance = gps_uids_are_rolling_suffix(
-                    self._last_planned_route_uids, planned_uid_tuple)
-                route_geometry_changed = bool(
-                    planned_route_changed and not rolling_route_advance)
-                if (destination_changed or distance_reset or first_route
-                        or route_geometry_changed):
+                intent_requires_build = decision.classification in {
+                    NavigationBufferClass.TRUE_REROUTE,
+                    NavigationBufferClass.SESSION_OR_DATASET_CHANGED,
+                }
+                if not intent_requires_build:
+                    observation_payload = dict(decision_payload)
+                    if len(planned_uids) >= 2:
+                        observation_payload.update({
+                            "game_route_node_uids": planned_uids,
+                            "game_route_meta": planned_items,
+                        })
+                        if route_signature != self._last_route_signature:
+                            observation_payload["game_route_points"] = []
+                    elif decision.classification != (
+                            NavigationBufferClass.TEMPORARILY_UNAVAILABLE):
+                        observation_payload.update({
+                            "game_route_node_uids": [],
+                            "game_route_points": [],
+                            "game_route_meta": [],
+                        })
+                    self.shared_state.update_batch(observation_payload)
+                if intent_requires_build:
                     # Drop every old representation immediately. Otherwise the
                     # map plugin can keep steering along the previous target
                     # while the native route buffer is being rebuilt.
-                    if len(planned_uids) < 2:
-                        self.shared_state.set("game_route_node_uids", [])
-                    self.shared_state.set("game_route_points", [])
-                    if len(planned_uids) < 2:
-                        self.shared_state.set("game_route_meta", [])
                     old_lane = self.shared_state.get("lane_trajectory", {}) or {}
                     lane_revision = max(
                         int(old_lane.get("revision", 0) or 0),
                         int(self.shared_state.get(
                             "lane_trajectory_revision", 0) or 0)) + 1
-                    request = f"{time.time():.3f}:{dest_city}:{route_distance:.0f}"
+                    request = decision.intent_id
                     invalid_lane = {
                         "revision": lane_revision, "valid": False,
                         "confidence": 0.0, "active_lane_id": None,
@@ -986,8 +1004,14 @@ class UltraPilotEngine:
                         "failure_reason": "Načítavam GPS trasu",
                         "source_gps_uids": list(planned_uids),
                         "request_id": request,
+                        "navigation_intent_id": decision.intent_id,
                     }
                     self.shared_state.update_batch({
+                        **decision_payload,
+                        "game_route_node_uids": list(planned_uids),
+                        "game_route_points": [],
+                        "game_route_meta": (planned_items
+                                            if len(planned_uids) >= 2 else []),
                         "lane_trajectory_revision": lane_revision,
                         "lane_trajectory": invalid_lane,
                         "map_path": [], "nav_path": [],
@@ -998,27 +1022,18 @@ class UltraPilotEngine:
                         "nav_recalc_request": request,
                     })
                     self.shared_state.set("nav_destination", dest_city or "nový cieľ")
-                    logging.info("Navigation: new in-game destination detected (%s, %.1f km).",
-                                 dest_city or "map waypoint", route_distance / 1000.0)
-                # A destination-change event clears only derived geometry. Keep
-                # the freshly read native route available in this same tick so
-                # the map plugin cannot get stuck at "processing N points".
-                if len(planned_uids) >= 2:
-                    self.shared_state.set("game_route_node_uids", planned_uids)
-                    self.shared_state.set("game_route_meta", planned_items)
+                    logging.info(
+                        "Navigation: new in-game destination detected "
+                        "(%s, %.1f km, intent=%s, reason=%s).",
+                        dest_city or "map waypoint", route_distance / 1000.0,
+                        decision.intent_id, decision.reason)
                 if route_signature:
                     self._last_route_signature = route_signature
-                    self._last_planned_route_uids = planned_uid_tuple
                 if has_game_destination and route_distance > 0:
                     self._last_game_route_distance = route_distance
                 elif not has_game_destination:
                     self._last_game_route_distance = None
                     self._last_route_signature = None
-                    self._last_planned_route_uids = ()
-                if dest_city:
-                    self._last_game_destination = dest_city
-                elif not has_game_destination:
-                    self._last_game_destination = ""
                 self._had_game_destination = has_game_destination
                 self.shared_state.update_batch({
                     "telemetry": self.telemetry.data,

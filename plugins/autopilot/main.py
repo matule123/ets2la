@@ -4,6 +4,7 @@ import time
 import numpy as np
 from sdk.base_plugin import BasePlugin
 from core.navigation.runtime_preflight import CONFIDENCE_THRESHOLD
+from core.navigation.navigation_intent import snapshot_matches_navigation_intent
 
 
 # --- Tuning (kept here, mirrored into settings under "autopilot" section) -----
@@ -55,14 +56,8 @@ def lane_authority_rejection_reason(state, snapshot, now=None):
         if snapshot_revision != current_revision:
             return (f"lane trajectory revision {snapshot_revision} is stale; "
                     f"current revision is {current_revision}")
-        snapshot_uids = tuple(int(uid) for uid in
-                              (snapshot.get("source_gps_uids", ()) or ()))
-        game_uids = tuple(int(uid) for uid in
-                          (state.get("game_route_node_uids", []) or []))
-        if snapshot_uids != game_uids:
-            return "lane trajectory belongs to a different GPS target"
-        if snapshot.get("request_id") != state.get("nav_recalc_request"):
-            return "lane trajectory calculation request is stale"
+        if not snapshot_matches_navigation_intent(state, snapshot):
+            return "lane trajectory belongs to a different navigation intent"
         heartbeat = float(state.get("lane_trajectory_heartbeat", 0.0) or 0.0)
         if heartbeat <= 0.0 or now - heartbeat > 0.5:
             return "map plugin heartbeat is stale"
@@ -86,15 +81,25 @@ def lane_authority_rejection_reason(state, snapshot, now=None):
                              or snapshot_revision)
         if match_revision != snapshot_revision:
             return "live lane localisation belongs to a stale trajectory"
-        snapshot_lane_id = snapshot.get("active_lane_id")
         live_lane_id = live_match.get("active_lane_id")
-        if (snapshot_lane_id is not None and live_lane_id is not None
-                and live_lane_id != snapshot_lane_id):
+        corridor = snapshot.get("lane_corridor", ()) or ()
+        corridor_entry = next((entry for entry in corridor
+                               if entry.get("lane_id") == live_lane_id), None)
+        if corridor and live_lane_id is not None and corridor_entry is None:
+            return "live localisation belongs to a lane outside the GPS corridor"
+        if (not corridor and snapshot.get("active_lane_id") is not None
+                and live_lane_id is not None
+                and live_lane_id != snapshot.get("active_lane_id")):
             return "live localisation belongs to a different GPS lane"
+        live_layer = live_match.get("elevation_layer")
+        if (corridor_entry is not None and live_layer is not None
+                and int(live_layer) != int(
+                    corridor_entry.get("elevation_layer"))):
+            return "live localisation belongs to a different elevation layer"
         snapshot_layer = (snapshot.get("lane_match") or {}).get(
             "elevation_layer")
-        live_layer = live_match.get("elevation_layer")
-        if (snapshot_layer is not None and live_layer is not None
+        if (not corridor and snapshot_layer is not None
+                and live_layer is not None
                 and int(live_layer) != int(snapshot_layer)):
             return "live localisation belongs to a different elevation layer"
         lateral = abs(float(live_match.get("lateral_error_m", 0.0) or 0.0))

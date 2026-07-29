@@ -57,7 +57,8 @@ class GameWatcher(BaseModule):
             "lane_match": None, "points": [], "display_points": [],
             "distance_m": 0.0, "failure_reason": reason,
             "source_gps_uids": [],
-            "request_id": state.get("nav_recalc_request"),
+            "request_id": None,
+            "navigation_intent_id": None,
         }
         state.update_batch({
             "autopilot_active": False,
@@ -70,6 +71,11 @@ class GameWatcher(BaseModule):
             "game_route_points": [],
             "game_route_meta": [],
             "game_gps_navigation_active": False,
+            "navigation_intent_id": None,
+            "nav_recalc_request": None,
+            "navigation_buffer_classification":
+                "SESSION_OR_DATASET_CHANGED",
+            "navigation_buffer_available": False,
             "recorded_route_active": False,
             "navigation_source": "none",
             "nav_trajectory_revision": -1,

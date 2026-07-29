@@ -5,6 +5,7 @@ import time
 from PyQt6.QtWidgets import QApplication, QWidget
 from PyQt6.QtGui import QPainter, QColor, QFont, QPen, QPolygonF, QRadialGradient, QLinearGradient, QBrush
 from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
+from core.navigation.navigation_intent import snapshot_matches_navigation_intent
 
 # State → accent colour (left as-is; the whole HUD now lives on the left panel).
 _STATE_COLORS = {
@@ -31,14 +32,8 @@ def hud_navigation_rejection_reason(state, trajectory, now=None):
         current_revision = int(state.get("lane_trajectory_revision", -1) or -1)
         if revision != current_revision:
             return "lane trajectory revision is stale"
-        snapshot_uids = tuple(int(uid) for uid in
-                              (trajectory.get("source_gps_uids", ()) or ()))
-        game_uids = tuple(int(uid) for uid in
-                          (state.get("game_route_node_uids", []) or []))
-        if snapshot_uids != game_uids:
-            return "lane trajectory belongs to a different GPS target"
-        if trajectory.get("request_id") != state.get("nav_recalc_request"):
-            return "lane trajectory request is stale"
+        if not snapshot_matches_navigation_intent(state, trajectory):
+            return "lane trajectory belongs to a different navigation intent"
         heartbeat = float(state.get("lane_trajectory_heartbeat", 0.0) or 0.0)
         if heartbeat <= 0.0 or now - heartbeat > 0.5:
             return "map plugin heartbeat is stale"

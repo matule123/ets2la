@@ -11,7 +11,11 @@ from core.navigation.route_diagnostics import (
     safe_diagnostic_call,
 )
 from core.navigation.runtime_preflight import CONFIDENCE_THRESHOLD
-from core.navigation.lane_model import gps_uids_are_rolling_suffix
+from core.navigation.navigation_intent import (
+    CONTINUATION_CLASSES, NavigationBufferClass, NavigationBuildGuard,
+    classify_navigation_buffer, ordered_suffix_prefix_overlap,
+    snapshot_matches_navigation_intent,
+)
 from core.paths import app_dir
 
 # routes/ lives next to the app (works both from source and when frozen).
@@ -78,6 +82,22 @@ class Plugin(BasePlugin):
         self._last_logged_lane_failure = None
         self._lane_retry_at = 0.0
         self._last_failed_route_diagnostic = None
+        self._build_guard = NavigationBuildGuard()
+        self._build_tokens = {}
+        legacy_gps_evidence = bool(
+            self.sdk.get("game_gps_navigation_active", False)
+            or self.sdk.get("dest_city")
+            or len(self._normalise_gps_uids(
+                self.sdk.get("game_route_node_uids", ()) or ())) >= 2)
+        if not self.sdk.get("navigation_intent_id") and legacy_gps_evidence:
+            # Safe compatibility with an older engine/shared state. The modern
+            # engine publishes this before the map worker needs it.
+            legacy_intent = (self.sdk.get("nav_recalc_request")
+                             or f"legacy-{time.time_ns()}")
+            self.sdk.shared_state.update_batch({
+                "navigation_intent_id": legacy_intent,
+                "nav_recalc_request": legacy_intent,
+            })
         # A plugin/process restart is not an explicit replay activation.
         # Manager-backed shared state can outlive this object, so discard only
         # stale recorded-route ownership while leaving a GPS snapshot intact.
@@ -145,6 +165,24 @@ class Plugin(BasePlugin):
             **metadata,
         }
 
+    def _lane_corridor_payload(self, lane_path):
+        """Ordered lane authority carried by one validated LanePath."""
+        result, seen = [], set()
+        for segment in getattr(lane_path, "segments", ()) or ():
+            if segment.lane_id in seen:
+                continue
+            seen.add(segment.lane_id)
+            result.append({
+                "lane_id": self._lane_id_payload(segment.lane_id),
+                "direction": int(segment.direction),
+                "lane_index": int(segment.lane_index),
+                "elevation_layer": int(segment.elevation_layer),
+                "lane_width_m": float(segment.width_m),
+                "start_uid": int(segment.start_uid),
+                "end_uid": int(segment.end_uid),
+            })
+        return result
+
     def _next_lane_revision(self):
         shared_revision = int(self.sdk.get(
             "lane_trajectory_revision", 0) or 0)
@@ -158,21 +196,61 @@ class Plugin(BasePlugin):
         return max(self._lane_revision, shared_revision) + 1
 
     def _route_build_environment(self):
+        try:
+            route_distance_m = float(
+                self.sdk.get("game_route_distance", 0.0) or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            route_distance_m = 0.0
         return {
             "active_map_key": self.sdk.get("active_map_key"),
             "active_map_name": self.sdk.get("active_map_name"),
             "game_version": self.sdk.get("installed_game_version"),
             "dataset_fingerprint": self.sdk.get(
                 "active_dataset_fingerprint", "unavailable") or "unavailable",
+            "game_session_id": self.sdk.get("game_session_id"),
+            "navigation_intent_id": self.sdk.get("navigation_intent_id"),
+            "navigation_request_id": self.sdk.get("nav_recalc_request"),
+            "navigation_buffer_classification": self.sdk.get(
+                "navigation_buffer_classification"),
+            "route_distance_m": route_distance_m,
         }
 
+    def _route_build_input_key(self, build_uids, match):
+        lane_key = (match.lane_id.sort_key() if match is not None else None)
+        return (
+            tuple(build_uids), lane_key,
+            self.sdk.get("game_session_id"),
+            self.sdk.get("active_map_key"),
+            self.sdk.get("active_dataset_fingerprint"),
+        )
+
     def _new_route_diagnostics(self, uids, pos, altitude, heading,
-                               started_monotonic=None):
-        return RouteBuildDiagnostics(
+                               started_monotonic=None, input_key=None):
+        diagnostic = RouteBuildDiagnostics(
             self._next_route_build_revision(), uids,
             (float(pos[0]), float(altitude), float(pos[1])), float(heading),
             self._route_build_environment(),
             started_monotonic=started_monotonic)
+        if input_key is not None:
+            token = self._build_guard.begin(
+                self.sdk.get("navigation_intent_id"), input_key,
+                diagnostic.build_id)
+            if token is None:
+                return None
+            self._build_tokens[diagnostic.build_id] = token
+            logging.info(
+                "Navigation buffer: classification=%s intent=%s build=%s "
+                "revision=%s old_count=%d new_count=%d overlap=%d "
+                "trimmed=%d extended=%d reason=validated route build scheduled",
+                self.sdk.get("navigation_buffer_classification", "UNKNOWN"),
+                self.sdk.get("navigation_intent_id"), diagnostic.build_id,
+                diagnostic.revision,
+                len((self.sdk.get("lane_trajectory", {}) or {}).get(
+                    "source_gps_uids", ()) or ()), len(tuple(uids)),
+                int(self.sdk.get("navigation_buffer_overlap", 0) or 0),
+                int(self.sdk.get("navigation_buffer_trimmed", 0) or 0),
+                int(self.sdk.get("navigation_buffer_extended", 0) or 0))
+        return diagnostic
 
     def _remember_route_diagnostic(self, diagnostic, status):
         record = (safe_diagnostic_call(diagnostic, "finish", status)
@@ -199,6 +277,9 @@ class Plugin(BasePlugin):
         except Exception:
             # Diagnostic publication is never part of navigation authority.
             pass
+        token = self._build_tokens.pop(
+            getattr(diagnostic, "build_id", None), None)
+        self._build_guard.finish(token)
         return record
 
     def _fail_route_build(self, diagnostic, reason, uids, status=None):
@@ -215,6 +296,33 @@ class Plugin(BasePlugin):
         safe_diagnostic_call(diagnostic, "start_phase", "publish_snapshot", {
             "valid": False, "failure_code": failure_code,
         })
+        current = self.sdk.get("lane_trajectory", {}) or {}
+        if (self._rolling_route_refresh_needed
+                and current.get("valid", False)
+                and current.get("navigation_intent_id")
+                    == self.sdk.get("navigation_intent_id")):
+            # A failed horizon refresh cannot erase the last validated
+            # trajectory for the same intent. Control still depends on the
+            # live LaneMatch; no stale steering is manufactured here.
+            safe_diagnostic_call(diagnostic, "finish_phase", "publish_snapshot",
+                                 details={
+                "published_revision": current.get("revision"),
+                "valid": True, "preserved_previous_snapshot": True,
+                "point_count": len(current.get("points", ()) or ()),
+            })
+            self.sdk.shared_state.update_batch({
+                "navigation_recalculating": False,
+                "navigation_status": friendly,
+                "navigation_failure_reason": str(reason),
+            })
+            try:
+                logging.error(
+                    "Navigation horizon refresh failed; preserving revision %s: %s",
+                    current.get("revision"), reason)
+            except Exception:
+                pass
+            self._remember_route_diagnostic(diagnostic, "failed")
+            return current
         snapshot = self._publish_invalid_lane_trajectory(
             reason, uids, status or friendly,
             revision=diagnostic.revision,
@@ -297,13 +405,26 @@ class Plugin(BasePlugin):
             return ()
 
     def _rebase_rolling_snapshot(self, snapshot, uids, request_id):
-        """Rebind unchanged geometry to a proven monotonic GPS suffix."""
+        """Rebind unchanged geometry to any proven continuation window."""
         old_uids = self._normalise_gps_uids(
             snapshot.get("source_gps_uids", ()) or ())
         uids = tuple(uids or ())
+        intent_id = self.sdk.get("navigation_intent_id")
+        classification, overlap, _trimmed, _extended, _reason = (
+            classify_navigation_buffer(
+                old_uids, uids, destination_present=True,
+                old_destination=intent_id, new_destination=intent_id,
+                old_context=(snapshot.get("source_game_session_id"),
+                             snapshot.get("source_map_key"),
+                             snapshot.get("source_dataset_fingerprint")),
+                new_context=(self.sdk.get("game_session_id"),
+                             self.sdk.get("active_map_key"),
+                             self.sdk.get("active_dataset_fingerprint"))))
         if (not snapshot.get("valid", False)
-                or not gps_uids_are_rolling_suffix(old_uids, uids)
+                or classification not in CONTINUATION_CLASSES
+                or classification == NavigationBufferClass.TEMPORARILY_UNAVAILABLE
                 or snapshot.get("request_id") != request_id
+                or snapshot.get("navigation_intent_id", request_id) != intent_id
                 or not snapshot.get("route_build_id")
                 or snapshot.get("source_game_session_id")
                     != self.sdk.get("game_session_id")
@@ -314,25 +435,67 @@ class Plugin(BasePlugin):
             return None, False
         covered = self._normalise_gps_uids(
             snapshot.get("covered_gps_uids", ()) or ())
-        covered_index = next((
-            index for index in range(len(covered))
-            if tuple(covered[index:]) == uids[:len(covered) - index]
-        ), None)
-        if covered_index is None:
+        covered_overlap = ordered_suffix_prefix_overlap(covered, uids)
+        if covered_overlap < min(2, len(covered), len(uids)):
             # The truck advanced beyond the geometry horizon. Old points no
             # longer prove the current route and must not be retained.
             return None, False
-        remaining_covered = covered[covered_index:]
+        remaining_covered = covered[-covered_overlap:]
         rebased = dict(snapshot)
         rebased["source_gps_uids"] = [int(uid) for uid in uids]
         rebased["covered_gps_uids"] = [int(uid) for uid in remaining_covered]
+        rebased["navigation_intent_id"] = intent_id
         capacity = max(2, int(snapshot.get(
             "covered_gps_uid_capacity", len(covered)) or len(covered)))
         rebased["covered_gps_uid_capacity"] = capacity
+        horizon_complete = bool(
+            snapshot.get("route_horizon_complete", False)
+            and covered_overlap == len(uids))
+        rebased["route_horizon_complete"] = horizon_complete
         refresh_needed = bool(
-            not snapshot.get("route_horizon_complete", False)
+            not horizon_complete
             and len(remaining_covered) <= max(2, capacity // 3))
         return rebased, refresh_needed
+
+    def _horizon_continuity_reason(self, snapshot, previous_path,
+                                   new_path, build_uids, match):
+        """Empty means a replacement horizon is topologically proven."""
+        if not snapshot.get("valid", False):
+            return ""
+        if snapshot.get("navigation_intent_id") != self.sdk.get(
+                "navigation_intent_id"):
+            return "navigation intent changed during horizon refresh"
+        covered = self._normalise_gps_uids(
+            snapshot.get("covered_gps_uids", ()) or ())
+        overlap_count = ordered_suffix_prefix_overlap(covered, build_uids)
+        if overlap_count < 2:
+            return "horizon refresh has no ordered common UID edge"
+        shared_sequence = covered[-overlap_count:]
+        shared_uid_edges = set(zip(shared_sequence, shared_sequence[1:]))
+        old_segments = tuple(getattr(previous_path, "segments", ()) or ())
+        new_segments = tuple(getattr(new_path, "segments", ()) or ())
+        if not old_segments or not new_segments:
+            return "horizon refresh lacks LaneSegment identity"
+        old_by_id = {segment.lane_id: segment for segment in old_segments}
+        common = [(old_by_id[segment.lane_id], segment)
+                  for segment in new_segments if segment.lane_id in old_by_id]
+        if not common:
+            return "horizon refresh has no common LaneId"
+        proven_common = [(old, new) for old, new in common
+                         if (old.start_uid, old.end_uid) in shared_uid_edges
+                         and (new.start_uid, new.end_uid)
+                             == (old.start_uid, old.end_uid)]
+        if not proven_common:
+            return "horizon refresh has no common LaneId on the shared UID edge"
+        new_by_id = {segment.lane_id: segment for segment in new_segments}
+        if match is not None and match.lane_id not in new_by_id:
+            return "live LaneId is outside the newly validated horizon"
+        for old, new in proven_common:
+            if (old.direction != new.direction
+                    or old.elevation_layer != new.elevation_layer
+                    or old.lane_index != new.lane_index):
+                return "common LaneId changed direction, lane or elevation layer"
+        return ""
 
     def _game_gps_navigation_present(self, *, include_snapshot=True):
         """Return whether the game owns navigation, independent of UID health.
@@ -408,13 +571,17 @@ class Plugin(BasePlugin):
                 break
         return tuple(selected)
 
-    def _build_is_current(self, uids, revision, request_id=None):
+    def _build_is_current(self, uids, revision, request_id=None,
+                          diagnostic=None):
+        token = (self._build_tokens.get(diagnostic.build_id)
+                 if diagnostic is not None else None)
         return bool(
             self._normalise_gps_uids(
                 self.sdk.get("game_route_node_uids", []) or []) == tuple(uids)
             and int(self.sdk.get("lane_trajectory_revision", -1) or -1)
                 == int(revision)
-            and self.sdk.get("nav_recalc_request") == request_id)
+            and self.sdk.get("nav_recalc_request") == request_id
+            and (diagnostic is None or self._build_guard.may_publish(token)))
 
     def _reset_lane_loss(self):
         self._lane_loss_started_at = None
@@ -425,10 +592,11 @@ class Plugin(BasePlugin):
         if not snapshot.get("valid", False):
             return ""
         checks = (
-            (tuple(snapshot.get("source_gps_uids", ()) or ()) == tuple(uids),
-             "GPS UID order changed"),
             (snapshot.get("request_id") == request_id,
              "GPS calculation request changed"),
+            (snapshot.get("navigation_intent_id", request_id)
+                == self.sdk.get("navigation_intent_id"),
+             "navigation intent changed"),
             (bool(snapshot.get("route_build_id")),
              "route build identity is missing"),
             (snapshot.get("source_game_session_id")
@@ -445,7 +613,7 @@ class Plugin(BasePlugin):
         if mismatch:
             return mismatch
         identity = (
-            tuple(snapshot.get("source_gps_uids", ()) or ()),
+            snapshot.get("navigation_intent_id", snapshot.get("request_id")),
             snapshot.get("request_id"), snapshot.get("route_build_id"),
             snapshot.get("source_game_session_id"),
             snapshot.get("source_map_key"),
@@ -468,6 +636,13 @@ class Plugin(BasePlugin):
                                          log_failure=True, revision=None,
                                          route_build_id=None,
                                          failure_code=None):
+        if route_build_id is None:
+            # An external authority/session/teleport invalidation supersedes a
+            # previously completed input. A subsequent identical UID window
+            # must be allowed one fresh validated build. Failed build results
+            # pass their build ID and remain deduplicated by the guard.
+            self._build_guard.reset_intent(
+                self.sdk.get("navigation_intent_id"))
         revision = (self._next_lane_revision() if revision is None
                     else int(revision))
         self._lane_revision = max(self._lane_revision, revision)
@@ -478,6 +653,7 @@ class Plugin(BasePlugin):
             "failure_reason": str(reason or "Navigačná trajektória nie je platná"),
             "source_gps_uids": [int(uid) for uid in uids],
             "request_id": self.sdk.get("nav_recalc_request"),
+            "navigation_intent_id": self.sdk.get("navigation_intent_id"),
             "route_build_id": route_build_id,
             "failure_code": failure_code,
         }
@@ -542,6 +718,23 @@ class Plugin(BasePlugin):
         signature = uids
         if signature != self._lane_signature:
             current_snapshot = self.sdk.get("lane_trajectory", {}) or {}
+            old_window = self._normalise_gps_uids(
+                current_snapshot.get("source_gps_uids", ()) or ())
+            observed_class, _observed_overlap, _, _, _ = (
+                classify_navigation_buffer(
+                    old_window, uids, destination_present=True,
+                    old_destination=current_snapshot.get(
+                        "navigation_intent_id"),
+                    new_destination=self.sdk.get("navigation_intent_id"),
+                    old_context=(
+                        current_snapshot.get("source_game_session_id"),
+                        current_snapshot.get("source_map_key"),
+                        current_snapshot.get(
+                            "source_dataset_fingerprint")),
+                    new_context=(self.sdk.get("game_session_id"),
+                                 self.sdk.get("active_map_key"),
+                                 self.sdk.get(
+                                     "active_dataset_fingerprint"))))
             rebased, refresh_needed = self._rebase_rolling_snapshot(
                 current_snapshot, uids, self.sdk.get("nav_recalc_request"))
             if rebased is not None:
@@ -554,7 +747,7 @@ class Plugin(BasePlugin):
                     "nav_trajectory_revision": rebased.get("revision", -1),
                 })
                 self._lane_authority_identity = (
-                    tuple(rebased["source_gps_uids"]),
+                    rebased.get("navigation_intent_id"),
                     rebased["request_id"], rebased["route_build_id"],
                     rebased["source_game_session_id"],
                     rebased["source_map_key"],
@@ -571,9 +764,31 @@ class Plugin(BasePlugin):
             locator = getattr(self.road_net, "_runtime_lane_locator", None)
             if locator is not None:
                 locator.previous = None
-            self._publish_invalid_lane_trajectory(
-                "Načítavam GPS trasu", uids, "Načítavam GPS trasu",
-                log_failure=False)
+            declared_class = self.sdk.get(
+                "navigation_buffer_classification")
+            incompatible_change = bool(
+                observed_class in {
+                    NavigationBufferClass.TRUE_REROUTE,
+                    NavigationBufferClass.SESSION_OR_DATASET_CHANGED,
+                }
+                or declared_class in {
+                    NavigationBufferClass.TRUE_REROUTE.value,
+                    NavigationBufferClass.SESSION_OR_DATASET_CHANGED.value,
+                    NavigationBufferClass.DESTINATION_REMOVED.value,
+                })
+            if current_snapshot.get("valid", False) and not incompatible_change:
+                # A compatible window must never erase a usable trajectory.
+                # A horizon refresh below can replace it only after validation.
+                self._rolling_route_refresh_needed = True
+            elif current_snapshot.get("valid", False):
+                self._publish_invalid_lane_trajectory(
+                    "GPS navigation intent changed", uids,
+                    "Načítavam GPS trasu", log_failure=False)
+            elif current_snapshot.get("navigation_intent_id") != self.sdk.get(
+                    "navigation_intent_id"):
+                self._publish_invalid_lane_trajectory(
+                    "Načítavam GPS trasu", uids, "Načítavam GPS trasu",
+                    log_failure=False)
             self.sdk.set("navigation_recalculating", bool(len(uids) >= 2))
         if len(uids) < 2:
             return None
@@ -584,6 +799,7 @@ class Plugin(BasePlugin):
         build_uids = self._runtime_gps_window(uids)
         altitude = float(self.sdk.get("truck_altitude", 0.0) or 0.0)
         current = self.sdk.get("lane_trajectory", {}) or {}
+        previous_lane_path = self._lane_path
         build_revision = int(self.sdk.get(
             "lane_trajectory_revision", -1) or -1)
         build_request = self.sdk.get("nav_recalc_request")
@@ -620,11 +836,9 @@ class Plugin(BasePlugin):
             self._rolling_route_refresh_needed
             or not current.get("valid", False))
         failure_signature = (uids, str(current.get("failure_reason", "")))
-        if (needs_build and self._lane_failure_signature == failure_signature
-                and time.monotonic() < self._lane_retry_at):
-            return None
-        # Re-localise on the authoritative lane each tick. A confirmed lane
-        # transition triggers a fresh trajectory revision, never a shifted copy.
+        # Re-localise on the authoritative lane each tick. Moving between the
+        # already validated LaneSegments updates only live localisation; it is
+        # not a reason to rebuild the same trajectory.
         locator = getattr(self.road_net, "_runtime_lane_locator", None)
         if locator is None:
             from core.navigation.lane_model import LaneLocator
@@ -647,8 +861,15 @@ class Plugin(BasePlugin):
             return None
         diagnostic = None
         if diagnostic_requested:
+            input_key = self._route_build_input_key(build_uids, match)
+            if self._build_guard.input_completed(
+                    self.sdk.get("navigation_intent_id"), input_key):
+                return self._lane_path if current.get("valid", False) else None
             diagnostic = self._new_route_diagnostics(
-                uids, pos, altitude, heading, locator_started)
+                uids, pos, altitude, heading, locator_started,
+                input_key=input_key)
+            if diagnostic is None:
+                return self._lane_path if current.get("valid", False) else None
             safe_diagnostic_call(diagnostic, "start_phase", "LaneLocator")
         if match is None:
             self._lane_localization_current = False
@@ -664,20 +885,10 @@ class Plugin(BasePlugin):
                     self._lane_loss_started_at = now
                     self._lane_loss_frames = 0
                 self._lane_loss_frames += 1
-                within_grace = bool(
-                    self._lane_match is not None
-                    and self._lane_loss_frames <= LANE_MATCH_GRACE_FRAMES
-                    and now - self._lane_loss_started_at
-                        <= LANE_MATCH_GRACE_SECONDS
-                    and not self._snapshot_identity_mismatch(
-                        current, uids, build_request))
-                if not within_grace:
-                    self._reset_lane_loss()
-                    self._publish_invalid_lane_trajectory(
-                        "Live lane localization was lost", uids,
-                        "GPS lane localization was lost",
-                        failure_code="LOCALIZATION_NO_MATCH")
-                    return None
+                # Geometry and destination identity remain valid. Loss of the
+                # live LaneMatch removes control authority atomically, but it
+                # is not permission to rebuild the same LanePath or invent a
+                # new intent. Keep previous-match hysteresis for reacquisition.
                 self.sdk.shared_state.update_batch({
                     "lane_match": {
                         "revision": self._lane_revision,
@@ -694,6 +905,10 @@ class Plugin(BasePlugin):
                         "Live lane localization is temporarily unavailable"),
                 })
                 return self._lane_path
+            if self._lane_failure_signature == failure_signature:
+                # Same intent/window and same failed input: observe localisation
+                # on later ticks, but do not schedule another identical build.
+                return None
             if diagnostic is None:
                 diagnostic = self._new_route_diagnostics(
                     uids, pos, altitude, heading, locator_started)
@@ -732,27 +947,6 @@ class Plugin(BasePlugin):
                 "confidence": float(match.confidence),
                 "score_components": dict(match.score_components),
             })
-        if (self._lane_match is not None
-                and match.lane_id != self._lane_match.lane_id):
-            needs_build = True
-            if diagnostic is None:
-                diagnostic = self._new_route_diagnostics(
-                    uids, pos, altitude, heading, locator_started)
-                safe_diagnostic_call(diagnostic, "start_phase", "LaneLocator")
-                locator_capture = {}
-                locator.locate(
-                    (pos[0], altitude, pos[1]), heading, build_uids,
-                    self._lane_match, diagnostics=locator_capture,
-                    diagnostic_mode=True)
-                safe_diagnostic_call(diagnostic, "observe_locator",
-                                     locator_capture, match)
-                safe_diagnostic_call(
-                    diagnostic, "finish_phase", "LaneLocator", details={
-                    "outcome": "lane_transition",
-                    "lane_id": self._lane_id_payload(match.lane_id),
-                    "confidence": float(match.confidence),
-                    "score_components": dict(match.score_components),
-                }, duration_ms=(time.monotonic()-locator_started)*1000.0)
         self._lane_match = match
         self._lane_localization_current = True
         if not needs_build and self._lane_path is not None:
@@ -773,8 +967,15 @@ class Plugin(BasePlugin):
         # runtime object is still one real calculation and therefore needs its
         # own build id and target revision.
         if diagnostic is None:
+            input_key = self._route_build_input_key(build_uids, match)
+            if self._build_guard.input_completed(
+                    self.sdk.get("navigation_intent_id"), input_key):
+                return self._lane_path if current.get("valid", False) else None
             diagnostic = self._new_route_diagnostics(
-                uids, pos, altitude, heading, locator_started)
+                uids, pos, altitude, heading, locator_started,
+                input_key=input_key)
+            if diagnostic is None:
+                return self._lane_path if current.get("valid", False) else None
             safe_diagnostic_call(diagnostic, "start_phase", "LaneLocator")
             locator_capture = {}
             locator.locate(
@@ -815,7 +1016,8 @@ class Plugin(BasePlugin):
                 uids, str(snapshot.get("failure_reason", "")))
             self._lane_retry_at = failure_time + 1.0
             return None
-        if not self._build_is_current(uids, build_revision, build_request):
+        if not self._build_is_current(
+                uids, build_revision, build_request, diagnostic):
             self._finish_stale_route_build(
                 diagnostic, "GPS revision changed while building LanePath",
                 build_revision)
@@ -860,13 +1062,26 @@ class Plugin(BasePlugin):
                 uids, str(snapshot.get("failure_reason", "")))
             self._lane_retry_at = failure_time + 1.0
             return None
-        if not self._build_is_current(uids, build_revision, build_request):
+        continuity_reason = self._horizon_continuity_reason(
+            current, previous_lane_path, trajectory, build_uids, match)
+        if continuity_reason:
+            safe_diagnostic_call(
+                diagnostic, "fail_phase", "connect_lane_sequence",
+                continuity_reason, {"failure_code": "TOPOLOGY_NO_CONNECTION"})
+            snapshot = self._fail_route_build(
+                diagnostic, continuity_reason, uids)
+            self._lane_failure_signature = (
+                uids, str(snapshot.get("failure_reason", "")))
+            return previous_lane_path
+        if not self._build_is_current(
+                uids, build_revision, build_request, diagnostic):
             self._finish_stale_route_build(
                 diagnostic, "GPS revision changed after trajectory validation",
                 build_revision)
             return None
         revision = diagnostic.revision
         live_match_payload = self._lane_match_payload(match, revision)
+        lane_corridor = self._lane_corridor_payload(trajectory)
         control_points = [[float(p.x), float(p.y), float(p.z)]
                           for p in trajectory.points]
         # Phase 4 requires controller, HUD and AR to consume geometrically
@@ -886,6 +1101,7 @@ class Plugin(BasePlugin):
                 "threshold": CONFIDENCE_THRESHOLD,
             },
             "active_lane_id": self._lane_id_payload(match.lane_id),
+            "lane_corridor": lane_corridor,
             "lane_match": dict(live_match_payload),
             "points": control_points, "display_points": display_points,
             "distance_m": float(trajectory.distance_m), "failure_reason": "",
@@ -894,6 +1110,7 @@ class Plugin(BasePlugin):
             "covered_gps_uid_capacity": len(build_uids),
             "route_horizon_complete": len(build_uids) == len(uids),
             "request_id": build_request,
+            "navigation_intent_id": self.sdk.get("navigation_intent_id"),
             "route_build_id": diagnostic.build_id,
             "source_game_session_id": self.sdk.get("game_session_id"),
             "source_map_key": self.sdk.get("active_map_key"),
@@ -923,7 +1140,7 @@ class Plugin(BasePlugin):
         })
         self._lane_revision = max(self._lane_revision, revision)
         self._lane_authority_identity = (
-            tuple(snapshot["source_gps_uids"]), snapshot["request_id"],
+            snapshot["navigation_intent_id"], snapshot["request_id"],
             snapshot["route_build_id"], snapshot["source_game_session_id"],
             snapshot["source_map_key"],
             snapshot["source_dataset_fingerprint"],
@@ -1084,6 +1301,8 @@ class Plugin(BasePlugin):
             self._lane_failure_signature = None
             self._last_logged_lane_failure = None
             self._lane_retry_at = 0.0
+            self._build_guard = NavigationBuildGuard()
+            self._build_tokens = {}
             self._roads_pos = None
             # Invalidate control geometry before publishing any map metadata;
             # another process must never observe a switched dataset alongside
@@ -1093,6 +1312,15 @@ class Plugin(BasePlugin):
                 "Načítavam zvolenú mapu", log_failure=False)
             self._roads_revision += 1
             self.sdk.shared_state.update_batch({
+                "navigation_intent_id": None,
+                "nav_recalc_request": None,
+                "navigation_buffer_classification":
+                    NavigationBufferClass.SESSION_OR_DATASET_CHANGED.value,
+                "navigation_buffer_available": False,
+                "game_gps_navigation_active": False,
+                "game_route_node_uids": [],
+                "game_route_points": [],
+                "game_route_meta": [],
                 "active_map_key": None,
                 "active_map_name": None,
                 "active_dataset_fingerprint": "unavailable",
@@ -1315,34 +1543,24 @@ class Plugin(BasePlugin):
 
         if self.sdk.get("telemetry_valid", True) is False:
             self._deactivate_recorded_route(clear_outputs=True)
-            # Backward-compatible safety for an older engine that does not yet
-            # publish the explicit GPS-presence flag in the same telemetry-loss
-            # batch. Clearing the target first makes every old snapshot stale.
+            # A failed SDK read is not evidence that the waypoint was removed.
+            # Keep the immutable GPS snapshot/UID window, but revoke live
+            # control authority atomically. GameWatcher performs the immediate
+            # hard invalidation for a real process/session shutdown.
             self.sdk.shared_state.update_batch({
-                "game_gps_navigation_active": False,
-                "game_route_node_uids": [],
-                "game_route_points": [], "game_route_meta": [],
-                "navigation_arrival_pending": False,
-            })
-            current = self.sdk.get("lane_trajectory", {}) or {}
-            if (current.get("valid", False)
-                    or current.get("failure_reason")
-                        != "Telemetria vozidla nie je dostupná"
-                    or int(current.get("revision", -1) or -1)
-                        != int(self.sdk.get(
-                            "lane_trajectory_revision", -2) or -2)):
-                self._publish_invalid_lane_trajectory(
+                "lane_trajectory_heartbeat": 0.0,
+                "lane_match": {
+                    "revision": self.sdk.get(
+                        "lane_trajectory_revision", -1),
+                    "valid": False,
+                    "failure_reason": "telemetry temporarily unavailable",
+                },
+                "nav_active": False, "nav_steering": 0.0,
+                "navigation_unreliable": True,
+                "navigation_failure_reason":
                     "Telemetria vozidla nie je dostupná",
-                    self.sdk.get("game_route_node_uids", []) or (),
-                    "Telemetria vozidla nie je dostupná")
-            else:
-                self.sdk.shared_state.update_batch({
-                    "nav_path": [], "map_path": [],
-                    "nav_active": False, "nav_steering": 0.0,
-                    "nav_trajectory_revision": -1,
-                    "navigation_source": "none",
-                    "recorded_route_active": False,
-                })
+                "recorded_route_active": False,
+            })
             return
 
         if not pos:
@@ -1462,9 +1680,8 @@ class Plugin(BasePlugin):
                     and self._lane_localization_current
                     and bool(snapshot.get("valid", False))
                     and int(snapshot.get("revision", -1)) == self._lane_revision
-                    and tuple(snapshot.get("source_gps_uids", ()) or ())
-                        == self._normalise_gps_uids(
-                            self.sdk.get("game_route_node_uids", []) or [])):
+                    and snapshot_matches_navigation_intent(
+                        self.sdk.shared_state, snapshot)):
                 # The native planned-route buffer is lane-specific geometry.
                 # Applying the generic road-centre offset once more moved the
                 # target towards the median (and made HUD and steering disagree
@@ -1476,7 +1693,9 @@ class Plugin(BasePlugin):
                     self._lane_match.lane_id if self._lane_match else None)
                 metadata = self._lane_runtime_metadata(
                     self._lane_match.lane_id if self._lane_match else None)
-                snapshot_match = snapshot.get("lane_match", {}) or {}
+                corridor_entry = next((entry for entry in
+                    (snapshot.get("lane_corridor", ()) or ())
+                    if entry.get("lane_id") == lane_payload), None)
                 same_lane_authority = bool(
                     self._lane_match is not None
                     and metadata["lane_width_m"] is not None
@@ -1485,14 +1704,14 @@ class Plugin(BasePlugin):
                     and int(live_match.get("revision", -1) or -1)
                         == int(snapshot.get("revision", -2) or -2)
                     and live_match.get("active_lane_id") == lane_payload
-                    and snapshot.get("active_lane_id") == lane_payload
+                    and corridor_entry is not None
                     and live_match.get("elevation_layer")
                         == metadata["elevation_layer"]
-                    and snapshot_match.get("elevation_layer")
+                    and corridor_entry.get("elevation_layer")
                         == metadata["elevation_layer"]
                     and live_match.get("lane_width_m")
                         == metadata["lane_width_m"]
-                    and snapshot_match.get("lane_width_m")
+                    and corridor_entry.get("lane_width_m")
                         == metadata["lane_width_m"])
                 if not same_lane_authority:
                     self.sdk.shared_state.update_batch({

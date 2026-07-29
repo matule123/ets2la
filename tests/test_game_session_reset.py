@@ -1,8 +1,7 @@
 import unittest
 
 from core.engine import (
-    _game_route_distance_reset, _live_route_suffix,
-    _telemetry_loss_navigation_payload,
+    _live_route_suffix, _telemetry_loss_navigation_payload,
 )
 from core.navigation.lane_model import gps_uids_are_rolling_suffix
 from unittest import mock
@@ -73,14 +72,6 @@ class GameSessionResetTests(unittest.TestCase):
         self.assertFalse(gps_uids_are_rolling_suffix(
             (10, 11, 12), (11, 10, 12)))
 
-    def test_decreasing_route_distance_never_resets_destination(self):
-        # Captured runtime movement included 19.7 -> 19.3 -> 19.0 km and
-        # 18.4 -> 15.5 km. Those are progress, not destination changes.
-        self.assertFalse(_game_route_distance_reset(19_700.0, 19_300.0))
-        self.assertFalse(_game_route_distance_reset(18_400.0, 15_500.0))
-        self.assertFalse(_game_route_distance_reset(44_100.0, 44_300.0))
-        self.assertTrue(_game_route_distance_reset(31_500.0, 213_700.0))
-
     def test_game_close_disables_master_and_clears_route(self):
         engine = _Engine()
         watcher = GameWatcher(engine)
@@ -98,7 +89,7 @@ class GameSessionResetTests(unittest.TestCase):
         self.assertEqual(engine.shared_state.data["lane_trajectory_revision"], 7)
         self.assertEqual(engine.controller.released, 1)
 
-    def test_telemetry_loss_payload_atomically_invalidates_all_route_authority(self):
+    def test_one_frame_telemetry_loss_revokes_control_but_keeps_intent(self):
         state = _State()
         state.data.update({
             "game_route_node_uids": [10, 11],
@@ -111,22 +102,22 @@ class GameSessionResetTests(unittest.TestCase):
         self.assertFalse(payload["game_gps_navigation_active"])
         self.assertFalse(payload["recorded_route_active"])
         self.assertEqual(payload["navigation_source"], "none")
-        self.assertFalse(payload["lane_trajectory"]["valid"])
-        self.assertEqual(payload["lane_trajectory"]["points"], [])
-        self.assertEqual(payload["lane_trajectory_revision"], 7)
-        self.assertEqual(payload["nav_path"], [])
+        self.assertTrue(payload["lane_trajectory"]["valid"])
+        self.assertEqual(payload["lane_trajectory"]["points"],
+                         [[0, 0, 0], [0, 0, 10]])
+        self.assertEqual(payload["lane_trajectory_revision"], 6)
         self.assertFalse(payload["nav_active"])
         self.assertEqual(payload["nav_steering"], 0.0)
         state.update_batch(payload)
         repeated = _telemetry_loss_navigation_payload(state)
-        self.assertEqual(repeated["lane_trajectory_revision"], 7)
+        self.assertEqual(repeated["lane_trajectory_revision"], 6)
 
-        # A malformed mixed state must be repaired, not reused as a new
-        # revision paired with an older snapshot body.
+        # A reader miss never manufactures a new revision, even if an older
+        # producer left mixed state. Consumers reject the mismatch fail-closed.
         state.data["lane_trajectory_revision"] = 8
         repaired = _telemetry_loss_navigation_payload(state)
-        self.assertEqual(repaired["lane_trajectory_revision"], 9)
-        self.assertEqual(repaired["lane_trajectory"]["revision"], 9)
+        self.assertEqual(repaired["lane_trajectory_revision"], 8)
+        self.assertEqual(repaired["lane_trajectory"]["revision"], 6)
 
     @mock.patch("core.sdk.game_utils.get_version_for_game", return_value="1.59")
     @mock.patch("core.sdk.game_utils.find_scs_games",
