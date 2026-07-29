@@ -240,32 +240,6 @@ class SettingsMenu(QWidget):
 
         grid.addWidget(app_frame, 1, 0)
 
-        # --- AR overlay (calibration) ---
-        ar_frame, ar_lay = self._section_card(
-            "navigation", "AR zobrazenie",
-            "Kalibrácia trasy prekreslenej priamo nad hrou")
-        self.ar_toggle = QCheckBox("Zobrazovať trasu na vozovke")
-        self.ar_toggle.setChecked(bool(self.state.get("ar_enabled", True)))
-        self.ar_toggle.toggled.connect(lambda v: self.state.set("ar_enabled", bool(v)))
-        ar_lay.addWidget(self.ar_toggle)
-
-        def ar_slider(label, key, lo, hi, default, scale=1.0):
-            row = QHBoxLayout()
-            cap = self._caption(label)
-            cap.setMinimumWidth(68)
-            cur = self.state.get(key, default)
-            cur = float(cur) if cur is not None else default
-            sl = QSlider(Qt.Orientation.Horizontal)
-            sl.setRange(lo, hi); sl.setValue(int(cur * scale))
-            sl.valueChanged.connect(lambda v: self.state.set(key, v / scale))
-            row.addWidget(cap); row.addWidget(sl)
-            ar_lay.addLayout(row)
-
-        ar_slider("FOV", "ar_fov", 40, 100, 60.0)
-        ar_slider("Výška", "ar_height", 5, 60, 2.5, scale=10.0)   # 0.5–6.0 m
-        ar_slider("Náklon", "ar_pitch", -20, 30, 8.0)
-        grid.addWidget(ar_frame, 1, 1)
-
         # --- Sound (startup chime) ---
         sound_frame, snd_lay = self._section_card(
             "about", "Zvuk aplikácie",
@@ -278,7 +252,7 @@ class SettingsMenu(QWidget):
             "Podrobné využitie RAM, CPU a pluginov otvoríš tlačidlom „Výkon aplikácie“ v bočnom paneli.")
         performance_hint.setWordWrap(True)
         snd_lay.addWidget(performance_hint)
-        grid.addWidget(sound_frame, 2, 0, 1, 2)
+        grid.addWidget(sound_frame, 1, 1)
 
         self._perf_page = None
         layout.addLayout(grid)

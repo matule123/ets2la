@@ -47,12 +47,13 @@ def palette(mode: str) -> dict:
 def stylesheet(mode: str = "light") -> str:
     c = palette(mode)
     accent2 = c['accent2']
+    frame_border = "#AEB5BE" if c is _LIGHT else "#4A515C"
     return f"""
 QMainWindow {{ background-color: transparent; }}
 QWidget {{ background-color: {c['bg']}; color: {c['text']};
     font-family: 'Segoe UI', 'Inter', sans-serif; font-size: 14px; }}
 QFrame#WindowSurface {{ background-color: {c['bg']};
-    border: 1px solid {c['border']}; border-radius: 15px; }}
+    border: 1px solid {frame_border}; border-radius: 15px; }}
 
 /* Sidebar — compact reference-style navigation cards. */
 QFrame#Sidebar {{ background-color: #FFFFFF; border: none;
@@ -88,13 +89,15 @@ QFrame#Sidebar QPushButton#SidebarPerformance:hover {{ background-color:#F2F3F5;
 QFrame#Sidebar QPushButton#SidebarPerformance[active="true"] {{
     background-color:#20242A; border-color:#20242A; color:#FFFFFF; }}
 QFrame#Sidebar QPushButton#SidebarAutopilot {{ background-color:#0E9F6E;
-    border:1px solid #0B8A60; border-radius:9px; padding:8px 11px;
-    margin:0; color:#FFFFFF; font-size:11px; font-weight:750;
-    text-align:left; }}
-QFrame#Sidebar QPushButton#SidebarAutopilot:hover {{ background-color:#057A55;
+    background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #059669,stop:1 #10B981);
+    border:1px solid #047857; border-radius:12px; padding:9px 12px;
+    margin:0; color:#FFFFFF; font-size:12px; font-weight:700;
+    text-align:center; }}
+QFrame#Sidebar QPushButton#SidebarAutopilot:hover {{ background:#047857;
     border-color:#046C4E; color:#FFFFFF; }}
 QFrame#Sidebar QPushButton#SidebarAutopilot[active="true"] {{
-    background-color:#DC2626; border-color:#B91C1C; color:#FFFFFF; }}
+    background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #DC2626,stop:1 #F05252);
+    border-color:#B91C1C; color:#FFFFFF; }}
 
 /* General buttons — soft, rounded, accent on hover. */
 QPushButton {{ background-color: {c['surface']}; border: 1px solid {c['border']};

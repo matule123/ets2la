@@ -3,7 +3,7 @@ import os
 import logging
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QWidget, QStackedWidget, QFrame, QScrollArea,
+    QWidget, QStackedWidget, QFrame, QScrollArea, QLineEdit, QGridLayout,
 )
 from PyQt6.QtCore import QTimer, Qt, QSize, QRectF
 from PyQt6.QtGui import (QColor, QFont, QPainter, QPainterPath, QPen,
@@ -263,53 +263,105 @@ class PluginsPage(Page):
         super().__init__(state)
         from core.theme import palette
         self._pal = palette(state.get("ui_theme", "light") or "light")
-        self._themed_rows = []
         self.title = QLabel("Pluginy")
-        self.title.setStyleSheet("font-size: 24px; font-weight: bold; color: " + self._pal['title'] + "; margin-bottom: 20px;")
+        self.title.setStyleSheet(
+            "font-size:24px;font-weight:800;color:" + self._pal['text'] + ";")
+        self.subtitle = QLabel("Správa asistenčných funkcií UltraPilotu")
+        self.subtitle.setStyleSheet(
+            "font-size:12px;color:" + self._pal['muted'] + ";margin-bottom:5px;")
         self.layout.addWidget(self.title)
+        self.layout.addWidget(self.subtitle)
 
-        self.plugin_list = QVBoxLayout()
-        self.layout.addLayout(self.plugin_list)
+        toolbar = QHBoxLayout()
+        self.search = QLineEdit()
+        self.search.setObjectName("PluginSearch")
+        self.search.setPlaceholderText("Hľadať plugin…")
+        self.search.setClearButtonEnabled(True)
+        self.search.setMinimumHeight(38)
+        self.search.textChanged.connect(self.refresh_plugins)
+        toolbar.addWidget(self.search, 1)
+        self.summary = QLabel("0 aktívnych")
+        self.summary.setObjectName("PluginSummary")
+        self.summary.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        toolbar.addWidget(self.summary)
+        self.layout.addLayout(toolbar)
+
+        self.cards_host = QWidget()
+        self.cards_host.setObjectName("PluginCardsHost")
+        self.layout.addWidget(self.cards_host)
         self.layout.addStretch()
         self.refresh_plugins()
 
     def restyle(self, theme):
         from core.theme import palette
         self._pal = palette(theme)
-        self.title.setStyleSheet("font-size: 24px; font-weight: bold; color: " + self._pal['title'] + "; margin-bottom: 20px;")
-        # Re-render rows so the new palette applies.
+        self.title.setStyleSheet(
+            "font-size:24px;font-weight:800;color:" + self._pal['text'] + ";")
+        self.subtitle.setStyleSheet(
+            "font-size:12px;color:" + self._pal['muted'] + ";margin-bottom:5px;")
         self.refresh_plugins()
 
     def refresh_plugins(self):
-        for i in reversed(range(self.plugin_list.count())):
-            w = self.plugin_list.itemAt(i).widget()
-            if w:
-                w.setParent(None)
-
         from core.paths import app_dir
         plugin_dir = os.path.join(app_dir(), "plugins")
-        if not os.path.isdir(plugin_dir):
-            return
-        names = [f for f in sorted(os.listdir(plugin_dir))
-                 if os.path.isdir(os.path.join(plugin_dir, f))
-                 and os.path.exists(os.path.join(plugin_dir, f, "main.py"))]
-        # Enabled plugins on top, disabled below.
-        names.sort(key=lambda n: (not self.state.get(f"plugin_enabled.{n}", True), n))
+        names = []
+        if os.path.isdir(plugin_dir):
+            names = [f for f in sorted(os.listdir(plugin_dir))
+                     if os.path.isdir(os.path.join(plugin_dir, f))
+                     and os.path.exists(os.path.join(plugin_dir, f, "main.py"))]
+        query = self.search.text().strip().lower()
+        if query:
+            names = [name for name in names if query in name.lower()
+                     or query in self._DESC.get(name, "").lower()]
         enabled = [n for n in names if self.state.get(f"plugin_enabled.{n}", True)]
         disabled = [n for n in names if not self.state.get(f"plugin_enabled.{n}", True)]
-        if enabled:
-            self._section("● ACTIVE")
-            for n in enabled:
-                self.add_plugin_row(n)
-        if disabled:
-            self._section("○ DISABLED")
-            for n in disabled:
-                self.add_plugin_row(n)
+        self.summary.setText(f"{len(enabled)} aktívnych  •  {len(names)} spolu")
+        self.summary.setStyleSheet(
+            "background:" + self._pal['card'] + ";border:1px solid "
+            + self._pal['border'] + ";border-radius:9px;padding:8px 12px;"
+            "font-size:11px;font-weight:650;color:" + self._pal['muted'] + ";")
 
-    def _section(self, text):
-        lbl = QLabel(text)
-        lbl.setStyleSheet("color:" + self._pal['muted'] + "; font-size:12px; font-weight:700; margin-top:8px;")
-        self.plugin_list.addWidget(lbl)
+        host = QWidget()
+        host.setObjectName("PluginCardsHost")
+        listing = QVBoxLayout(host)
+        listing.setContentsMargins(0, 4, 0, 0)
+        listing.setSpacing(14)
+        if enabled:
+            listing.addWidget(self._section("Aktívne pluginy", len(enabled)))
+            grid = QGridLayout()
+            grid.setHorizontalSpacing(12)
+            grid.setVerticalSpacing(12)
+            for index, name in enumerate(enabled):
+                grid.addWidget(self._plugin_card(name, True), index // 2, index % 2)
+            grid.setColumnStretch(0, 1)
+            grid.setColumnStretch(1, 1)
+            listing.addLayout(grid)
+        if disabled:
+            listing.addWidget(self._section("Dostupné pluginy", len(disabled)))
+            grid = QGridLayout()
+            grid.setHorizontalSpacing(12)
+            grid.setVerticalSpacing(12)
+            for index, name in enumerate(disabled):
+                grid.addWidget(self._plugin_card(name, False), index // 2, index % 2)
+            grid.setColumnStretch(0, 1)
+            grid.setColumnStretch(1, 1)
+            listing.addLayout(grid)
+        if not names:
+            empty = QLabel("Nenašli sa žiadne pluginy.")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty.setStyleSheet("padding:30px;color:" + self._pal['muted'] + ";")
+            listing.addWidget(empty)
+        old_host = self.cards_host
+        self.layout.replaceWidget(old_host, host)
+        self.cards_host = host
+        old_host.setParent(None)
+        old_host.deleteLater()
+
+    def _section(self, text, count):
+        lbl = QLabel(f"{text}   {count}")
+        lbl.setStyleSheet("color:" + self._pal['text']
+                          + ";font-size:13px;font-weight:750;margin-top:5px;")
+        return lbl
 
     _DESC = {
         "autopilot": "Steering + throttle/brake control",
@@ -322,42 +374,54 @@ class PluginsPage(Page):
         "hud": "On-screen HUD elements",
     }
 
-    def add_plugin_row(self, name):
-        row = QFrame()
-        row.setStyleSheet("background-color:" + self._pal['card'] + "; border:1px solid " + self._pal['border'] + "; border-radius:10px;")
-        l = QHBoxLayout(row)
-        l.setContentsMargins(14, 10, 14, 10)
-
-        info = QVBoxLayout()
-        lbl = QLabel(name.capitalize())
-        lbl.setStyleSheet("color:" + self._pal['text'] + "; font-size:15px; font-weight:700; border:none;")
-        desc = QLabel(self._DESC.get(name, ""))
-        desc.setStyleSheet("color:" + self._pal['muted'] + "; font-size:12px; border:none;")
-        info.addWidget(lbl); info.addWidget(desc)
-        l.addLayout(info)
-        l.addStretch()
-
-        btn = QPushButton()
-        btn.setFixedWidth(120)
-
-        def render():
-            enabled = self.state.get(f"plugin_enabled.{name}", True)
-            btn.setText("● ENABLED" if enabled else "○ DISABLED")
-            bg = self._pal['success'] if enabled else self._pal['muted']
-            btn.setStyleSheet(
-                f"background-color:{bg}; color:#FFFFFF;"
-                "border:none; border-radius:8px; padding:8px; font-weight:700;")
+    def _plugin_card(self, name, enabled):
+        card = QFrame()
+        card.setObjectName("PluginCard")
+        card.setMinimumHeight(102)
+        card.setStyleSheet(
+            "QFrame#PluginCard{background:" + self._pal['card']
+            + ";border:1px solid " + self._pal['border']
+            + ";border-radius:12px;}QFrame#PluginCard:hover{border-color:#A7B0BA;}")
+        box = QVBoxLayout(card)
+        box.setContentsMargins(15, 13, 15, 13)
+        box.setSpacing(6)
+        head = QHBoxLayout()
+        title = QLabel(name.replace("_", " ").title())
+        title.setStyleSheet("font-size:14px;font-weight:750;color:"
+                            + self._pal['text'] + ";")
+        head.addWidget(title)
+        head.addStretch()
+        action = QPushButton("Vypnúť" if enabled else "Zapnúť")
+        action.setObjectName("PluginAction")
+        action.setFixedHeight(28)
+        action.setCursor(Qt.CursorShape.PointingHandCursor)
+        if enabled:
+            action.setStyleSheet(
+                "QPushButton{background:#ECFDF5;color:#047857;border:1px solid #A7F3D0;"
+                "border-radius:7px;padding:4px 10px;font-size:10px;font-weight:700;}"
+                "QPushButton:hover{background:#D1FAE5;}")
+        else:
+            action.setStyleSheet(
+                "QPushButton{background:" + self._pal['card2'] + ";color:"
+                + self._pal['text'] + ";border:1px solid " + self._pal['border']
+                + ";border-radius:7px;padding:4px 10px;font-size:10px;font-weight:700;}"
+                "QPushButton:hover{border-color:#10B981;color:#059669;}")
+        head.addWidget(action)
+        box.addLayout(head)
+        desc = QLabel(self._DESC.get(name, "Doplnková funkcia UltraPilotu."))
+        desc.setWordWrap(True)
+        desc.setStyleSheet("font-size:11px;color:" + self._pal['muted'] + ";")
+        box.addWidget(desc)
+        box.addStretch()
 
         def toggle():
-            current = self.state.get(f"plugin_enabled.{name}", True)
-            self.state.set(f"plugin_enabled.{name}", not current)
-            logging.info(f"Toggled plugin '{name}' -> {not current}")
-            self.refresh_plugins()   # re-sort: active up, disabled down
+            new_value = not bool(self.state.get(f"plugin_enabled.{name}", True))
+            self.state.set(f"plugin_enabled.{name}", new_value)
+            logging.info("Toggled plugin '%s' -> %s", name, new_value)
+            self.refresh_plugins()
 
-        btn.clicked.connect(toggle)
-        l.addWidget(btn)
-        self.plugin_list.addWidget(row)
-        render()
+        action.clicked.connect(toggle)
+        return card
 
 
 class DashboardPage(Page):
@@ -790,9 +854,9 @@ class UltraPilotApp(QMainWindow):
 
         self.start_btn = QPushButton("ZAPNÚŤ AUTOPILOT")
         self.start_btn.setObjectName("SidebarAutopilot")
-        self.start_btn.setFixedHeight(42)
+        self.start_btn.setFixedHeight(48)
         self.start_btn.setIcon(line_icon("autopilot", "#FFFFFF"))
-        self.start_btn.setIconSize(QSize(18, 18))
+        self.start_btn.setIconSize(QSize(20, 20))
         self.start_btn.clicked.connect(self.toggle_autopilot)
         # The old QMainWindow status bar painted the unexplained full-width
         # white rectangle at the bottom. Keep the action inside the sidebar.
@@ -819,9 +883,9 @@ class UltraPilotApp(QMainWindow):
         lang = self.state.get("ui_language_code", "sk") or "sk"
         active = self.state.get("autopilot_active", False)
         if active:
-            self.start_btn.setText(t(lang, "app", "disable_ap"))
+            self.start_btn.setText(t(lang, "app", "disable_ap").capitalize())
         else:
-            self.start_btn.setText(t(lang, "app", "enable_ap"))
+            self.start_btn.setText(t(lang, "app", "enable_ap").capitalize())
         if self.start_btn.property("active") != bool(active):
             self.start_btn.setProperty("active", bool(active))
             self.start_btn.style().unpolish(self.start_btn)

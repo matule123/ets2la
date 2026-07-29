@@ -84,7 +84,10 @@ class UiChromeTests(unittest.TestCase):
         self.assertGreaterEqual(window.minimumWidth(), 980)
         self.assertFalse(window.findChildren(QStatusBar))
         self.assertTrue(window.sidebar.isAncestorOf(window.start_btn))
+        self.assertEqual(window.start_btn.height(), 48)
+        self.assertEqual(window.start_btn.text(), "Zapnúť autopilota")
         self.assertEqual(window.centralWidget().objectName(), "WindowSurface")
+        self.assertIn("border: 1px solid #AEB5BE", stylesheet("light"))
         region = rounded_window_region(1220, 760)
         self.assertFalse(region.contains(QPoint(0, 0)))
         self.assertTrue(region.contains(QPoint(610, 380)))
@@ -93,9 +96,11 @@ class UiChromeTests(unittest.TestCase):
     def test_settings_use_responsive_cards_and_vector_header_icon(self):
         settings = SettingsMenu(State({"ui_theme": "light"}))
         cards = settings.findChildren(QFrame, "SettingsCard")
-        self.assertEqual(len(cards), 5)
+        self.assertEqual(len(cards), 4)
         labels = [label.text() for label in settings.findChildren(QLabel)]
         self.assertIn("Nastavenia", labels)
+        self.assertNotIn("AR zobrazenie", labels)
+        self.assertFalse(hasattr(settings, "ar_toggle"))
         self.assertFalse(any(text.startswith("⚙") for text in labels))
         self.assertIn("QWidget#SettingsPage", settings.styleSheet())
         settings.close()
@@ -161,6 +166,23 @@ class UiChromeTests(unittest.TestCase):
         css = stylesheet("light")
         self.assertIn("QSlider { min-height: 26px; }", css)
         self.assertIn("margin: -6px 0", css)
+        plugins.close()
+
+    def test_plugin_manager_uses_search_and_two_column_cards(self):
+        state = State({"ui_theme": "light", "plugin_enabled.hud": False})
+        with (mock.patch.object(app_module.os.path, "isdir", return_value=True),
+              mock.patch.object(app_module.os, "listdir",
+                                return_value=["acc", "hud", "tts"]),
+              mock.patch.object(app_module.os.path, "exists", return_value=True)):
+            plugins = PluginsPage(state)
+            self.assertEqual(len(plugins.findChildren(QFrame, "PluginCard")), 3)
+            self.assertEqual(plugins.search.placeholderText(), "Hľadať plugin…")
+            labels = [label.text() for label in plugins.findChildren(QLabel)]
+            self.assertTrue(any(text.startswith("Aktívne pluginy") for text in labels))
+            self.assertTrue(any(text.startswith("Dostupné pluginy") for text in labels))
+            plugins.search.setText("hud")
+            self.app.processEvents()
+            self.assertEqual(len(plugins.findChildren(QFrame, "PluginCard")), 1)
         plugins.close()
 
 
