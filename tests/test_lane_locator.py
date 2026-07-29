@@ -135,9 +135,117 @@ class LaneLocatorTests(unittest.TestCase):
         self.assertEqual(first.lane_id, left.lane_id)
         second = locator.locate((0.15, 0, 15), math.pi)
         self.assertEqual(second.lane_id, left.lane_id)
-        self.assertEqual(second.switch_reason, "hysteresis_hold")
+        self.assertEqual(second.switch_reason, "lane_change_pending")
         third = locator.locate((0.95, 0, 15), math.pi)
         self.assertEqual(third.lane_id, right.lane_id)
+        self.assertEqual(third.switch_reason, "lane_change_confirmed")
+
+    def test_progressive_left_and_right_lane_changes_are_confirmed(self):
+        left = lane(70, -2.25, lane_index=0)
+        right = lane(70, 2.25, lane_index=1)
+        locator = LaneLocator(FakeNetwork([left, right]))
+
+        first = locator.locate((-2.1, 0.0, 2.0), math.pi, (10, 11, 12))
+        pending = locator.locate((0.6, 0.0, 10.0), math.pi, (10, 11, 12))
+        changed = locator.locate((1.8, 0.0, 25.0), math.pi, (11, 12))
+        self.assertEqual(first.lane_id, left.lane_id)
+        self.assertEqual(pending.lane_id, left.lane_id)
+        self.assertEqual(pending.switch_reason, "lane_change_pending")
+        self.assertEqual(changed.lane_id, right.lane_id)
+        self.assertEqual(changed.switch_reason, "lane_change_confirmed")
+
+        pending_back = locator.locate(
+            (-0.6, 0.0, 32.0), math.pi, (11, 12))
+        changed_back = locator.locate(
+            (-1.8, 0.0, 39.0), math.pi, (11, 12))
+        self.assertEqual(pending_back.lane_id, right.lane_id)
+        self.assertEqual(pending_back.switch_reason, "lane_change_pending")
+        self.assertEqual(changed_back.lane_id, left.lane_id)
+        self.assertEqual(changed_back.switch_reason, "lane_change_confirmed")
+
+    def test_interrupted_or_too_fast_lane_change_never_switches(self):
+        left = lane(71, -2.25, lane_index=0)
+        right = lane(71, 2.25, lane_index=1)
+        locator = LaneLocator(FakeNetwork([left, right]))
+        self.assertEqual(locator.locate(
+            (-2.1, 0.0, 1.0), math.pi).lane_id, left.lane_id)
+        self.assertEqual(locator.locate(
+            (0.6, 0.0, 6.0), math.pi).lane_id, left.lane_id)
+        interrupted = locator.locate((-0.4, 0.0, 12.0), math.pi)
+        self.assertEqual(interrupted.lane_id, left.lane_id)
+        # A later one-frame jump is only a new unconfirmed observation.
+        self.assertIsNone(locator.locate((2.2, 0.0, 18.0), math.pi))
+        self.assertEqual(locator.previous.lane_id, left.lane_id)
+
+        locator = LaneLocator(FakeNetwork([left, right]))
+        locator.locate((-2.1, 0.0, 0.0), math.pi)
+        locator.locate((0.6, 0.0, 1.0), math.pi)
+        self.assertIsNone(locator.locate((1.8, 0.0, 39.0), math.pi))
+        self.assertEqual(locator.previous.lane_id, left.lane_id)
+
+    def test_opposite_and_non_adjacent_lanes_cannot_be_lane_changes(self):
+        source = lane(72, -2.25, lane_index=0)
+        opposite = lane(72, 2.25, direction=-1, lane_index=1)
+        locator = LaneLocator(FakeNetwork([source, opposite]))
+        first = locator.locate((-2.1, 0.0, 5.0), math.pi)
+        self.assertEqual(first.lane_id, source.lane_id)
+        self.assertIsNone(locator.locate((2.1, 0.0, 15.0), 0.0))
+
+        distant_lane = lane(73, 2.25, lane_index=2)
+        source = lane(73, -2.25, lane_index=0)
+        locator = LaneLocator(FakeNetwork([source, distant_lane]))
+        self.assertEqual(locator.locate(
+            (-2.1, 0.0, 5.0), math.pi).lane_id, source.lane_id)
+        self.assertIsNone(locator.locate((2.1, 0.0, 15.0), math.pi))
+
+        upper = lane(74, 2.25, height=6.0, lane_index=1)
+        lower = lane(74, -2.25, height=0.0, lane_index=0)
+        locator = LaneLocator(FakeNetwork([lower, upper]))
+        self.assertEqual(locator.locate(
+            (-2.1, 0.0, 5.0), math.pi).lane_id, lower.lane_id)
+        self.assertIsNone(locator.locate((2.1, 6.0, 15.0), math.pi))
+
+    def test_diagnostic_lookup_does_not_consume_lane_change_evidence(self):
+        left = lane(75, -2.25, lane_index=0)
+        right = lane(75, 2.25, lane_index=1)
+        locator = LaneLocator(FakeNetwork([left, right]))
+        locator.locate((-2.1, 0.0, 2.0), math.pi)
+        locator.locate((0.6, 0.0, 10.0), math.pi)
+        evidence = locator._lane_change_evidence
+        self.assertIsNotNone(evidence)
+        samples = evidence.samples
+        previous = locator.previous
+        diagnostic = locator.locate(
+            (1.8, 0.0, 25.0), math.pi, diagnostics={},
+            diagnostic_mode=True)
+        self.assertEqual(diagnostic.lane_id, right.lane_id)
+        self.assertIs(locator.previous, previous)
+        self.assertIs(locator._lane_change_evidence, evidence)
+        self.assertEqual(evidence.samples, samples)
+        confirmed = locator.locate((1.8, 0.0, 25.0), math.pi)
+        self.assertEqual(confirmed.lane_id, right.lane_id)
+        self.assertEqual(confirmed.switch_reason, "lane_change_confirmed")
+
+    def test_confirmed_lane_change_immediately_before_prefab(self):
+        left = path_lane(80, 1, 2, (
+            (-2.25, 0.0, 0.0), (-2.25, 0.0, 40.0)), lane_index=0)
+        right = path_lane(80, 1, 2, (
+            (2.25, 0.0, 0.0), (2.25, 0.0, 40.0)), lane_index=1)
+        prefab = path_lane(81, 2, 3, (
+            (2.25, 0.0, 40.0), (3.0, 0.0, 50.0),
+            (4.0, 0.0, 60.0)), lane_type="prefab", lane_index=1,
+            prefab_token="gps-junction", connector_index=4)
+        network = TransitionNetwork(
+            (left, right), (prefab,), ((right.lane_id, prefab.lane_id),))
+        locator = LaneLocator(network)
+        locator.locate((-2.1, 0.0, 5.0), math.pi, (1, 2, 3))
+        locator.locate((0.6, 0.0, 18.0), math.pi, (1, 2, 3))
+        changed = locator.locate((1.8, 0.0, 32.0), math.pi, (1, 2, 3))
+        self.assertEqual(changed.lane_id, right.lane_id)
+        on_prefab = locator.locate(
+            (2.6, 0.0, 45.0), math.atan2(-0.75, -10.0), (2, 3))
+        self.assertIsNotNone(on_prefab)
+        self.assertEqual(on_prefab.lane_id, prefab.lane_id)
 
     def test_same_lane_retention_runs_before_strict_acquisition_gate(self):
         """Reproduce the ProMods rev45 -> rev46 runtime LaneMatch loss."""

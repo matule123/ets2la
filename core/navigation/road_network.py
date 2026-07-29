@@ -1058,6 +1058,73 @@ class RoadNetwork:
         rotation = self.node_rot.get(origin_uid, 0.0) - local_rotation
         c, s = math.cos(rotation), math.sin(rotation)
         anchor_y = self.node_alt.get(origin_uid, 0.0)
+        # A placed prefab may be pitched/rolled even though its horizontal
+        # placement only exposes yaw.  Using the origin node's altitude as a
+        # constant offset made every navCurve flat and left a vertical step at
+        # the other descriptor nodes (1.83 m and 2.21 m in the captured
+        # ProMods lane-change failures).  Descriptor-ordered endpoint UIDs are
+        # authoritative placement constraints, so recover the missing rigid
+        # elevation plane from them.  This changes Y only; it cannot invent a
+        # horizontal chord or a connection outside the GPS-proven prefab.
+        elevation_plane = None
+        if descriptor_order:
+            samples = []
+            lane_nodes = lane_data.get("nodes") or ()
+            for node_index, descriptor_node in enumerate(desc[0]):
+                if node_index >= len(uids) or node_index >= len(lane_nodes):
+                    continue
+                uid = uids[node_index]
+                if uid not in self.node_alt:
+                    continue
+                nx, nz = descriptor_node[:2]
+                local_node_y = float(lane_nodes[node_index].get("y", 0.0))
+                samples.append((
+                    node_index, float(nx), float(nz),
+                    float(self.node_alt[uid]) - local_node_y,
+                ))
+            if samples:
+                _base_index, base_x, base_z, base_delta = next(
+                    (sample for sample in samples
+                     if sample[0] == descriptor_anchor), samples[0])
+                vectors = [
+                    (x - base_x, z - base_z, delta - base_delta)
+                    for node_index, x, z, delta in samples
+                    if node_index != descriptor_anchor
+                ]
+                gradient_x = gradient_z = 0.0
+                best_pair = None
+                for first_index, first in enumerate(vectors):
+                    for second in vectors[first_index + 1:]:
+                        determinant = first[0] * second[1] - first[1] * second[0]
+                        if (best_pair is None
+                                or abs(determinant) > abs(best_pair[0])):
+                            best_pair = (determinant, first, second)
+                if best_pair is not None and abs(best_pair[0]) > 1e-6:
+                    determinant, first, second = best_pair
+                    gradient_x = (
+                        first[2] * second[1] - first[1] * second[2]
+                    ) / determinant
+                    gradient_z = (
+                        first[0] * second[2] - first[2] * second[0]
+                    ) / determinant
+                elif vectors:
+                    longest = max(
+                        vectors, key=lambda value: value[0] ** 2 + value[1] ** 2)
+                    length2 = longest[0] ** 2 + longest[1] ** 2
+                    if length2 > 1e-8:
+                        gradient_x = longest[2] * longest[0] / length2
+                        gradient_z = longest[2] * longest[1] / length2
+                # A rigid placement must put every descriptor node on the
+                # same plane.  If the dataset contradicts that contract, keep
+                # the old origin-only transform so downstream continuity
+                # validation remains fail-closed.
+                residual = max(abs(
+                    base_delta + gradient_x * (x - base_x)
+                    + gradient_z * (z - base_z) - delta
+                ) for _node_index, x, z, delta in samples)
+                if residual <= 0.35:
+                    elevation_plane = (
+                        base_x, base_z, base_delta, gradient_x, gradient_z)
         result = []
         for curve_index in indices:
             curve = desc[1][curve_index]
@@ -1070,9 +1137,19 @@ class RoadNetwork:
                 local_y = (curve_meta["start_y"]
                            + (curve_meta["end_y"] - curve_meta["start_y"])
                            * fraction)
+                if elevation_plane is None:
+                    world_y = anchor_y + local_y - origin_y
+                else:
+                    base_x, base_z, base_delta, gradient_x, gradient_z = \
+                        elevation_plane
+                    world_y = (
+                        local_y + base_delta
+                        + gradient_x * (x - base_x)
+                        + gradient_z * (z - base_z)
+                    )
                 piece.append((
                     anchor[0] + (x - ox) * c - (z - oz) * s,
-                    anchor_y + local_y - origin_y,
+                    world_y,
                     anchor[1] + (x - ox) * s + (z - oz) * c,
                 ))
             if result and piece:

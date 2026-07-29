@@ -186,6 +186,106 @@ class RealMapLaneDataTests(unittest.TestCase):
         self.assertIn("prefab lane identity mismatch", path.failure_reason)
         self.assertIn("4.50 m", path.failure_reason)
 
+    def test_real_lane_change_capture_keeps_pitched_prefab_continuous(self):
+        # route_build_id=c500b655c6624ffe9b73fcf317071dad:
+        # the truck is stably localized in lane 1 (0.163 m lateral error), but
+        # blkw_1403y's flat-Y transform ended 2.207 m above the following road
+        # and resampling reported an artificial 179.931 degree heading jump.
+        gps = (
+            5962819255744781085, 5962819252305451794,
+            5962819259024692285, 5962819252766829126,
+            5962819255425996029, 5962819251760174334,
+            5962819264049468519, 5962819263453877369,
+        )
+        path, _trajectory = self.assert_captured_route_valid(
+            gps,
+            (41018.54218292236, 33.21265411376953,
+             60260.180892944336),
+            -0.718520145254435,
+        )
+        prefab_index = next(index for index, segment in enumerate(path.segments)
+                            if segment.lane_id.prefab_token == "blkw_1403y")
+        before = path.segments[prefab_index]
+        after = path.segments[prefab_index + 1]
+        self.assertLess(math.dist(
+            (before.centerline[-1].x, before.centerline[-1].y,
+             before.centerline[-1].z),
+            (after.centerline[0].x, after.centerline[0].y,
+             after.centerline[0].z)), 0.35)
+
+    def test_real_progressive_lane_change_survives_rolling_gps_window(self):
+        # Revisions 248, 249, 252 and 253 from ultrapilot.log. The signed
+        # lateral movement progresses 1.660 -> 2.041 -> 2.809 -> 4.480 m from
+        # lane 0 while the lane-1 error falls to 0.020 m. Revision 252 also
+        # drops the already-passed first GPS UID.
+        locator = LaneLocator(self.net)
+        full = (
+            5962819256667524768, 5962819256197731271,
+            5962819259108578392,
+        )
+        rolled = full[1:]
+        samples = (
+            ((40428.47589492798, 50.11819839477539,
+              60471.55988693237), -0.8192929219930516, full),
+            ((40447.95772626996, 50.11360168457031,
+              60456.00723648071), -0.9070635126647417, full),
+            ((40459.36179637909, 50.11345672607422,
+              60447.604835510254), -0.959580633242183, rolled),
+            ((40479.433322906494, 50.11083984375,
+              60433.173290252686), -0.935485225548879, rolled),
+        )
+        matches = [locator.locate(position, heading, gps)
+                   for position, heading, gps in samples]
+        self.assertTrue(all(match is not None for match in matches), matches)
+        self.assertEqual([match.lane_id.lane_index for match in matches],
+                         [0, 0, 0, 1])
+        self.assertEqual(matches[2].switch_reason, "lane_change_pending")
+        self.assertEqual(matches[3].switch_reason, "lane_change_confirmed")
+        self.assertAlmostEqual(abs(matches[3].lateral_error_m),
+                               0.019703162057498575)
+
+    def test_real_consecutive_pitched_prefabs_remove_vertical_gap(self):
+        # route_build_id=8f690899d44b49fdb8a00ff2ca02fc95
+        # failed at blkw_1401i -> blkw_14038 with only 0.050 m horizontal
+        # separation but 1.832 m of missing prefab pitch.
+        gps = (
+            5962819255744781085, 5962819252305451794,
+            5962819259024692285, 5962819252766829126,
+            5962819255425996029, 5962819251760174334,
+            5962819264049468519, 5962819263453877369,
+            5962819262229155909, 5962819263655219268,
+            5962819280986057213, 5962819266725450992,
+            5962819262178825461, 5962819255350497429,
+            5962819270986837516, 5962819251021962418,
+            5962819277395732982, 5962819264393417967,
+            5962819257825124179, 5962819261197344539,
+            5962819264745725766, 5962819256013183871,
+            5962819260727582455, 5962819266272472931,
+            5962819260870209380, 5962819259855187862,
+            5962819264846409621, 5962819270055709408,
+            5962819273662810836, 5962819260803100519,
+            5962819254058659704, 5962819259569975345,
+            5962819266264084346, 5962819254041882580,
+            5962819257288273893, 5962819257816756200,
+            5962819265030959063,
+        )
+        path, _trajectory = self.assert_captured_route_valid(
+            gps,
+            (41018.542194366455, 33.212642669677734,
+             60260.18101501465),
+            -0.7184652813316748,
+        )
+        boundary = next(index for index, segment in enumerate(path.segments[:-1])
+                        if (segment.lane_id.prefab_token == "blkw_1401i"
+                            and path.segments[index + 1].lane_id.prefab_token
+                                == "blkw_14038"))
+        first, second = path.segments[boundary:boundary + 2]
+        self.assertLess(math.dist(
+            (first.centerline[-1].x, first.centerline[-1].y,
+             first.centerline[-1].z),
+            (second.centerline[0].x, second.centerline[0].y,
+             second.centerline[0].z)), 0.35)
+
     def test_real_lane_metadata_is_preserved(self):
         self.assertGreater(len(self.net.road_looks), 1000)
         look = next(value for value in self.net.road_looks.values()
