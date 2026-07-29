@@ -24,7 +24,7 @@ from core.controller import (
 )
 from core.navigation.route import (
     NORMALIZED_STEERING_ANGLE_RAD, TRUCK_WHEELBASE_M, Route, K_CTE,
-    K_CTE_CURVE, curve_cte_gain,
+    K_CTE_CURVE, K_CTE_CURVE_RECOVERY, curve_cte_gain,
 )
 from core.sdk.scs_controller_writer import SCSControlsWriter, _FIELDS, _SIZE
 from plugins.autopilot.main import (
@@ -377,6 +377,62 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         self.assertEqual(plugin.sdk.controller.throttle, 0.0)
         self.assertTrue(state.get("autopilot_active"))
 
+    def test_queue_brake_keeps_fresh_gps_steering_and_authority(self):
+        state = ready_navigation_state(
+            system_state="CRUISE", nav_active=True, nav_steering=0.30,
+            traffic_brake=1.0, acc_throttle=0.8, acc_brake=0.0)
+        plugin = autopilot({"speed": 8.0, "gear": 5}, state)
+        plugin._engage_blend = 1.0
+        plugin._was_active = True
+        plugin.on_tick(0.10)
+        self.assertGreater(plugin.sdk.controller.brake, 0.0)
+        self.assertEqual(plugin.sdk.controller.throttle, 0.0)
+        self.assertGreater(plugin.sdk.controller.steering, 0.0)
+        self.assertTrue(state.get("autopilot_active"))
+
+    def test_emergency_queue_stop_does_not_latch_old_curve_steering(self):
+        state = ready_navigation_state(
+            system_state="EMERGENCY", nav_active=True, nav_steering=-0.25)
+        plugin = autopilot({"speed": 5.0, "gear": 3}, state)
+        plugin._engage_blend = 1.0
+        plugin._was_active = True
+        plugin._last_steering = 0.40
+        outputs = []
+        for _ in range(6):
+            plugin.on_tick(0.10)
+            outputs.append(plugin.sdk.controller.steering)
+        self.assertLess(outputs[0], 0.40)
+        self.assertLess(outputs[-1], 0.0)
+        self.assertGreater(plugin.sdk.controller.brake, 0.0)
+        self.assertEqual(plugin.sdk.controller.throttle, 0.0)
+        self.assertTrue(state.get("autopilot_active"))
+
+    def test_validated_gps_steering_is_not_clipped_again_by_engine(self):
+        state = ready_navigation_state(
+            navigation_source="gps_lane", nav_active=True,
+            autopilot_lane_revision=7, truck_speed_ms=25.0,
+            autopilot_control_heartbeat=time.monotonic(),
+            ctl_steering=0.70, ctl_throttle=0.0, ctl_brake=0.0)
+        engine = UltraPilotEngine.__new__(UltraPilotEngine)
+        engine.shared_state = state
+        engine.controller = Controller()
+        engine._was_active = True
+        engine._drive_selector_pressed = False
+        engine._flush_controls()
+        self.assertAlmostEqual(engine.controller.steering, 0.70)
+
+        # The legacy/vision path retains its high-speed safety clamp.
+        state.set("navigation_source", "none")
+        engine._flush_controls()
+        self.assertLess(engine.controller.steering, 0.70)
+
+        # Merely claiming GPS ownership is insufficient: a mixed/stale
+        # revision must retain the conservative clamp.
+        state.set("navigation_source", "gps_lane")
+        state.set("autopilot_lane_revision", 6)
+        engine._flush_controls()
+        self.assertLess(engine.controller.steering, 0.70)
+
     def test_engine_turns_coalesced_drive_requests_into_real_pulses(self):
         state = State({
             "autopilot_active": True,
@@ -609,6 +665,11 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         self.assertAlmostEqual(curve_cte_gain(60.0), K_CTE_CURVE)
         self.assertGreater(curve_cte_gain(200.0), curve_cte_gain(400.0))
         self.assertGreater(curve_cte_gain(400.0), K_CTE)
+        self.assertAlmostEqual(curve_cte_gain(60.0, 0.0), K_CTE_CURVE)
+        self.assertAlmostEqual(curve_cte_gain(60.0, 1.50),
+                               K_CTE_CURVE_RECOVERY)
+        # A large error on a straight must not manufacture curve authority.
+        self.assertAlmostEqual(curve_cte_gain(1e6, 2.0), K_CTE)
 
     def test_curvature_uses_path_projection_not_off_centre_truck(self):
         straight = Route([(0.0, 0.0), (0.0, 100.0), (0.0, 200.0)])

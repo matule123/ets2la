@@ -665,10 +665,27 @@ class UltraPilotEngine:
         if self.shared_state.get("steering_invert", False):
             steering = -steering
 
-        # Speed-dependent steering clamp: the faster we go, the less the wheel
-        # may turn — this stops the truck from yanking into a barrier in curves.
+        # Speed-dependent steering clamp for legacy/vision steering. A valid
+        # GPS LaneTrajectory has already produced a bounded, speed-aware and
+        # rate-limited command. Clamping that command a second time made the
+        # truck understeer from its lane centre toward the road centre.
         spd_kmh = abs(float(self.shared_state.get("truck_speed_ms", 0.0) or 0.0)) * 3.6
-        max_steer = 1.0 if spd_kmh < 30 else max(0.25, 1.0 - (spd_kmh - 30) / 110.0)
+        snapshot = self.shared_state.get("lane_trajectory", {}) or {}
+        try:
+            snapshot_revision = int(snapshot.get("revision", -1) or -1)
+            lane_revision = int(self.shared_state.get(
+                "lane_trajectory_revision", -2) or -2)
+            control_revision = int(self.shared_state.get(
+                "autopilot_lane_revision", -3) or -3)
+        except (TypeError, ValueError, OverflowError):
+            snapshot_revision = lane_revision = control_revision = -1
+        authoritative_gps_steering = bool(
+            self.shared_state.get("navigation_source") == "gps_lane"
+            and self.shared_state.get("nav_active", False)
+            and snapshot.get("valid", False)
+            and snapshot_revision == lane_revision == control_revision)
+        max_steer = (1.0 if authoritative_gps_steering or spd_kmh < 30.0
+                     else max(0.25, 1.0 - (spd_kmh - 30.0) / 110.0))
 
         # Jackknife / trailer-swing protection (Fáza 3d). When a semi-trailer is
         # coupled and its articulation angle is already large, winding the wheel

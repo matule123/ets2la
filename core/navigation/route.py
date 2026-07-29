@@ -55,6 +55,9 @@ def iter_path_xz(points):
 K_HEADING = 1.0           # heading-error weight (Stanley keeps this at 1.0)
 K_CTE = 0.80              # damped lane-centre recovery; avoids edge tracking
 K_CTE_CURVE = 1.80        # hold the mapped lane centre against curve cutting
+K_CTE_CURVE_RECOVERY = 8.00  # recover a proven curve before reaching its edge
+CURVE_RECOVERY_START_M = 0.35
+CURVE_RECOVERY_FULL_M = 1.50
 K_SOFT = 1.0              # softening constant → CTE term never explodes at v=0
 TRUCK_WHEELBASE_M = 5.0
 NORMALIZED_STEERING_ANGLE_RAD = 0.18
@@ -77,7 +80,7 @@ def speed_gain(speed_ms: float) -> float:
     return _clamp(1.3 - (speed_kmh / 90.0) * 0.8, 0.45, 1.3)
 
 
-def curve_cte_gain(radius_m: float) -> float:
+def curve_cte_gain(radius_m: float, lateral_error_m: float = 0.0) -> float:
     """Strengthen cross-track recovery only inside a proven map bend.
 
     A lookahead point lies on a chord of the lane curve. At road speed the old
@@ -86,8 +89,21 @@ def curve_cte_gain(radius_m: float) -> float:
     Straights retain the calm gain to avoid right/left hunting.
     """
     radius = float(radius_m)
-    weight = _clamp((500.0 - radius) / (500.0 - TIGHT_CURVE_RADIUS), 0.0, 1.0)
-    return K_CTE + (K_CTE_CURVE - K_CTE) * weight
+    curve_weight = _clamp(
+        (500.0 - radius) / (500.0 - TIGHT_CURVE_RADIUS), 0.0, 1.0)
+    # Feed-forward is necessarily an approximate truck model. With the real
+    # SCS steering backend it can leave a steady inward error in a bend: on the
+    # captured ProMods route that error grew to 1.9 m and put the cab on the
+    # road centre line. Preserve the calm centre gain, but progressively
+    # strengthen feedback once LaneMatch proves that the truck is drifting.
+    # This remains zero on a straight and never changes trajectory geometry.
+    recovery_weight = _clamp(
+        (abs(float(lateral_error_m)) - CURVE_RECOVERY_START_M)
+        / (CURVE_RECOVERY_FULL_M - CURVE_RECOVERY_START_M), 0.0, 1.0)
+    curve_gain = (K_CTE_CURVE
+                  + (K_CTE_CURVE_RECOVERY - K_CTE_CURVE)
+                  * recovery_weight)
+    return K_CTE + (curve_gain - K_CTE) * curve_weight
 
 
 class Route:
@@ -454,9 +470,16 @@ class Route:
         # old pure-gain sum produced in S-bends. The speed_gain schedule scales
         # the whole command down with speed (gentle inputs at 90 km/h).
         v = max(abs(speed_ms), 0.0)
-        cte_steer = math.atan((curve_cte_gain(radius) * cte) / (K_SOFT + v))
         local_curvature = self.signed_curvature_ahead(
             pos, heading, STEERING_CURVATURE_WINDOW_M)
+        # Strong recovery is for demonstrated understeer (the truck is outside
+        # the local bend), not for the normal sub-metre settling after an
+        # S-curve reverses. This keeps the extra authority directional and
+        # prevents the two bend halves from fighting each other.
+        recovery_error = cte if cte * local_curvature > 0.0 else 0.0
+        cte_steer = math.atan(
+            (curve_cte_gain(radius, recovery_error) * cte)
+            / (K_SOFT + v))
         feed_forward = (math.atan(TRUCK_WHEELBASE_M * local_curvature)
                         / NORMALIZED_STEERING_ANGLE_RAD)
         steer = feed_forward + speed_gain(speed_ms) * (

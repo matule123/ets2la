@@ -504,7 +504,26 @@ class Plugin(BasePlugin):
             self._set_brake(1.0, dt)
             self.sdk.controller.set_throttle(0.0)
             self._last_throttle = 0.0
+            # Never leave the previous steering value latched while stopping
+            # in a queue. That stale command kept winding the truck out of its
+            # lane until the authority guard disengaged it. A valid GPS lane
+            # remains lateral authority during braking; without it unwind.
+            emergency_nav_active = bool(
+                navigation_authority_safe
+                and self.sdk.shared_state.get("nav_active", False))
+            if emergency_nav_active:
+                nav_steering = float(self.sdk.shared_state.get(
+                    "nav_steering", 0.0) or 0.0)
+                target = (STEER_FOLLOW_BLEND * nav_steering
+                          + (1.0 - STEER_FOLLOW_BLEND)
+                          * self._last_steering)
+            else:
+                target = 0.0
+            self._last_steering = self._ramp_steering(target, dt)
+            self.sdk.controller.set_steering(
+                self._last_steering * self._engage_blend)
             self.sdk.shared_state.set("tts_message", "Emergency stop triggered!")
+            self._publish_control_tags(speed_kmh, emergency_nav_active)
             return
 
         if system_state == "PAY_TOLL":

@@ -365,6 +365,40 @@ class LaneGeometryAuditTests(unittest.TestCase):
                     self.assertLess(
                         sum(map(abs, errors[-40:])) / 40.0, 0.25)
 
+    def test_curve_recovery_tolerates_real_scs_actuator_shortfall(self):
+        # The 2026-07-29 drive reached 1.9 m inward error at 68 km/h although
+        # the ProMods lane line itself stayed exactly 2.25 m from road centre.
+        # Reproduce the measured control shortfall by applying only 0.14 rad
+        # of tyre angle per normalized command while the feed-forward model is
+        # calibrated at NORMALIZED_STEERING_ANGLE_RAD. Feedback must recover
+        # before the 1.80 m runtime authority boundary in either turn direction.
+        speed, dt, wheelbase = 18.9, 0.05, 5.0
+        for direction in (-1.0, 1.0):
+            for radius in (80.0, 120.0, 220.0):
+                with self.subTest(direction=direction, radius=radius):
+                    route = Route(self._arc(direction, radius, 500.0))
+                    x, z = route.points[0]
+                    heading = self._path_heading(
+                        route.points[0], route.points[2])
+                    plugin = AutopilotPlugin.__new__(AutopilotPlugin)
+                    plugin._last_steering = 0.0
+                    errors = []
+                    for _ in range(400):
+                        raw = route.steering((x, z), heading, speed)
+                        target = 0.72 * raw + 0.28 * plugin._last_steering
+                        plugin._last_steering = plugin._ramp_steering(
+                            target, dt)
+                        heading -= (speed / wheelbase
+                                    * plugin._last_steering * 0.14 * dt)
+                        x += -math.sin(heading) * speed * dt
+                        z += -math.cos(heading) * speed * dt
+                        index = route.tracking_index((x, z), heading)
+                        errors.append(route.cross_track_error(
+                            index, (x, z)))
+                    self.assertLess(max(map(abs, errors)), 1.50)
+                    self.assertLess(
+                        sum(map(abs, errors[-80:])) / 80.0, 0.75)
+
     def test_runtime_path_rejects_parallel_first_lane_offset(self):
         m = SyntheticMap()
         m.node(1, 0, 0); m.node(2, 0, 40)
