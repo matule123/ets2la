@@ -176,12 +176,45 @@ class Plugin(BasePlugin):
                 "lane_id": self._lane_id_payload(segment.lane_id),
                 "direction": int(segment.direction),
                 "lane_index": int(segment.lane_index),
+                "lane_type": str(segment.lane_type),
+                "successor_kind": (str(segment.successors[0].kind)
+                                   if segment.successors else None),
                 "elevation_layer": int(segment.elevation_layer),
                 "lane_width_m": float(segment.width_m),
                 "start_uid": int(segment.start_uid),
                 "end_uid": int(segment.end_uid),
             })
         return result
+
+    def _turn_events_payload(self, lane_path):
+        """Semantic turn events derived from this exact validated LanePath."""
+        points = tuple(getattr(lane_path, "points", ()) or ())
+        segments = tuple(getattr(lane_path, "segments", ()) or ())
+        events = []
+        for segment_index, segment in enumerate(segments):
+            if (segment.lane_id.prefab_token in (None, "graph")
+                    and segment.lane_type not in ("prefab", "roundabout")):
+                continue
+            owned = [point for point in points
+                     if int(point.segment_index) == segment_index]
+            if len(owned) < 3:
+                continue
+            heading_change = sum(
+                (second.heading - first.heading + math.pi)
+                % (2.0 * math.pi) - math.pi
+                for first, second in zip(owned, owned[1:]))
+            if abs(heading_change) < math.radians(22.0):
+                continue
+            events.append({
+                "segment_index": int(segment_index),
+                "start_s_m": float(owned[0].s),
+                "end_s_m": float(owned[-1].s),
+                # ETS heading decreases for a right turn.
+                "direction": "right" if heading_change < 0.0 else "left",
+                "angle_deg": float(math.degrees(heading_change)),
+                "kind": str(segment.lane_type),
+            })
+        return events
 
     def _next_lane_revision(self):
         shared_revision = int(self.sdk.get(
@@ -559,6 +592,9 @@ class Plugin(BasePlugin):
             payload.update({
                 "nav_path": [], "nav_active": False,
                 "nav_steering": 0.0, "nav_trajectory_revision": -1,
+                "path_curvature_radius": None,
+                "path_curve_distance_m": None,
+                "path_curve_signed_curvature": 0.0,
             })
         shared_state = getattr(self.sdk, "shared_state", None)
         if shared_state is not None and hasattr(shared_state, "update_batch"):
@@ -1142,6 +1178,7 @@ class Plugin(BasePlugin):
         revision = diagnostic.revision
         live_match_payload = self._lane_match_payload(match, revision)
         lane_corridor = self._lane_corridor_payload(trajectory)
+        turn_events = self._turn_events_payload(trajectory)
         control_points = [[float(p.x), float(p.y), float(p.z)]
                           for p in trajectory.points]
         # Phase 4 requires controller, HUD and AR to consume geometrically
@@ -1162,6 +1199,7 @@ class Plugin(BasePlugin):
             },
             "active_lane_id": self._lane_id_payload(match.lane_id),
             "lane_corridor": lane_corridor,
+            "turn_events": turn_events,
             "lane_match": dict(live_match_payload),
             "points": control_points, "display_points": display_points,
             "distance_m": float(trajectory.distance_m), "failure_reason": "",
@@ -1645,9 +1683,11 @@ class Plugin(BasePlugin):
                 roads = self.road_net.hud_segments_3d_near(
                     pos, radius=280.0, limit=950, altitude=altitude)
                 payload = [[list(a), list(b), kind, lanes, divided, dash_on,
-                            pillar, rail_post, half_width, suppress_markings]
+                            pillar, rail_post, half_width, suppress_markings,
+                            path_key, path_index]
                            for a, b, kind, lanes, divided, dash_on, pillar,
-                           rail_post, half_width, suppress_markings in roads]
+                           rail_post, half_width, suppress_markings, path_key,
+                           path_index in roads]
                 self._roads_revision += 1
                 self.sdk.shared_state.update_batch({
                     "map_road_segments": payload,
@@ -1708,6 +1748,7 @@ class Plugin(BasePlugin):
 
             steer = self.active_route.steering(pos, heading, speed,
                                                lane_offset_m=self._lane_offset())
+            curve_profile = self.active_route.curve_profile_ahead(pos, heading)
             idx = self.active_route.closest_index(pos)
             upcoming = self._distance_window(
                 self.active_route.points[idx:], 220.0)
@@ -1722,13 +1763,14 @@ class Plugin(BasePlugin):
                 "nav_trajectory_revision": -1,
                 "navigation_unreliable": False,
                 "navigation_failure_reason": "",
+                "path_curvature_radius": curve_profile["radius_m"],
+                "path_curve_distance_m": curve_profile["distance_m"],
+                "path_curve_signed_curvature": curve_profile["signed_curvature"],
             })
             self.sdk.set("distance_to_dest", self.active_route.distance_to_end(pos, heading))
             # Publish the upcoming path curvature so the autopilot can brake
             # BEFORE a sharp bend (anticipatory) instead of reacting to its own
             # steering mid-corner. Radius in metres; large = straight.
-            self.sdk.set("path_curvature_radius",
-                         self.active_route.curvature_ahead(pos, heading))
             self.tags.nav_steering = round(steer, 3)
 
         else:
@@ -1776,6 +1818,9 @@ class Plugin(BasePlugin):
                 if not same_lane_authority:
                     self.sdk.shared_state.update_batch({
                         "nav_active": False, "nav_steering": 0.0,
+                        "path_curvature_radius": None,
+                        "path_curve_distance_m": None,
+                        "path_curve_signed_curvature": 0.0,
                     })
                     self.tags.nav_steering = 0.0
                     return
@@ -1783,12 +1828,16 @@ class Plugin(BasePlugin):
                 if not math.isfinite(live_cte):
                     self.sdk.shared_state.update_batch({
                         "nav_active": False, "nav_steering": 0.0,
+                        "path_curvature_radius": None,
+                        "path_curve_distance_m": None,
+                        "path_curve_signed_curvature": 0.0,
                     })
                     self.tags.nav_steering = 0.0
                     return
                 steer = route.steering(pos, heading, speed,
                                        lane_offset_m=0.0,
                                        cross_track_error_m=live_cte)
+                curve_profile = route.curve_profile_ahead(pos, heading)
                 # Safety: if the truck is far from the snapped path (wrong map
                 # dataset, or we're off-road on a ferry / car park), the CTE is
                 # huge and Stanley saturates to full-lock. Detect that and
@@ -1801,6 +1850,9 @@ class Plugin(BasePlugin):
                 if off_dist > 50.0:
                     self.sdk.shared_state.update_batch({
                         "nav_active": False, "nav_steering": 0.0,
+                        "path_curvature_radius": None,
+                        "path_curve_distance_m": None,
+                        "path_curve_signed_curvature": 0.0,
                     })
                     self.sdk.set("map_status",
                                  f"Truck is {off_dist:.0f}m from the nearest road — "
@@ -1809,12 +1861,19 @@ class Plugin(BasePlugin):
                 else:
                     self.sdk.shared_state.update_batch({
                         "nav_steering": float(steer), "nav_active": True,
+                        "path_curvature_radius": curve_profile["radius_m"],
+                        "path_curve_distance_m": curve_profile["distance_m"],
+                        "path_curve_signed_curvature": (
+                            curve_profile["signed_curvature"]),
                     })
                 # Curvature radius (m) of the road ahead — lets the autopilot
                 # anticipate bends (brake before, not during).
-                self.sdk.set("path_curvature_radius",
-                             route.curvature_ahead(pos, heading))
                 self.tags.nav_steering = round(steer, 3)
             else:
-                self.sdk.set("nav_active", False)
-                self.sdk.set("nav_steering", 0.0)
+                self.sdk.shared_state.update_batch({
+                    "nav_active": False,
+                    "nav_steering": 0.0,
+                    "path_curvature_radius": None,
+                    "path_curve_distance_m": None,
+                    "path_curve_signed_curvature": 0.0,
+                })

@@ -135,6 +135,58 @@ def _lane_boundary_points(points, half_width):
     return left, right
 
 
+def _variable_lane_boundary_points(points, half_widths):
+    """Offset one sampled display path using its per-sample road width."""
+    if len(points) != len(half_widths) or len(points) < 2:
+        return [], []
+    left, right = [], []
+    for index, (point, half_width) in enumerate(zip(points, half_widths)):
+        previous = points[max(0, index - 1)]
+        following = points[min(len(points) - 1, index + 1)]
+        da = following[0] - previous[0]
+        dl = following[1] - previous[1]
+        length = math.hypot(da, dl)
+        if length < 1e-6:
+            if left:
+                left.append((left[-1][0], left[-1][1], point[2]))
+                right.append((right[-1][0], right[-1][1], point[2]))
+            continue
+        width = max(0.2, float(half_width))
+        na, nl = -dl / length, da / length
+        left.append((point[0] + na * width,
+                     point[1] + nl * width, point[2]))
+        right.append((point[0] - na * width,
+                      point[1] - nl * width, point[2]))
+    return left, right
+
+
+def _ordered_display_path_runs(segments, max_gap=3.5):
+    """Return only proven consecutive runs from one published map path.
+
+    Every input item is ``(sample_index, a, b, half_width)``. Missing indices
+    or endpoints farther apart than a normal sampled chord start a new run;
+    this makes the renderer incapable of drawing a chord across a junction.
+    """
+    runs, current = [], []
+    previous_index = None
+    for sample_index, first, second, half_width in sorted(
+            segments, key=lambda item: item[0]):
+        consecutive = (previous_index is not None
+                       and sample_index == previous_index + 1)
+        touches = (current and math.dist(current[-1][0], first) <= max_gap)
+        if current and not (consecutive and touches):
+            if len(current) >= 2:
+                runs.append(current)
+            current = []
+        if not current:
+            current.append((first, half_width))
+        current.append((second, half_width))
+        previous_index = sample_index
+    if len(current) >= 2:
+        runs.append(current)
+    return runs
+
+
 def _rounded_screen_path(points):
     """Build a locally bounded curve from projected dense lane samples.
 
@@ -693,7 +745,7 @@ class UltraPilotHUD(QWidget):
             # The broad network remains a compatibility fallback only while
             # no lane route exists; mixing both created the map-like carpet.
             road_segments = d.get("road_segments", [])
-            for segment in road_segments:
+            for source_index, segment in enumerate(road_segments):
                 try:
                     a = to_truck(float(segment[0][0]), float(segment[0][1]))
                     b = to_truck(float(segment[1][0]), float(segment[1][1]))
@@ -711,6 +763,10 @@ class UltraPilotHUD(QWidget):
                                   else None)
                     suppress_markings = (bool(segment[9])
                                          if len(segment) > 9 else False)
+                    path_key = (str(segment[10]) if len(segment) > 10
+                                else f"legacy:{source_index}")
+                    path_index = (int(segment[11]) if len(segment) > 11
+                                  else 0)
                 except (TypeError, ValueError, IndexError):
                     continue
                 clipped = clip_road(a, b)
@@ -723,23 +779,10 @@ class UltraPilotHUD(QWidget):
                 # than one deck below it is occluded by the opaque asphalt.
                 if max(clipped_ah, clipped_bh) < -2.4:
                     continue
-                # Slightly overlap neighbouring sampled quads. Without this,
-                # antialiasing exposed hairline holes on tight curved roads.
-                da, dl = b[0] - a[0], b[1] - a[1]
-                seg_len = math.hypot(da, dl)
-                if seg_len > 0.15:
-                    # Curved roads arrive as many independent short chords.
-                    # A small overlap left wedge-shaped holes between chords;
-                    # extend almost half a chord at each end so adjacent
-                    # asphalt polygons always form one continuous ribbon.
-                    overlap = min(0.8, seg_len * 0.24)
-                    ua, ul = da / seg_len, dl / seg_len
-                    a = (a[0] - ua * overlap, a[1] - ul * overlap)
-                    b = (b[0] + ua * overlap, b[1] + ul * overlap)
                 nearby.append((max(a[0], b[0]), a, b, clipped_ah, clipped_bh,
                                kind, segment_lanes, divided, dash_on,
                                pillar, rail_post, half_width,
-                               suppress_markings))
+                               suppress_markings, path_key, path_index))
             # Lower decks first, higher/nearer decks last so opaque road
             # polygons correctly hide roads passing underneath.
             nearby.sort(key=lambda item: ((item[3] + item[4]) * .5, -item[0]))
@@ -751,11 +794,19 @@ class UltraPilotHUD(QWidget):
             qp.setPen(Qt.PenStyle.NoPen)
             qp.setBrush(QColor(34, 36, 40, 255))
             for (_, sa, sb, sah, sbh, skind, slanes, _divided, _dash,
-                 _pillar, _rail, supplied_half, _suppress) in nearby:
+                 _pillar, _rail, supplied_half, _suppress, _path_key,
+                 _path_index) in nearby:
                 sda, sdl = sb[0] - sa[0], sb[1] - sa[1]
                 slength = math.hypot(sda, sdl)
                 if slength < .15:
                     continue
+                # Extend only the asphalt quad. Keeping the published
+                # centreline untouched lets the later outline pass join exact
+                # samples into one smooth curve without overshooting corners.
+                overlap = min(0.8, slength * 0.24)
+                sua, sul = sda / slength, sdl / slength
+                sa = (sa[0] - sua * overlap, sa[1] - sul * overlap)
+                sb = (sb[0] + sua * overlap, sb[1] + sul * overlap)
                 sna, snl = -sdl / slength, sda / slength
                 # Some datasets publish a straight carriageway as adjacent
                 # prefab lane-centre curves spaced up to ~5.5 m apart.  The old
@@ -779,7 +830,7 @@ class UltraPilotHUD(QWidget):
                     ]))
             for (_, a, b, ah, bh, kind, segment_lanes, divided, dash_on,
                  pillar, rail_post, supplied_half,
-                 suppress_markings) in nearby:
+                 suppress_markings, _path_key, _path_index) in nearby:
                 da, dl = b[0] - a[0], b[1] - a[1]
                 length = math.hypot(da, dl)
                 if length < 0.15:
@@ -789,10 +840,10 @@ class UltraPilotHUD(QWidget):
                 pb = self._project(b[0], b[1], view, bh)
                 if pa and pb:
                     if kind == "lane":
-                        # PPD navCurves are lane connectivity, not painted road
-                        # markings. Their asphalt was already drawn once in the
-                        # surface pass; drawing it twice or adding white edges
-                        # produced the old blocks/cross-hatched line garbage.
+                        # The smooth lane envelope is drawn from the exact
+                        # ordered navCurve below. Never paint the individual
+                        # sampled chords here; that was the segmented-line
+                        # appearance visible on bends and roundabouts.
                         continue
                     # ETS2LA-style schematic geometry: two precise road edges
                     # and a faint centre marking. Filled rectangles for every
@@ -842,14 +893,6 @@ class UltraPilotHUD(QWidget):
                             edges[0][0], edges[0][1],
                             edges[1][1], edges[1][0],
                         ]))
-                    if not suppress_markings:
-                        edge_pen = QPen(QColor(195, 201, 210, 225), 3.0,
-                                        Qt.PenStyle.SolidLine,
-                                        Qt.PenCapStyle.RoundCap,
-                                        Qt.PenJoinStyle.RoundJoin)
-                        qp.setPen(edge_pen)
-                        for ea, eb in edges:
-                            qp.drawLine(ea, eb)
                     if deck_height > 2.0:
                         # Continuous raised guardrails on both bridge sides.
                         qp.setPen(QPen(QColor(160, 168, 178, 255), 2.7,
@@ -888,8 +931,6 @@ class UltraPilotHUD(QWidget):
                     # Four detected lanes therefore produce three dashed lines.
                     offsets = [(-half + (2.0 * half / road_lanes) * i)
                                for i in range(1, road_lanes)]
-                    if not offsets:
-                        offsets = [0.0]
                     for offset in (() if suppress_markings else offsets):
                         if divided and abs(offset) < 0.25:
                             qp.setPen(QPen(QColor(244, 246, 248, 235), 3.0,
@@ -905,6 +946,49 @@ class UltraPilotHUD(QWidget):
                                            b[1] + nl * offset, view, bh)
                         if ma and mb:
                             qp.drawLine(ma, mb)
+
+            # Smooth, continuous lane envelopes. Road approaches keep their
+            # outer boundaries right up to prefab entrances; inside junctions
+            # each PPD navCurve gets its own exact 4.5 m lane envelope. Path
+            # identity + consecutive sample indices prevent any join between
+            # unrelated arms, even if two projected curves cross on screen.
+            display_paths = {}
+            for (_, a, b, ah, bh, kind, segment_lanes, _divided, _dash_on,
+                 _pillar, _rail_post, supplied_half, _suppress_markings,
+                 path_key, path_index) in nearby:
+                if kind == "lane":
+                    marking_half = 2.25
+                else:
+                    road_lanes = max(1, min(6, segment_lanes))
+                    marking_half = (supplied_half
+                                    if supplied_half is not None else
+                                    road_lanes * 4.5 / 2.0 + .5)
+                display_paths.setdefault((kind, path_key), []).append((
+                    path_index, (a[0], a[1], ah), (b[0], b[1], bh),
+                    marking_half))
+
+            for (kind, _path_key), segments in display_paths.items():
+                edge_pen = QPen(
+                    QColor(205, 211, 220, 230) if kind == "road"
+                    else QColor(186, 199, 218, 215),
+                    3.0 if kind == "road" else 2.35,
+                    Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                    Qt.PenJoinStyle.RoundJoin)
+                qp.setPen(edge_pen)
+                qp.setBrush(Qt.BrushStyle.NoBrush)
+                for run in _ordered_display_path_runs(segments):
+                    centreline = [item[0] for item in run]
+                    widths = [item[1] for item in run]
+                    left, right = _variable_lane_boundary_points(
+                        centreline, widths)
+                    for boundary in (left, right):
+                        projected = [self._project(point[0], point[1], view,
+                                                   point[2])
+                                     for point in boundary]
+                        projected = [point for point in projected
+                                     if point is not None]
+                        if len(projected) >= 2:
+                            qp.drawPath(_rounded_screen_path(projected))
 
             path = d["nav_path"]
             transformed = []

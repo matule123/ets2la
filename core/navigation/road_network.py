@@ -597,7 +597,8 @@ class RoadNetwork:
         return result
 
     def prefab_segments_3d_near(self, pos, radius=800.0, limit=10000,
-                                allowed_node_uids=None):
+                                allowed_node_uids=None,
+                                include_path_metadata=False):
         """Return prefab navCurve chords with their real local elevations.
 
         A nearest-node X/Z lookup is not a valid source of prefab height: at
@@ -613,6 +614,7 @@ class RoadNetwork:
         cx, cz = self._cell(px, pz)
         rings = int(radius // self.GRID) + 1
         seen, result = set(), []
+        display_instance_index = 0
         for dx in range(-rings, rings + 1):
             for dz in range(-rings, rings + 1):
                 for instance in self._prefab_grid.get((cx + dx, cz + dz), ()):
@@ -627,19 +629,27 @@ class RoadNetwork:
                     desc = self._prefab_desc.get(instance[0])
                     if not desc:
                         continue
+                    instance_path_index = display_instance_index
+                    display_instance_index += 1
                     for curve_index in range(len(desc[1])):
                         try:
                             points = self._prefab_curve_chain_3d(
                                 instance, (curve_index,))
                         except (IndexError, KeyError, TypeError, ValueError):
                             continue
-                        for first, second in zip(points, points[1:]):
+                        path_key = f"p{instance_path_index}:{curve_index}"
+                        for segment_index, (first, second) in enumerate(
+                                zip(points, points[1:])):
                             a = (first.x, first.z, first.y)
                             b = (second.x, second.z, second.y)
                             if min((a[0]-px)**2 + (a[1]-pz)**2,
                                    (b[0]-px)**2 + (b[1]-pz)**2) > radius*radius:
                                 continue
-                            result.append((a, b))
+                            if include_path_metadata:
+                                result.append((a, b, path_key,
+                                               segment_index))
+                            else:
+                                result.append((a, b))
                             if len(result) >= limit:
                                 return result
         return result
@@ -829,7 +839,8 @@ class RoadNetwork:
                         in ("motorway", "expressway"))),
                     tuple(lanes * 4.5 / 2.0 + .5 for _ in curve))]
 
-            for curve, lanes, divided, half_widths in ribbons:
+            for ribbon_index, (curve, lanes, divided,
+                               half_widths) in enumerate(ribbons):
                 for curve_index, (a, b) in enumerate(zip(curve, curve[1:])):
                     distance2 = min((a[0]-px)**2+(a[1]-pz)**2,
                                     (b[0]-px)**2+(b[1]-pz)**2)
@@ -851,31 +862,37 @@ class RoadNetwork:
                     ranked.append((distance2, a, b, "road",
                                    max(1, lanes), divided, dash_on,
                                    pillar, rail_post, half_width,
-                                   near_prefab_boundary))
+                                   near_prefab_boundary,
+                                   f"r{index}:{ribbon_index}", curve_index))
         # Road items stop at prefab boundaries. Without any prefab surface the
         # HUD therefore showed a literal black hole where a junction or
-        # roundabout should be. PPD navCurves are not painted lane markings,
-        # but their confirmed curves are suitable as overlapping *unmarked*
-        # asphalt ribbons. Restrict them to prefabs topologically attached to
-        # the current road component and preserve their real Y coordinates.
+        # roundabout should be. PPD navCurves are authoritative lane-centre
+        # geometry, although the compact dataset does not expose the original
+        # paint material. Publish each sampled curve as a distinct display
+        # path so the HUD can draw a smooth, topology-safe lane envelope rather
+        # than either hiding the lane or joining unrelated junction arms.
+        # Restrict them to prefabs attached to the current road component and
+        # preserve their real Y coordinates.
         connected_nodes = {
             uid for index in connected_indices for uid in self._seg_uids[index]
         }
         prefab_limit = max(limit, min(limit * 3, 3000))
-        for a, b in self.prefab_segments_3d_near(
+        for a, b, path_key, path_index in self.prefab_segments_3d_near(
                 pos, radius=radius, limit=prefab_limit,
-                allowed_node_uids=connected_nodes):
+                allowed_node_uids=connected_nodes,
+                include_path_metadata=True):
             distance2 = min((a[0]-px)**2 + (a[1]-pz)**2,
                             (b[0]-px)**2 + (b[1]-pz)**2)
             if not self._hud_chord_is_sane(a, b, altitude, distance2):
                 continue
             ranked.append((distance2, a, b, "lane", 1, False, False,
-                           False, False, 3.05, True))
+                           False, False, 3.05, True,
+                           path_key, path_index))
         ranked.sort(key=lambda item: item[0])
         return [(a, b, kind, lanes, divided, dash_on, pillar, rail_post,
-                 half_width, suppress_markings)
+                 half_width, suppress_markings, path_key, path_index)
                 for _, a, b, kind, lanes, divided, dash_on, pillar, rail_post,
-                half_width, suppress_markings
+                half_width, suppress_markings, path_key, path_index
                 in ranked[:limit]]
 
     # --- Authoritative lane-level GPS route ---------------------------------
@@ -2097,6 +2114,65 @@ class RoadNetwork:
                     else:
                         connection = None
                 else:
+                    # A rolling GPS window can start exactly at the prefab
+                    # connected to the truck's current road lane. This direct
+                    # prefix path used to add only LaneConnection metadata and
+                    # skipped the same bounded road->prefab taper used by the
+                    # normal corridor loop. On the captured ProMods junction
+                    # that joined road lane 1 to prefab lane 0 in one sample
+                    # (52.16 degree heading jump). Retarget only when the
+                    # existing topology, direction, height and one-lane bounds
+                    # prove the transition; otherwise validation stays closed.
+                    if (active.end_uid == segments[0].start_uid
+                            and segments[0].lane_id.prefab_token
+                                not in (None, "graph")):
+                        active = self._retarget_road_end_to_prefab(
+                            active, segments[0])
+                        active_end = active.centerline[-1]
+                        prefab_start = segments[0].centerline[0]
+                        entry_gap = math.dist(
+                            (active_end.x, active_end.y, active_end.z),
+                            (prefab_start.x, prefab_start.y, prefab_start.z))
+                        heading = active_end.heading
+                        entry_dx = prefab_start.x - active_end.x
+                        entry_dz = prefab_start.z - active_end.z
+                        lateral_gap = abs(
+                            entry_dx * math.cos(heading)
+                            - entry_dz * math.sin(heading))
+                        # Do not turn harmless sub-metre source-coordinate or
+                        # height noise into a new route rejection. This early
+                        # gate is only for the demonstrated adjacent-lane
+                        # chord; normal residuals still reach the existing
+                        # trajectory validator unchanged.
+                        if entry_gap > 0.35 and lateral_gap > 1.0:
+                            # The captured ProMods failure had 4.50 m of
+                            # lateral displacement but only 11.95 m of road
+                            # remaining. A one-sample join hit 52.16 degrees
+                            # and aimed the truck at the roadside pole. If the
+                            # bounded taper cannot prove a safe lane change,
+                            # report the actionable lane error before geometry
+                            # construction instead of emitting a chord.
+                            failed = LanePath(
+                                tuple(segments), (), corridor.gps_uids,
+                                valid=False,
+                                failure_reason=(
+                                    "GPS turn begins in an adjacent lane; "
+                                    f"{lateral_gap:.2f} m lateral transition "
+                                    "cannot be completed safely before the "
+                                    "junction"))
+                            if diagnostics is not None:
+                                safe_diagnostic_call(
+                                    diagnostics, "observe_lane_path", failed)
+                                safe_diagnostic_call(
+                                    diagnostics, "fail_phase", "LanePath",
+                                    failed.failure_reason, {
+                                        "geometry": {
+                                            "gap_m": float(entry_gap),
+                                            "lateral_gap_m": float(
+                                                lateral_gap),
+                                        },
+                                    })
+                            return failed, match
                     connection = (self._lane_connection(active, segments[0])
                                   if active.end_uid == segments[0].start_uid
                                   else None)
@@ -3108,9 +3184,10 @@ class RoadNetwork:
 
     def visual_segments_near(self, pos, radius: float = 800.0, limit: int = 12000):
         """Curved roads and true prefab geometry for the live map."""
-        return [((a[0], a[1]), (b[0], b[1]))
-                for a, b, _kind, _lanes, _divided, _dash_on, _pillar, _rail_post
-                in self.hud_segments_3d_near(pos, radius, limit)]
+        return [((segment[0][0], segment[0][1]),
+                 (segment[1][0], segment[1][1]))
+                for segment in self.hud_segments_3d_near(
+                    pos, radius, limit)]
 
     def hud_segments_near(self, pos, radius: float = 170.0, limit: int = 320):
         """Return bounded nearby road geometry for the perspective HUD."""

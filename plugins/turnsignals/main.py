@@ -1,29 +1,24 @@
 import logging
 import math
 from sdk.base_plugin import BasePlugin
-from core.navigation.route import iter_path_xz
+from core.navigation.navigation_intent import snapshot_matches_navigation_intent
+from core.navigation.route import Route
 
 
 # --- Tuning -----------------------------------------------------------------
-NEAR_M = 15.0           # measure the path's lateral position this close ahead
-FAR_M = 60.0            # ...and this far ahead; the bend is the difference
-LATERAL_TURN_M = 6.0    # path drifts sideways by this many metres → it's a turn
-APPROACH_M = 90.0       # only look at points within this distance ahead
-SUSTAIN_S = 3.0         # keep the signal on this long after the bend fades
+APPROACH_M = 65.0       # begin signalling before a proven junction event
+SUSTAIN_S = 0.8         # bridge only brief progress/telemetry jitter
 
 
 class Plugin(BasePlugin):
     """Automatic turn signals.
 
-    Looks at the route ahead (``nav_path`` / ``map_path``) and switches the
-    indicator on when a real turn is approaching, then cancels it once we're
-    past it. Crucially, it does NOT signal during obstacle avoidance or minor
-    steering corrections — those are not turns and would cause the "pruhy sa
-    menia pri obchádzaní" chaos the old steering-driven blinkers produced.
+    Consumes topology-proven turn events from the exact lane snapshot and
+    cancels the indicator once the truck passes the event. Ordinary road
+    curvature, obstacle avoidance and steering corrections are not turns.
 
-    The signal is written through ``ctl_blinker`` (the cross-process channel the
-    engine flushes each tick), and ``active_blinker`` is mirrored so the HUD's
-    rear-view camera knows when to pop up.
+    The request is written through ``route_blinker``. The engine remains the
+    only owner of the physical momentary control and mirrors its result to HUD.
     """
 
     NAME = "turnsignals"
@@ -33,6 +28,9 @@ class Plugin(BasePlugin):
         self.enabled = True
         self._current = "off"
         self._sustain = 0.0    # seconds left to hold the signal after the bend
+        self._route_key = None
+        self._route = None
+        self.sdk.set("route_blinker", "off")
 
     def on_stop(self):
         self.sdk.set("ctl_blinker", "off")
@@ -47,6 +45,8 @@ class Plugin(BasePlugin):
         if not self.sdk.shared_state.get("autopilot_active", False):
             if self._current != "off":
                 self._set("off")
+            self.sdk.set("route_blinker", "off")
+            self.sdk.set("lane_change_safe", True)
             return
 
         pos = self.sdk.shared_state.get("truck_world_pos")
@@ -61,16 +61,17 @@ class Plugin(BasePlugin):
             "lane_trajectory_revision", -1)
         authoritative = bool(
             snapshot.get("valid", False)
-            and snapshot.get("revision") == current_revision)
-        path = ((snapshot.get("display_points", ()) or ())
-                if authoritative else
-                (self.sdk.shared_state.get("nav_path", [])
-                 or self.sdk.shared_state.get("map_path", []) or []))
+            and snapshot.get("revision") == current_revision
+            and snapshot_matches_navigation_intent(
+                self.sdk.shared_state, snapshot))
+        path = (snapshot.get("display_points", ()) or ()) if authoritative else ()
+        events = (snapshot.get("turn_events", ()) or ()) if authoritative else ()
 
         target = "off"
         # Keep the route-requested signal active while waiting at a red light.
-        if pos and not avoiding and len(path) >= 3:
-            target = self._signal_for_path(pos, heading, path)
+        if pos and not avoiding and len(path) >= 3 and events:
+            target = self._signal_for_events(
+                pos, heading, path, events, snapshot)
 
         # Sustain: keep the signal briefly after the bend so it doesn't strobe
         # on/off as the lookahead wobbles right at the turn threshold.
@@ -121,49 +122,33 @@ class Plugin(BasePlugin):
         return True
 
     # --- Geometry -------------------------------------------------------------
-    def _signal_for_path(self, pos, heading, path):
-        """Return 'left' / 'right' / 'off' based on the bend ahead.
-
-        Measures how far the route drifts sideways between NEAR_M and FAR_M ahead
-        of the truck. A big lateral drift in one direction = a turn that way.
-        This is far more robust than a single-segment angle on a noisy polyline,
-        which rarely produced a usable signal."""
-        px, pz = pos
-        sin_h, cos_h = math.sin(heading), math.cos(heading)
-
-        def lateral_at(target_a):
-            """Lateral offset (m, +right) of the path at ~target_a metres ahead."""
-            best = None
-            best_d = 1e18
-            for wx, wz in iter_path_xz(path):
-                dx, dz = wx - px, wz - pz
-                a = dx * (-sin_h) + dz * (-cos_h)
-                if a < 2.0 or a > APPROACH_M:
-                    continue
-                d = abs(a - target_a)
-                if d < best_d:
-                    best_d = d
-                    l = dx * cos_h - dz * sin_h
-                    best = (a, l)
-            return best
-
-        near = lateral_at(NEAR_M)
-        far = lateral_at(FAR_M)
-        if near is None or far is None:
+    def _signal_for_events(self, pos, heading, path, events, snapshot):
+        """Signal only a topology-proven upcoming prefab/roundabout turn."""
+        key = (snapshot.get("navigation_intent_id"),
+               snapshot.get("revision"), snapshot.get("route_build_id"))
+        if key != self._route_key:
+            self._route_key = key
+            self._route = Route(path, name="turn-signal-authority")
+        if self._route is None or len(self._route) < 2:
             return "off"
-
-        # ETS2 forward=(-sin(h), -cos(h)); the lateral basis below is +right,
-        # so a positive drift requests the right indicator.
-        drift = far[1] - near[1]
-        if drift >= LATERAL_TURN_M:
-            return "right"
-        if drift <= -LATERAL_TURN_M:
-            return "left"
-        return "off"
+        progress = self._route.tracking_progress(pos, heading)
+        candidates = []
+        for event in events:
+            try:
+                start = float(event["start_s_m"])
+                end = float(event["end_s_m"])
+                direction = str(event["direction"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            if direction not in ("left", "right"):
+                continue
+            distance = start - progress
+            if -8.0 <= end - progress and distance <= APPROACH_M:
+                candidates.append((max(distance, 0.0), start, direction))
+        return min(candidates)[2] if candidates else "off"
 
     # --- Output ---------------------------------------------------------------
     def _set(self, side):
         self._current = side
-        self.sdk.controller.set_blinker(side)
         if side != "off":
             logging.info("Turn signal: %s", side)

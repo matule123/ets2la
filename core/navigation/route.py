@@ -55,16 +55,16 @@ def iter_path_xz(points):
 K_HEADING = 1.0           # heading-error weight (Stanley keeps this at 1.0)
 K_CTE = 0.80              # damped lane-centre recovery; avoids edge tracking
 K_CTE_CURVE = 1.80        # hold the mapped lane centre against curve cutting
-K_CTE_CURVE_RECOVERY = 8.00  # recover a proven curve before reaching its edge
-CURVE_RECOVERY_START_M = 0.35
-CURVE_RECOVERY_FULL_M = 1.50
 K_SOFT = 1.0              # softening constant → CTE term never explodes at v=0
 TRUCK_WHEELBASE_M = 5.0
 NORMALIZED_STEERING_ANGLE_RAD = 0.18
-STEERING_CURVATURE_WINDOW_M = 12.0
+STEERING_CURVATURE_SPAN_M = 6.0
+STEERING_PREVIEW_MIN_M = 0.5
+STEERING_PREVIEW_MAX_M = 4.0
 # A longer window is retained for anticipatory curve braking; steering uses
 # the shorter local window above so it cannot cut across a bend.
-CURV_WINDOW_M = 40.0
+CURV_WINDOW_M = 60.0
+CURVE_PROFILE_STEP_M = 4.0
 TIGHT_CURVE_RADIUS = 60.0
 ARRIVAL_RADIUS = 12.0     # metres from the last point counts as "arrived"
 
@@ -91,19 +91,29 @@ def curve_cte_gain(radius_m: float, lateral_error_m: float = 0.0) -> float:
     radius = float(radius_m)
     curve_weight = _clamp(
         (500.0 - radius) / (500.0 - TIGHT_CURVE_RADIUS), 0.0, 1.0)
-    # Feed-forward is necessarily an approximate truck model. With the real
-    # SCS steering backend it can leave a steady inward error in a bend: on the
-    # captured ProMods route that error grew to 1.9 m and put the cab on the
-    # road centre line. Preserve the calm centre gain, but progressively
-    # strengthen feedback once LaneMatch proves that the truck is drifting.
-    # This remains zero on a straight and never changes trajectory geometry.
-    recovery_weight = _clamp(
-        (abs(float(lateral_error_m)) - CURVE_RECOVERY_START_M)
-        / (CURVE_RECOVERY_FULL_M - CURVE_RECOVERY_START_M), 0.0, 1.0)
-    curve_gain = (K_CTE_CURVE
-                  + (K_CTE_CURVE_RECOVERY - K_CTE_CURVE)
-                  * recovery_weight)
-    return K_CTE + (curve_gain - K_CTE) * curve_weight
+    # A transient localisation error is not permission for extra steering
+    # authority. The removed error-dependent gain reached 8.0 and turned the
+    # captured 0.093 command into full 0.700 lock within one second.
+    return K_CTE + (K_CTE_CURVE - K_CTE) * curve_weight
+
+
+def curve_speed_limit_ms(radius_m: float, distance_m: float,
+                         lateral_accel_ms2: float = 1.8,
+                         approach_decel_ms2: float = 1.6) -> float:
+    """Return a speed envelope that reaches a bend at safe apex speed."""
+    try:
+        radius = float(radius_m)
+        distance = max(0.0, float(distance_m))
+    except (TypeError, ValueError, OverflowError):
+        return float("inf")
+    if not math.isfinite(radius) or radius <= 0.0 or radius >= 2000.0:
+        return float("inf")
+    # Validated junctions and roundabouts legitimately have radii below 30 m.
+    # Clamp only the numerical floor; never discard the sharpest bends.
+    radius = max(6.0, radius)
+    apex_speed2 = max(0.0, float(lateral_accel_ms2)) * radius
+    return math.sqrt(apex_speed2 + 2.0 * max(
+        0.0, float(approach_decel_ms2)) * distance)
 
 
 class Route:
@@ -306,6 +316,83 @@ class Route:
             i += 1
         return self.points[-1]
 
+    def _point_at_progress(self, progress_m: float) -> Point:
+        """Interpolate the immutable route at one arc-length position."""
+        if not self.points:
+            return (0.0, 0.0)
+        if len(self.points) == 1:
+            return self.points[0]
+        progress = _clamp(float(progress_m), 0.0, self._cumulative_m[-1])
+        index = min(len(self._segment_lengths) - 1, max(
+            0, bisect.bisect_right(self._cumulative_m, progress) - 1))
+        length = self._segment_lengths[index]
+        fraction = (0.0 if length < 1e-9 else
+                    (progress - self._cumulative_m[index]) / length)
+        first, second = self.points[index], self.points[index + 1]
+        return (first[0] + (second[0] - first[0]) * fraction,
+                first[1] + (second[1] - first[1]) * fraction)
+
+    def tracking_progress(self, pos: Point, heading: float) -> float:
+        """Current progress shared by steering, speed and turn semantics."""
+        return float(self._tracking_projection(pos, heading)[2])
+
+    def _curvature_at_progress(self, progress_m: float,
+                               span_m: float = STEERING_CURVATURE_SPAN_M) -> float:
+        """Signed Menger curvature around one route-progress sample."""
+        if len(self.points) < 3 or self._cumulative_m[-1] < 2.0:
+            return 0.0
+        total = self._cumulative_m[-1]
+        span = max(2.0, float(span_m))
+        centre = _clamp(float(progress_m), 0.0, total)
+        before = max(0.0, centre - span)
+        after = min(total, centre + span)
+        # Near either trajectory end retain a full, one-sided sample rather
+        # than collapsing two points and manufacturing infinite curvature.
+        if centre - before < 1.0:
+            before = centre
+            centre = min(total, before + span)
+            after = min(total, before + span * 2.0)
+        elif after - centre < 1.0:
+            after = centre
+            centre = max(0.0, after - span)
+            before = max(0.0, after - span * 2.0)
+        first = self._point_at_progress(before)
+        middle = self._point_at_progress(centre)
+        last = self._point_at_progress(after)
+        one = (middle[0] - first[0], middle[1] - first[1])
+        two = (last[0] - middle[0], last[1] - middle[1])
+        cross = one[0] * two[1] - one[1] * two[0]
+        a, b, c = (math.dist(first, middle), math.dist(first, last),
+                   math.dist(middle, last))
+        product = a * b * c
+        return 0.0 if product < 1e-6 else 2.0 * cross / product
+
+    def curve_profile_ahead(self, pos: Point, heading: float,
+                            horizon_m: float = CURV_WINDOW_M) -> dict:
+        """Sharpest validated local curve in the forward driving horizon."""
+        progress = self.tracking_progress(pos, heading)
+        remaining = max(0.0, self._cumulative_m[-1] - progress)
+        horizon = min(max(0.0, float(horizon_m)), remaining)
+        offsets = [0.0]
+        sample = CURVE_PROFILE_STEP_M
+        while sample < horizon:
+            offsets.append(sample)
+            sample += CURVE_PROFILE_STEP_M
+        if horizon > 0.0 and offsets[-1] != horizon:
+            offsets.append(horizon)
+        ranked = [(abs(curvature), offset, curvature)
+                  for offset in offsets
+                  for curvature in (self._curvature_at_progress(
+                      progress + offset),)]
+        magnitude, distance, signed = max(ranked, default=(0.0, 0.0, 0.0))
+        radius = 1e6 if magnitude < 1e-9 else 1.0 / magnitude
+        return {
+            "radius_m": float(radius),
+            "distance_m": float(distance),
+            "signed_curvature": float(signed),
+            "horizon_m": float(horizon),
+        }
+
     def cross_track_error(self, idx: int, pos: Point) -> float:
         """Signed perpendicular distance from ``pos`` to the segment at ``idx``.
 
@@ -404,9 +491,8 @@ class Route:
         and (2) by the autopilot to brake *before* a sharp bend rather than
         mid-corner. The estimate is the discrete Menger curvature (circle
         through three points: the truck, a near point, a far point)."""
-        curvature = abs(self.signed_curvature_ahead(
-            pos, heading, window_m))
-        return 1e6 if curvature < 1e-9 else 1.0 / curvature
+        return float(self.curve_profile_ahead(
+            pos, heading, window_m)["radius_m"])
 
     def steering(self, pos: Point, heading: float, speed_ms: float = 0.0,
                  lane_offset_m: float = 0.0,
@@ -432,11 +518,11 @@ class Route:
         # short 2–4 m tangent and 4–8 m curvature window amplified normal
         # two-metre LaneTrajectory sampling noise into alternating full-lock
         # commands at segment boundaries.
-        radius = self.curvature_ahead(pos, heading)
         # Stanley uses the local path tangent. A direction to a 70 m chord
         # cuts one bend toward the median and the opposite bend toward grass.
         projection = self.lookahead_point(idx, pos, 0.0)
-        tangent_target = self.lookahead_point(idx, pos, 6.0)
+        tangent_window = _clamp(3.0 + abs(speed_ms) * 0.15, 3.0, 6.0)
+        tangent_target = self.lookahead_point(idx, pos, tangent_window)
         path_dx = tangent_target[0] - projection[0]
         path_dz = tangent_target[1] - projection[1]
         path_length = math.hypot(path_dx, path_dz)
@@ -470,15 +556,14 @@ class Route:
         # old pure-gain sum produced in S-bends. The speed_gain schedule scales
         # the whole command down with speed (gentle inputs at 90 km/h).
         v = max(abs(speed_ms), 0.0)
-        local_curvature = self.signed_curvature_ahead(
-            pos, heading, STEERING_CURVATURE_WINDOW_M)
-        # Strong recovery is for demonstrated understeer (the truck is outside
-        # the local bend), not for the normal sub-metre settling after an
-        # S-curve reverses. This keeps the extra authority directional and
-        # prevents the two bend halves from fighting each other.
-        recovery_error = cte if cte * local_curvature > 0.0 else 0.0
+        progress = self.tracking_progress(pos, heading)
+        preview = _clamp(v * 0.35, STEERING_PREVIEW_MIN_M,
+                         STEERING_PREVIEW_MAX_M)
+        local_curvature = self._curvature_at_progress(progress + preview)
+        local_radius = (1e6 if abs(local_curvature) < 1e-9
+                        else 1.0 / abs(local_curvature))
         cte_steer = math.atan(
-            (curve_cte_gain(radius, recovery_error) * cte)
+            (curve_cte_gain(local_radius, cte) * cte)
             / (K_SOFT + v))
         feed_forward = (math.atan(TRUCK_WHEELBASE_M * local_curvature)
                         / NORMALIZED_STEERING_ANGLE_RAD)

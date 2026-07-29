@@ -24,11 +24,12 @@ from core.controller import (
 )
 from core.navigation.route import (
     NORMALIZED_STEERING_ANGLE_RAD, TRUCK_WHEELBASE_M, Route, K_CTE,
-    K_CTE_CURVE, K_CTE_CURVE_RECOVERY, curve_cte_gain,
+    K_CTE_CURVE, curve_cte_gain, curve_speed_limit_ms,
 )
 from core.sdk.scs_controller_writer import SCSControlsWriter, _FIELDS, _SIZE
 from plugins.autopilot.main import (
-    Plugin as AutopilotPlugin, engagement_lateral_limit,
+    Plugin as AutopilotPlugin, _authority_reason_key,
+    authority_retention_lateral_limit, engagement_lateral_limit,
     lane_authority_rejection_reason,
 )
 from plugins.lanecontrol.main import Plugin as LaneControlPlugin
@@ -192,6 +193,45 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         self.assertAlmostEqual(engagement_lateral_limit({}), 1.10)
         self.assertAlmostEqual(engagement_lateral_limit(
             {"lane_width_m": float("nan")}), 1.10)
+
+    def test_continued_authority_matches_locator_same_lane_retention(self):
+        live = {"lane_width_m": 4.5}
+        self.assertAlmostEqual(
+            authority_retention_lateral_limit(live), 3.375)
+        state = ready_navigation_state()
+        state.set("lane_match", {
+            "revision": 7, "valid": True, "lateral_error_m": 2.93,
+            "heading_error_rad": 0.02, "lane_width_m": 4.5,
+        })
+        self.assertEqual(lane_authority_rejection_reason(
+            state, state.get("lane_trajectory")), "")
+        state.get("lane_match")["lateral_error_m"] = 3.38
+        self.assertIn("outside the confirmed GPS lane",
+                      lane_authority_rejection_reason(
+                          state, state.get("lane_trajectory")))
+
+    def test_confirmed_curve_drift_keeps_correction_but_not_reengagement(self):
+        state = ready_navigation_state(
+            nav_active=True, nav_steering=-0.32,
+            path_curvature_radius=80.0, path_curve_distance_m=0.0)
+        state.set("lane_match", {
+            "revision": 7, "valid": True, "lateral_error_m": 2.93,
+            "heading_error_rad": 0.02, "lane_width_m": 4.5,
+        })
+        plugin = autopilot({"speed": 10.0, "gear": 5}, state)
+        plugin._lane_lock_acquired = True
+        plugin._engage_blend = 1.0
+        plugin._was_active = True
+        plugin.on_tick(0.10)
+        self.assertTrue(state.get("autopilot_active"))
+        self.assertTrue(state.get("nav_active"))
+        self.assertLess(plugin.sdk.controller.steering, 0.0)
+
+        # The same displacement is never sufficient for a fresh activation.
+        state.set("autopilot_active", False)
+        plugin.on_tick(0.10)
+        self.assertFalse(
+            state.get("autopilot_navigation_readiness")["ready"])
 
     def test_enabled_message_waits_for_control_initialization(self):
         state = ready_navigation_state(
@@ -628,6 +668,8 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         state = State({
             "nav_cmd": "stop", "autopilot_active": True,
             "nav_active": True, "nav_steering": 0.4,
+            "path_curvature_radius": 55.0,
+            "path_curve_distance_m": 18.0,
         })
         plugin = MapPlugin.__new__(MapPlugin)
         plugin.sdk = type("MapSDK", (), {
@@ -639,6 +681,8 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         self.assertTrue(state.get("autopilot_active"))
         self.assertFalse(state.get("nav_active"))
         self.assertEqual(state.get("nav_steering"), 0.0)
+        self.assertIsNone(state.get("path_curvature_radius"))
+        self.assertIsNone(state.get("path_curve_distance_m"))
 
     def test_arrival_stops_and_disengages(self):
         for gear in (1, 0, -1):
@@ -666,10 +710,36 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         self.assertGreater(curve_cte_gain(200.0), curve_cte_gain(400.0))
         self.assertGreater(curve_cte_gain(400.0), K_CTE)
         self.assertAlmostEqual(curve_cte_gain(60.0, 0.0), K_CTE_CURVE)
-        self.assertAlmostEqual(curve_cte_gain(60.0, 1.50),
-                               K_CTE_CURVE_RECOVERY)
+        self.assertAlmostEqual(curve_cte_gain(60.0, 1.50), K_CTE_CURVE)
         # A large error on a straight must not manufacture curve authority.
         self.assertAlmostEqual(curve_cte_gain(1e6, 2.0), K_CTE)
+
+    def test_sharp_junction_radius_is_not_discarded_by_speed_envelope(self):
+        sharp_apex = curve_speed_limit_ms(20.0, 0.0)
+        sharp_approach = curve_speed_limit_ms(20.0, 45.0)
+        gentle_apex = curve_speed_limit_ms(120.0, 0.0)
+        self.assertLess(sharp_apex, sharp_approach)
+        self.assertLess(sharp_approach, gentle_apex)
+        self.assertLess(sharp_apex * 3.6, 25.0)
+
+    def test_autopilot_brakes_for_sub_thirty_metre_confirmed_curve(self):
+        state = ready_navigation_state(
+            nav_active=True, nav_steering=0.15, acc_throttle=1.0,
+            acc_brake=0.0, path_curvature_radius=20.0,
+            path_curve_distance_m=0.0)
+        plugin = autopilot({"speed": 12.0, "gear": 6}, state)
+        plugin._engage_blend = 1.0
+        plugin._was_active = True
+        plugin.on_tick(0.10)
+        self.assertGreater(plugin.sdk.controller.brake, 0.0)
+        self.assertEqual(plugin.sdk.controller.throttle, 0.0)
+        self.assertLess(state.get("path_curve_speed_limit_ms"), 7.0)
+
+    def test_live_distance_reason_logs_as_one_stable_category(self):
+        self.assertEqual(_authority_reason_key(
+            "truck is 1.87 m outside the confirmed GPS lane"),
+            _authority_reason_key(
+            "truck is 3.00 m outside the confirmed GPS lane"))
 
     def test_curvature_uses_path_projection_not_off_centre_truck(self):
         straight = Route([(0.0, 0.0), (0.0, 100.0), (0.0, 200.0)])

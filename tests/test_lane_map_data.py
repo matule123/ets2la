@@ -89,6 +89,44 @@ class RealMapLaneDataTests(unittest.TestCase):
             with self.subTest(gps=gps):
                 self.assert_captured_route_valid(gps, position, heading)
 
+    def test_2026_07_29_adjacent_junction_lane_fails_before_chord(self):
+        """Replay the last real intersection failure from route diagnostics."""
+        gps = (
+            5962819257346994300, 5962819250132791422,
+            5962819264754134939, 5962819262464044943,
+            5962819253924441988, 5962819266230529939,
+            5962819258336849769, 5962819250829045611,
+            5962819265894985573, 5962819266272472931,
+            5962819260727582455, 5962819256013183871,
+            5962819264745725766, 5962819261197344539,
+            5962819257825124179, 5962819264393417967,
+            5962819277395732982, 5962819251021962418,
+            5962819270986837516, 5962819255350497429,
+            5962819262178825461, 5962819266725450992,
+            5962819280986057213, 5962819263655219268,
+            5962819262229155909,
+        )
+        position = (42085.586853027344, 59.514347076416016,
+                    61259.12966918945)
+        heading = -0.8143520507687896
+        match = LaneLocator(self.net).locate(position, heading, gps)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.lane_id.lane_index, 1)
+
+        path, returned = self.net.build_lane_path(
+            gps, (position[0], position[2]), heading,
+            altitude=position[1], start_match=match)
+        self.assertEqual(returned.lane_id, match.lane_id)
+        self.assertFalse(path.valid)
+        self.assertEqual(len(path.points), 0)
+        self.assertIn("adjacent lane", path.failure_reason)
+        self.assertIn("4.50 m lateral transition", path.failure_reason)
+        # A rejected transition must not reach trajectory resampling, where
+        # the old one-sample chord appeared as a 52.16-degree heading jump.
+        trajectory = build_lane_trajectory(path)
+        self.assertFalse(trajectory.valid)
+        self.assertNotIn("heading jump", trajectory.failure_reason)
+
     def test_phase1_prefab_diagnostic_replay_does_not_mutate_lane_cache(self):
         gps = (
             5962819253681172399, 5962819261264473948,

@@ -5,6 +5,7 @@ import numpy as np
 from sdk.base_plugin import BasePlugin
 from core.navigation.runtime_preflight import CONFIDENCE_THRESHOLD
 from core.navigation.navigation_intent import snapshot_matches_navigation_intent
+from core.navigation.route import curve_speed_limit_ms
 
 
 # --- Tuning (kept here, mirrored into settings under "autopilot" section) -----
@@ -26,6 +27,9 @@ DRIVE_RETRY_S = 1.50         # retry D without blocking throttle indefinitely
 ENGAGEMENT_DEFAULT_LATERAL_M = 1.10
 ENGAGEMENT_MAX_LATERAL_M = 1.50
 ENGAGEMENT_MAX_HEADING_RAD = math.radians(18.0)
+AUTHORITY_DEFAULT_LATERAL_M = 1.80
+AUTHORITY_RETENTION_WIDTH_FRACTION = 0.75
+AUTHORITY_RETENTION_MAX_M = 3.40
 
 # Anticipatory curve braking (Fáza 3c). The lateral acceleration a truck can
 # hold comfortably is ~2.5 m/s²; the safe speed for a bend of radius R is
@@ -33,8 +37,8 @@ ENGAGEMENT_MAX_HEADING_RAD = math.radians(18.0)
 # curvature radius ahead would put us over that, so we slow BEFORE the apex —
 # the old code only reacted once the steering was already wound in (too late,
 # the truck understeered wide / fish-tailed on corner entry).
-A_LAT_MAX = 2.5             # comfortable lateral accel (m/s²)
-CURVE_BRAKE_MAX = 0.4       # never brake harder than this for a curve alone
+A_LAT_MAX = 1.8             # stable loaded-truck lateral acceleration (m/s²)
+CURVE_BRAKE_MAX = 0.55      # bounded proactive brake for proven sharp curves
 CURVE_BRAKE_MARGIN_MS = 0.5 # start braking this much before v_safe (hysteresis)
 
 
@@ -107,7 +111,8 @@ def lane_authority_rejection_reason(state, snapshot, now=None):
             return "live localisation belongs to a different elevation layer"
         lateral = abs(float(live_match.get("lateral_error_m", 0.0) or 0.0))
         heading = abs(float(live_match.get("heading_error_rad", 0.0) or 0.0))
-        if not math.isfinite(lateral) or lateral > 1.80:
+        if (not math.isfinite(lateral)
+                or lateral > authority_retention_lateral_limit(live_match)):
             return f"truck is {lateral:.2f} m outside the confirmed GPS lane"
         if not math.isfinite(heading) or heading > math.radians(28.0):
             return (f"truck heading differs from the GPS lane by "
@@ -133,6 +138,17 @@ def game_gps_navigation_present(state, snapshot=None):
         return True
     return bool(len(state.get("game_route_node_uids", []) or []) >= 2
                 or len(snapshot.get("source_gps_uids", []) or []) >= 2)
+
+
+def _authority_reason_key(reason):
+    """Stable log category for failure text containing live measurements."""
+    text = str(reason or "")
+    if text.startswith("truck is ") and text.endswith(
+            " outside the confirmed GPS lane"):
+        return "outside_confirmed_gps_lane"
+    if text.startswith("truck heading differs from the GPS lane"):
+        return "gps_lane_heading_mismatch"
+    return text
 
 
 def recorded_route_rejection_reason(state):
@@ -169,6 +185,26 @@ def engagement_lateral_limit(live_match):
         return ENGAGEMENT_DEFAULT_LATERAL_M
     return min(ENGAGEMENT_MAX_LATERAL_M,
                max(0.60, width / 3.0))
+
+
+def authority_retention_lateral_limit(live_match):
+    """Continue correcting only inside LaneLocator's proven lane retention.
+
+    Initial engagement remains governed by the much stricter gate above. Once
+    the exact LaneId, direction, elevation and revision are locked, stopping
+    steering at the former 1.80 m boundary made a recoverable curve deviation
+    grow until the vehicle left the lane. Match the locator's width-aware
+    same-lane retention, but never grant this distance to a new lane candidate.
+    """
+    try:
+        width = float((live_match or {}).get("lane_width_m"))
+    except (TypeError, ValueError, OverflowError):
+        return AUTHORITY_DEFAULT_LATERAL_M
+    if not math.isfinite(width) or width < 2.4 or width > 12.0:
+        return AUTHORITY_DEFAULT_LATERAL_M
+    return max(AUTHORITY_DEFAULT_LATERAL_M, min(
+        AUTHORITY_RETENTION_MAX_M,
+        width * AUTHORITY_RETENTION_WIDTH_FRACTION))
 
 
 class Plugin(BasePlugin):
@@ -393,11 +429,12 @@ class Plugin(BasePlugin):
         # fall back to vision driving. While moving we perform a controlled
         # stop; once stationary we release all automation and disengage.
         if autopilot_engaged and not navigation_authority_safe:
-            if authority_reason != self._last_authority_stop_reason:
+            authority_reason_key = _authority_reason_key(authority_reason)
+            if authority_reason_key != self._last_authority_stop_reason:
                 logging.warning(
                     "Autopilot lost navigation authority; controlled stop: %s",
                     authority_reason)
-                self._last_authority_stop_reason = authority_reason
+                self._last_authority_stop_reason = authority_reason_key
             self.sdk.controller.set_throttle(0.0)
             self._last_throttle = 0.0
             self._last_steering = self._ramp_steering(0.0, dt)
@@ -567,21 +604,38 @@ class Plugin(BasePlugin):
         # speed for radius R at comfortable lateral accel A_LAT_MAX is
         # v_safe = sqrt(A_LAT_MAX · R); if our speed exceeds it, brake.
         radius = self.sdk.shared_state.get("path_curvature_radius", None)
+        curve_distance = self.sdk.shared_state.get(
+            "path_curve_distance_m", 0.0)
         curve_factor = 1.0          # throttle multiplier (set below)
+        curve_limit_ms = float("inf")
         if radius is not None:
             try:
                 R = float(radius)
-            except (TypeError, ValueError):
+                distance_to_curve = float(curve_distance or 0.0)
+            except (TypeError, ValueError, OverflowError):
                 R = 1e6
-            if 30.0 < R < 2000.0:   # ignore straight / garbage radii
-                v_safe = math.sqrt(A_LAT_MAX * R)         # m/s
+                distance_to_curve = 0.0
+            if 0.0 < R < 2000.0:
+                curve_limit_ms = curve_speed_limit_ms(
+                    R, distance_to_curve, A_LAT_MAX)
                 v_now = abs(speed)                        # m/s
-                if v_now > v_safe + CURVE_BRAKE_MARGIN_MS:
-                    over = (v_now - v_safe) / max(v_safe, 1.0)  # 0..1+ excess
-                    curve_brake = float(np.clip(over * 0.8, 0.0, CURVE_BRAKE_MAX))
+                if v_now > curve_limit_ms + CURVE_BRAKE_MARGIN_MS:
+                    excess = v_now - curve_limit_ms
+                    curve_brake = float(np.clip(
+                        excess / 6.0, 0.0, CURVE_BRAKE_MAX))
                     requested_brake = max(requested_brake, curve_brake)
-                    # Also ease the throttle so we don't fight the brake.
-                    curve_factor = max(0.3, 1.0 - over)
+                    curve_factor = max(
+                        0.0, min(1.0, curve_limit_ms / max(v_now, 1.0)))
+                elif v_now > curve_limit_ms * 0.90:
+                    # Coast into the speed envelope instead of accelerating
+                    # until the brake threshold and then oscillating around it.
+                    curve_factor = max(0.15, min(
+                        1.0, (curve_limit_ms - v_now)
+                        / max(curve_limit_ms * 0.10, 0.5)))
+        self.sdk.shared_state.set(
+            "path_curve_speed_limit_ms",
+            (None if not math.isfinite(curve_limit_ms)
+             else float(curve_limit_ms)))
 
         # --- Reactive curve slowdown: ease off the throttle (light brake at
         # speed) — a back-up to the proactive brake above, in case the map
@@ -628,7 +682,6 @@ class Plugin(BasePlugin):
         self._was_active = active
         engage = min(1.0, self._engage_blend + dt / 1.2)
         self._engage_blend = engage if active else 0.0
-
         if navigation_unreliable:
             self._last_steering = self._ramp_steering(0.0, dt)
         elif nav_active:
@@ -637,7 +690,13 @@ class Plugin(BasePlugin):
             # 0.35/0.65 exponential lag was a second integrator that caused the
             # truck to overshoot and oscillate (fishtail) in and out of curves.
             nav_steering = float(self.sdk.shared_state.get("nav_steering", 0.0) or 0.0)
-            target = STEER_FOLLOW_BLEND * nav_steering + (1 - STEER_FOLLOW_BLEND) * self._last_steering
+            # The map plugin already computes Stanley cross-track feedback
+            # from this revision's signed LaneMatch. Do not add that same
+            # lateral error a second time here: the former adaptive trim was
+            # a duplicate integrator and could carry a bend correction onto
+            # the following straight.
+            target = (STEER_FOLLOW_BLEND * nav_steering
+                      + (1 - STEER_FOLLOW_BLEND) * self._last_steering)
             target = float(np.clip(target, -1.0, 1.0))
             self._last_steering = self._ramp_steering(target, dt)
         elif not gps_navigation_present:
@@ -671,14 +730,34 @@ class Plugin(BasePlugin):
         self._diag_t += dt
         if self._diag_t >= 1.0:
             self._diag_t = 0.0
+            diagnostic_match = (self.sdk.shared_state.get("lane_match")
+                                or snapshot.get("lane_match") or {})
+            try:
+                live_lateral = float(diagnostic_match.get(
+                    "lateral_error_m", 0.0) or 0.0)
+                live_heading = math.degrees(float(diagnostic_match.get(
+                    "heading_error_rad", 0.0) or 0.0))
+                diagnostic_radius = (None if radius is None else float(radius))
+                diagnostic_curve_distance = float(curve_distance or 0.0)
+            except (TypeError, ValueError, OverflowError):
+                live_lateral = live_heading = float("nan")
+                diagnostic_radius = None
+                diagnostic_curve_distance = float("nan")
             logging.info(
-                "autopilot: active=%s nav=%s engage=%.2f lane_off=%.3f "
+                "autopilot: active=%s nav=%s engage=%.2f lane_cte=%.3f "
+                "lane_heading=%.1fdeg vision_off=%.3f "
                 "nav_steer=%.3f target=%.3f steer_out=%.3f speed=%.0f "
+                "curve_r=%s curve_d=%.1f curve_limit=%s "
                 "lane_revision=%s confidence=%.3f reject=%s",
                 active, nav_active, self._engage_blend,
-                float(lane_offset),
+                live_lateral, live_heading, float(lane_offset),
                 float(self.sdk.shared_state.get("nav_steering", 0.0) or 0.0),
                 float(self._last_steering), steering_val, speed_kmh,
+                ("-" if diagnostic_radius is None
+                 else f"{diagnostic_radius:.1f}"),
+                diagnostic_curve_distance,
+                ("-" if not math.isfinite(curve_limit_ms)
+                 else f"{curve_limit_ms * 3.6:.1f}kmh"),
                 snapshot_revision,
                 snapshot_confidence,
                 authority_reason)

@@ -16,6 +16,7 @@ from core.navigation.lane_trajectory import build_lane_trajectory
 from core.navigation.road_network import RoadNetwork
 from core.navigation.route import (
     NORMALIZED_STEERING_ANGLE_RAD, TRUCK_WHEELBASE_M, Route,
+    curve_speed_limit_ms,
 )
 from plugins.autopilot.main import Plugin as AutopilotPlugin
 from tests.test_lane_authority_integration import (
@@ -365,6 +366,38 @@ class LaneGeometryAuditTests(unittest.TestCase):
                     self.assertLess(
                         sum(map(abs, errors[-40:])) / 40.0, 0.25)
 
+    def test_game_like_sharp_curve_is_smooth_and_stays_inside_lane(self):
+        """Closed-loop 20 Hz replay of a 45 m junction/roundabout bend."""
+        radius, dt, wheelbase = 45.0, 0.05, 5.0
+        speed = curve_speed_limit_ms(radius, 0.0)
+        for direction in (-1.0, 1.0):
+            with self.subTest(direction=direction):
+                route = Route(self._arc(direction, radius, 180.0))
+                x, z = route.points[0]
+                heading = self._path_heading(
+                    route.points[0], route.points[2])
+                plugin = AutopilotPlugin.__new__(AutopilotPlugin)
+                plugin._last_steering = 0.0
+                errors, commands = [], []
+                for _ in range(int(150.0 / speed / dt)):
+                    raw = route.steering((x, z), heading, speed)
+                    target = 0.72 * raw + 0.28 * plugin._last_steering
+                    plugin._last_steering = plugin._ramp_steering(
+                        target, dt)
+                    heading -= (speed / wheelbase
+                                * plugin._last_steering * 0.18 * dt)
+                    x += -math.sin(heading) * speed * dt
+                    z += -math.cos(heading) * speed * dt
+                    index = route.tracking_index((x, z), heading)
+                    errors.append(route.cross_track_error(index, (x, z)))
+                    commands.append(plugin._last_steering)
+                self.assertAlmostEqual(speed * 3.6, 32.4, places=1)
+                self.assertLess(max(map(abs, errors)), 0.80)
+                self.assertLessEqual(max(
+                    abs(current - previous)
+                    for previous, current in zip(commands, commands[1:])),
+                    0.031)
+
     def test_curve_recovery_tolerates_real_scs_actuator_shortfall(self):
         # The 2026-07-29 drive reached 1.9 m inward error at 68 km/h although
         # the ProMods lane line itself stayed exactly 2.25 m from road centre.
@@ -372,10 +405,14 @@ class LaneGeometryAuditTests(unittest.TestCase):
         # of tyre angle per normalized command while the feed-forward model is
         # calibrated at NORMALIZED_STEERING_ANGLE_RAD. Feedback must recover
         # before the 1.80 m runtime authority boundary in either turn direction.
-        speed, dt, wheelbase = 18.9, 0.05, 5.0
+        dt, wheelbase = 0.05, 5.0
         for direction in (-1.0, 1.0):
             for radius in (80.0, 120.0, 220.0):
                 with self.subTest(direction=direction, radius=radius):
+                    # The former test drove every radius at 68 km/h. The new
+                    # speed envelope is part of the safety system: a loaded
+                    # truck must enter the curve at its radius-safe speed.
+                    speed = min(18.9, curve_speed_limit_ms(radius, 0.0))
                     route = Route(self._arc(direction, radius, 500.0))
                     x, z = route.points[0]
                     heading = self._path_heading(
@@ -483,7 +520,7 @@ class LaneGeometryAuditTests(unittest.TestCase):
                   [21.0, 0.0, 60.0]]
         route = Route(points)
         heading = math.pi
-        self.assertGreater(route.curvature_ahead((0.0, 0.0), heading), 100.0)
+        self.assertLess(route.curvature_ahead((0.0, 0.0), heading), 100.0)
         self.assertLessEqual(abs(route.steering(
             (0.0, 0.0), heading, speed_ms=0.0)), 0.22 + 1e-9)
 

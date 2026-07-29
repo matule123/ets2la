@@ -1,14 +1,14 @@
 import logging
 import math
 from sdk.base_plugin import BasePlugin
-from core.navigation.route import iter_path_xz
+from core.navigation.route import curve_speed_limit_ms, iter_path_xz
 
 
 # === Tuning =================================================================
 # --- Speed policy -----------------------------------------------------------
 # Lateral acceleration a loaded ETS2 truck holds comfortably (m/s^2). Drives the
 # curve-safe-speed law: v_safe = sqrt(A_LAT * radius).
-A_LAT_MAX = 2.5
+A_LAT_MAX = 1.8
 AUX_BRAKE_MAX = 0.35      # aux brake nudge when over the plan
 AUX_OVERSHOOT_MS = 1.0    # how far over plan before aux brake kicks in
 
@@ -113,9 +113,13 @@ class Plugin(BasePlugin):
         if radius:
             try:
                 R = float(radius)
-                if 30.0 < R < 2000.0:
-                    limits.append(math.sqrt(A_LAT_MAX * R))
-            except (TypeError, ValueError):
+                distance = float(self.sdk.get(
+                    "path_curve_distance_m", 0.0) or 0.0)
+                curve_limit = curve_speed_limit_ms(
+                    R, distance, A_LAT_MAX)
+                if math.isfinite(curve_limit):
+                    limits.append(curve_limit)
+            except (TypeError, ValueError, OverflowError):
                 pass
 
         # 4. Lead vehicle: hold a ~3 s time-gap.
