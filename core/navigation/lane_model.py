@@ -204,6 +204,84 @@ class LaneLocator:
         self.config = config or LaneLocatorConfig()
         self.previous: Optional[LaneMatch] = None
         self._lane_change_evidence: Optional[_LaneChangeEvidence] = None
+        self._authoritative_path_signature = None
+        self._authoritative_segment_index = None
+
+    @staticmethod
+    def _path_signature(segments):
+        """Identity of one ordered immutable LanePath, including occurrences."""
+        return tuple((
+            segment.lane_id, int(segment.start_uid), int(segment.end_uid),
+            int(segment.direction), int(segment.elevation_layer),
+            len(segment.centerline),
+            ((segment.centerline[0].x, segment.centerline[0].y,
+              segment.centerline[0].z) if segment.centerline else None),
+            ((segment.centerline[-1].x, segment.centerline[-1].y,
+              segment.centerline[-1].z) if segment.centerline else None),
+        ) for segment in segments)
+
+    def _authoritative_window(self, segments, previous, position):
+        """Return a progress-bounded slice of the already validated path."""
+        segments = tuple(segments or ())
+        if not segments or previous is None:
+            return None, None, ()
+        movement = math.dist(
+            tuple(map(float, position)),
+            (previous.point.x, previous.point.y, previous.point.z))
+        if movement > self.config.same_lane_retention_max_progress_m:
+            return self._path_signature(segments), None, ()
+        signature = self._path_signature(segments)
+        anchor = (self._authoritative_segment_index
+                  if signature == self._authoritative_path_signature
+                  else None)
+        if (anchor is None or anchor < 0 or anchor >= len(segments)
+                or segments[anchor].lane_id != previous.lane_id):
+            occurrences = [
+                index for index, segment in enumerate(segments)
+                if segment.lane_id == previous.lane_id
+            ]
+            if not occurrences:
+                return signature, None, ()
+            previous_position = (
+                previous.point.x, previous.point.y, previous.point.z)
+            ranked = sorted((
+                (self._project(previous_position, segments[index])
+                 or (float("inf"),))[0], index)
+                for index in occurrences)
+            # After a horizon replacement, two geometrically coincident
+            # occurrences of the same LaneId cannot be distinguished from
+            # position alone (notably another roundabout lap). Never guess an
+            # occurrence and jump progress backwards; the normal GPS/index
+            # candidates must re-establish it or localisation stays closed.
+            if (self._authoritative_path_signature is not None
+                    and signature != self._authoritative_path_signature
+                    and len(ranked) > 1
+                    and abs(ranked[1][0] - ranked[0][0]) < 0.25):
+                return signature, None, ()
+            anchor = ranked[0][1]
+        first = max(0, anchor - 1)
+        last = min(len(segments), anchor + 3)
+        return signature, anchor, tuple(enumerate(
+            segments[first:last], start=first))
+
+    def _commit_authoritative_progress(self, signature, anchor, segments,
+                                       lane_id):
+        if signature is None or anchor is None:
+            return
+        segments = tuple(segments or ())
+        first = max(0, anchor - 1)
+        last = min(len(segments), anchor + 3)
+        occurrences = [index for index in range(first, last)
+                       if segments[index].lane_id == lane_id]
+        if not occurrences:
+            return
+        if anchor in occurrences:
+            selected = anchor
+        else:
+            forward = [index for index in occurrences if index > anchor]
+            selected = min(forward) if forward else max(occurrences)
+        self._authoritative_path_signature = signature
+        self._authoritative_segment_index = selected
 
     def _adjacent_road_lane_change(self, source: LaneId, target: LaneId):
         """Return lane segments only for a topology-proven adjacent change."""
@@ -341,7 +419,9 @@ class LaneLocator:
                gps_uids: Sequence[int] = (),
                previous: Optional[LaneMatch] = None,
                diagnostics: Optional[dict] = None,
-               diagnostic_mode: bool = False) -> Optional[LaneMatch]:
+               diagnostic_mode: bool = False,
+               authoritative_segments: Sequence[LaneSegment] = (),
+               ) -> Optional[LaneMatch]:
         """Locate the lane; diagnostic mode never mutates locator history."""
         if len(position) == 2:
             px, pz = position
@@ -351,6 +431,8 @@ class LaneLocator:
         previous = previous if previous is not None else self.previous
         if previous is None and not diagnostic_mode:
             self._lane_change_evidence = None
+            self._authoritative_path_signature = None
+            self._authoritative_segment_index = None
         gps_order = tuple(int(uid) for uid in gps_uids)
         gps = frozenset(gps_order)
         directed_gps_edges = frozenset(zip(gps_order, gps_order[1:]))
@@ -368,6 +450,27 @@ class LaneLocator:
             candidates = list(candidates) + list(route_candidates(
                 (px, py, pz), gps_order, self.config.search_radius_m,
                 register=not diagnostic_mode))
+        # A rolling SDK window may remove the UID at the entrance of a prefab
+        # while the truck is still physically on that already validated
+        # navCurve. Keep only missing, nearby segments from the immutable
+        # current LanePath as candidates. This does not invent topology: those
+        # segments were already selected, connected and validated for the same
+        # navigation snapshot. Fresh acquisition without a snapshot is
+        # unchanged, and current map data wins for an identical LaneId.
+        candidates = list(candidates)
+        candidate_ids = {candidate.lane_id for candidate in candidates}
+        path_signature, path_anchor, authoritative_window = (
+            self._authoritative_window(
+                authoritative_segments, previous, (px, py, pz)))
+        for _path_index, candidate in authoritative_window:
+            if candidate.lane_id in candidate_ids:
+                continue
+            projected = self._project((px, py, pz), candidate)
+            if (projected is None
+                    or projected[0] > self.config.search_radius_m):
+                continue
+            candidates.append(candidate)
+            candidate_ids.add(candidate.lane_id)
         # The same terminal navCurve can be both the route-prefix candidate
         # and a directly GPS-proven candidate. It is one lane, not an
         # ambiguity merely because two conservative queries returned it.
@@ -605,4 +708,7 @@ class LaneLocator:
             }
         if not diagnostic_mode:
             self.previous = match
+            self._commit_authoritative_progress(
+                path_signature, path_anchor, authoritative_segments,
+                match.lane_id)
         return match

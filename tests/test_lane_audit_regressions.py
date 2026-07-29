@@ -3,6 +3,7 @@ import multiprocessing as mp
 import threading
 import time
 import unittest
+from unittest import mock
 
 from core.ar_overlay import AROverlay
 from core.hud import UltraPilotHUD
@@ -16,6 +17,7 @@ from core.navigation.lane_trajectory import build_lane_trajectory
 from core.navigation.road_network import RoadNetwork
 from core.navigation.route import (
     NORMALIZED_STEERING_ANGLE_RAD, TRUCK_WHEELBASE_M, Route,
+    steering_geometry_windows,
 )
 from plugins.autopilot.main import Plugin as AutopilotPlugin
 from tests.test_lane_authority_integration import (
@@ -81,9 +83,12 @@ class LaneGeometryAuditTests(unittest.TestCase):
                 radius = 100.0
                 route = Route(self._arc(direction, radius, 140.0))
                 pos = route.points[10]
-                tangent = route.lookahead_point(10, pos, 6.0)
+                tangent_window, curvature_window = (
+                    steering_geometry_windows(15.0))
+                tangent = route.lookahead_point(10, pos, tangent_window)
                 heading = self._path_heading(pos, tangent)
-                curvature = route.signed_curvature_ahead(pos, heading, 12.0)
+                curvature = route.signed_curvature_ahead(
+                    pos, heading, curvature_window)
                 steering = route.steering(
                     pos, heading, 15.0, cross_track_error_m=0.0)
                 # Positive X is left of +Z travel in ETS world coordinates;
@@ -96,6 +101,96 @@ class LaneGeometryAuditTests(unittest.TestCase):
                 expected = (math.atan(TRUCK_WHEELBASE_M * curvature)
                             / NORMALIZED_STEERING_ANGLE_RAD)
                 self.assertAlmostEqual(steering, expected, delta=0.025)
+
+    def test_low_speed_junction_curve_does_not_steer_on_distant_straight(self):
+        """The old fixed 12 m feed-forward reached full curve authority early."""
+        points = [(0.0, float(z)) for z in range(0, 102, 2)]
+        radius = 40.0
+        points.extend((
+            radius - radius * math.cos(s / radius),
+            100.0 + radius * math.sin(s / radius),
+        ) for s in range(2, 82, 2))
+        route = Route(points)
+
+        # At 17 km/h the truck is still six metres from the curve. Braking may
+        # anticipate it through CURV_WINDOW_M, but lateral authority may not.
+        before = route.steering(
+            (0.0, 94.0), math.pi, 4.7, cross_track_error_m=0.0)
+        entry = route.steering(
+            (0.0, 99.0), math.pi, 4.7, cross_track_error_m=0.0)
+        inside = route.steering(
+            route.points[55],
+            self._path_heading(route.points[55], route.points[57]),
+            4.7, cross_track_error_m=0.0)
+        self.assertAlmostEqual(before, 0.0, places=7)
+        self.assertLess(entry, 0.0)
+        self.assertLess(inside, entry)
+
+    def test_steering_preview_is_bounded_and_speed_aware(self):
+        # Route.steering receives metres/second. These samples are exactly
+        # 0, 18, 43.2 and 90 km/h after conversion.
+        stopped = steering_geometry_windows(0.0)
+        crawl = steering_geometry_windows(5.0)
+        road = steering_geometry_windows(12.0)
+        motorway = steering_geometry_windows(90.0 / 3.6)
+        self.assertEqual(stopped, (2.0, 4.0))
+        self.assertLess(crawl[0], road[0])
+        self.assertLess(crawl[1], road[1])
+        self.assertLessEqual(road[0], motorway[0])
+        self.assertLessEqual(road[1], motorway[1])
+        self.assertEqual(motorway, (4.0, 8.0))
+
+    def test_forty_metre_braking_window_is_not_a_steering_input(self):
+        points = [(0.0, float(z)) for z in range(0, 102, 2)]
+        radius = 45.0
+        points.extend((
+            radius - radius * math.cos(s / radius),
+            100.0 + radius * math.sin(s / radius),
+        ) for s in range(2, 92, 2))
+        route = Route(points)
+        # The distant curve is inside CURV_WINDOW_M but outside the bounded
+        # local steering windows. Steering must not query long lookahead.
+        with mock.patch.object(
+                route, "curvature_ahead",
+                side_effect=AssertionError("braking lookahead reached steering")):
+            before = route.steering(
+                (0.6, 70.0), math.pi, 8.0,
+                cross_track_error_m=0.6)
+        straight = Route([(0.0, 0.0), (0.0, 100.0), (0.0, 200.0)])
+        reference = straight.steering(
+            (0.6, 70.0), math.pi, 8.0,
+            cross_track_error_m=0.6)
+        self.assertAlmostEqual(before, reference, places=7)
+
+    def test_tight_curve_and_roundabout_begin_steering_without_delay(self):
+        points = [(0.0, float(z)) for z in range(0, 102, 2)]
+        radius = 40.0
+        points.extend((
+            radius - radius * math.cos(s / radius),
+            100.0 + radius * math.sin(s / radius),
+        ) for s in range(2, 122, 2))
+        for speed in (0.5, 2.0, 5.0, 9.0):
+            with self.subTest(kind="sharp-entry", speed=speed):
+                route = Route(points)
+                preview = route.steering(
+                    (0.0, 96.0), math.pi, speed,
+                    cross_track_error_m=0.0)
+                entry = route.steering(
+                    (0.0, 99.0), math.pi, speed,
+                    cross_track_error_m=0.0)
+                self.assertLessEqual(preview, 0.0)
+                self.assertLess(entry, -0.05)
+                self.assertTrue(math.isfinite(entry))
+
+            with self.subTest(kind="roundabout", speed=speed):
+                roundabout = Route(self._arc(1.0, 35.0, 100.0))
+                pos = roundabout.points[2]
+                heading = self._path_heading(
+                    roundabout.points[2], roundabout.points[4])
+                command = roundabout.steering(
+                    pos, heading, speed, cross_track_error_m=0.0)
+                self.assertLess(command, -0.05)
+                self.assertLessEqual(abs(command), 0.7)
 
     def test_live_lane_cte_replaces_not_duplicates_route_cte(self):
         route = Route([(0.0, 0.0), (0.0, 100.0), (0.0, 200.0)])

@@ -343,6 +343,136 @@ class LaneLocatorTests(unittest.TestCase):
         self.assertIn(prefab.lane_id, [match.lane_id for match in matches])
         self.assertEqual(matches[-1].lane_id, road_out.lane_id)
 
+    def test_validated_prefab_remains_localisable_after_rolling_prefix_trim(self):
+        """Reproduce the 14:15:51 live-match loss from the game log.
+
+        The SDK has already dropped the prefab's entry UID, so current GPS
+        queries expose only the outgoing road. The truck is still on the
+        validated navCurve and must use that immutable segment until the
+        proven prefab -> road transition completes.
+        """
+        prefab = path_lane(501, 1, 2, (
+            (0.0, 0.0, 20.0), (2.0, 0.0, 30.0),
+            (4.0, 0.0, 40.0)), lane_type="prefab",
+            prefab_token="rolling-junction", connector_index=7)
+        road_out = path_lane(502, 2, 3, (
+            (4.0, 0.0, 40.0), (4.0, 0.0, 70.0)))
+        network = TransitionNetwork(
+            (road_out,), (prefab,), ((prefab.lane_id, road_out.lane_id),))
+
+        without_snapshot = LaneLocator(network)
+        first = without_snapshot.locate(
+            (2.0, 0.0, 30.0), math.atan2(-2.0, -10.0), (1, 2, 3))
+        self.assertEqual(first.lane_id, prefab.lane_id)
+        self.assertIsNone(without_snapshot.locate(
+            (3.3, 0.0, 36.5), math.atan2(-2.0, -10.0), (2, 3)))
+
+        locator = LaneLocator(network)
+        first = locator.locate(
+            (2.0, 0.0, 30.0), math.atan2(-2.0, -10.0), (1, 2, 3))
+        still_prefab = locator.locate(
+            (3.3, 0.0, 36.5), math.atan2(-2.0, -10.0), (2, 3),
+            authoritative_segments=(prefab, road_out))
+        on_road = locator.locate(
+            (4.0, 0.0, 45.0), math.pi, (2, 3),
+            authoritative_segments=(prefab, road_out))
+        self.assertEqual(first.lane_id, prefab.lane_id)
+        self.assertEqual(still_prefab.lane_id, prefab.lane_id)
+        self.assertEqual(on_road.lane_id, road_out.lane_id)
+
+    def test_authoritative_path_candidates_are_progress_bounded_and_read_only(self):
+        current = path_lane(601, 1, 2, (
+            (1.0, 0.0, 0.0), (1.0, 0.0, 20.0)))
+        next_one = path_lane(602, 2, 3, (
+            (1.0, 0.0, 20.0), (1.0, 0.0, 40.0)))
+        next_two = path_lane(603, 3, 4, (
+            (1.0, 0.0, 40.0), (1.0, 0.0, 60.0)))
+        next_three = path_lane(604, 4, 5, (
+            (1.0, 0.0, 60.0), (1.0, 0.0, 80.0)))
+        # Same UID edge on a later lap, geometrically slightly closer at the
+        # crossing. Global proximity would select it, ordered path progress
+        # must not expose it while the locator is still at occurrence zero.
+        later_lap = path_lane(605, 1, 2, (
+            (0.0, 0.0, 0.0), (0.0, 0.0, 20.0)))
+        path = (current, next_one, next_two, next_three, later_lap)
+        network = TransitionNetwork((current,), connected=(
+            (current.lane_id, later_lap.lane_id),
+            (current.lane_id, next_one.lane_id),
+        ))
+        locator = LaneLocator(network)
+        acquired = locator.locate((1.0, 0.0, 10.0), math.pi, (1, 2))
+        self.assertEqual(acquired.lane_id, current.lane_id)
+        network.lanes = []
+
+        diagnostics = {}
+        held = locator.locate(
+            (0.0, 0.0, 10.0), math.pi, (9, 10),
+            authoritative_segments=path, diagnostics=diagnostics)
+        self.assertEqual(held.lane_id, current.lane_id)
+        candidate_ids = {
+            item["lane_id"]["road_uid"]
+            for item in diagnostics["candidate_lanes"]
+        }
+        self.assertNotIn(later_lap.lane_id.road_uid, candidate_ids)
+        self.assertEqual(locator._authoritative_segment_index, 0)
+
+        signature = locator._authoritative_path_signature
+        index = locator._authoritative_segment_index
+        observed = locator.locate(
+            (1.0, 0.0, 25.0), math.pi, (9, 10),
+            authoritative_segments=path, diagnostic_mode=True,
+            diagnostics={})
+        self.assertEqual(observed.lane_id, next_one.lane_id)
+        self.assertEqual(locator._authoritative_path_signature, signature)
+        self.assertEqual(locator._authoritative_segment_index, index)
+        self.assertEqual(locator.previous.lane_id, current.lane_id)
+
+        # A replacement horizon containing two coincident occurrences of the
+        # same LaneId cannot prove which roundabout lap is current. The old
+        # occurrence must not be selected merely because it appears first.
+        locator._authoritative_path_signature = locator._path_signature(path)
+        locator._authoritative_segment_index = 0
+        repeated = (current, next_one, current)
+        self.assertIsNone(locator.locate(
+            (1.0, 0.0, 10.0), math.pi, (9, 10),
+            authoritative_segments=repeated))
+        self.assertEqual(locator._authoritative_segment_index, 0)
+
+    def test_authoritative_segments_still_require_motion_heading_and_elevation(self):
+        current = path_lane(611, 1, 2, (
+            (0.0, 0.0, 0.0), (0.0, 0.0, 20.0)))
+        forward = path_lane(612, 2, 3, (
+            (0.0, 0.0, 20.0), (0.0, 0.0, 60.0)))
+        upper = path_lane(613, 2, 3, (
+            (0.0, 8.0, 20.0), (0.0, 8.0, 60.0)),
+            elevation_layer=3)
+        network = TransitionNetwork((current,), connected=(
+            (current.lane_id, forward.lane_id),
+            (current.lane_id, upper.lane_id),
+        ))
+        locator = LaneLocator(network)
+        locator.locate((0.0, 0.0, 10.0), math.pi, (1, 2, 3))
+        network.lanes = []
+        self.assertIsNone(locator.locate(
+            (0.0, 0.0, 50.0), math.pi, (2, 3),
+            authoritative_segments=(current, forward)))
+
+        locator = LaneLocator(TransitionNetwork(
+            (current,), connected=((current.lane_id, upper.lane_id),)))
+        locator.locate((0.0, 0.0, 10.0), math.pi, (1, 2, 3))
+        locator.network.lanes = []
+        self.assertIsNone(locator.locate(
+            (0.0, 0.0, 24.0), math.pi, (2, 3),
+            authoritative_segments=(current, upper)))
+
+        locator = LaneLocator(TransitionNetwork(
+            (current,), connected=((current.lane_id, forward.lane_id),)))
+        locator.locate((0.0, 0.0, 10.0), math.pi, (1, 2, 3))
+        locator.network.lanes = []
+        self.assertIsNone(locator.locate(
+            (0.0, 0.0, 24.0), 0.0, (2, 3),
+            authoritative_segments=(current, forward)))
+
     def test_merge_split_and_intersection_change_active_segment_without_loss(self):
         incoming = path_lane(10, 1, 2, (
             (0.0, 0.0, 0.0), (0.0, 0.0, 20.0)), lane_index=1)

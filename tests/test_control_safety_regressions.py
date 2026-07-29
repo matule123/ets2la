@@ -153,6 +153,37 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         self.assertFalse(readiness["ready"])
         self.assertIn("not centred", readiness["reason"])
 
+    def test_invalid_live_match_reports_localisation_not_sentinel_distance(self):
+        state = ready_navigation_state()
+        state.set("lane_match", {
+            "revision": 7, "valid": False,
+            "lateral_error_m": 1_000_000.0,
+            "heading_error_rad": math.pi,
+            "failure_reason": "live lane localization unavailable",
+        })
+        reason = lane_authority_rejection_reason(
+            state, state.get("lane_trajectory"))
+        self.assertEqual(reason, "live lane localization unavailable")
+        self.assertNotIn("1000000", reason)
+
+    def test_automatic_safety_disengagement_logs_exact_reason_once(self):
+        state = ready_navigation_state()
+        state.set("lane_match", {
+            "revision": 7, "valid": False,
+            "lateral_error_m": 1_000_000.0,
+            "heading_error_rad": math.pi,
+            "failure_reason": "live lane localization unavailable",
+        })
+        plugin = autopilot({"speed": 0.0, "gear": 1}, state)
+        with self.assertLogs(level="WARNING") as captured:
+            plugin.on_tick(0.05)
+        self.assertFalse(state.get("autopilot_active"))
+        self.assertEqual(state.get("autopilot_disable_reason"),
+                         "live lane localization unavailable")
+        self.assertEqual(sum("automatically disengaged" in line
+                             for line in captured.output), 1)
+        self.assertNotIn("1000000.00", "\n".join(captured.output))
+
     def test_engagement_gate_is_derived_from_lane_width(self):
         self.assertAlmostEqual(engagement_lateral_limit({"lane_width_m": 4.5}),
                                1.50)

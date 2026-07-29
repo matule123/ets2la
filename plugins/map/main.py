@@ -477,17 +477,38 @@ class Plugin(BasePlugin):
         if not old_segments or not new_segments:
             return "horizon refresh lacks LaneSegment identity"
         old_by_id = {segment.lane_id: segment for segment in old_segments}
+        new_by_id = {segment.lane_id: segment for segment in new_segments}
         common = [(old_by_id[segment.lane_id], segment)
                   for segment in new_segments if segment.lane_id in old_by_id]
         if not common:
-            return "horizon refresh has no common LaneId"
+            # A progressively confirmed adjacent-lane change can legitimately
+            # replace every remaining LaneId on a long parallel road. It is
+            # proven without a chord only when old and new segments describe
+            # the same directed GPS edge, road item and elevation layer.
+            new_live = new_by_id.get(
+                match.lane_id if match is not None else None)
+            lateral_anchor = next((old for old in old_segments
+                if (match is not None
+                    and match.switch_reason == "lane_change_confirmed"
+                    and new_live is not None
+                    and old.lane_id.prefab_token is None
+                    and new_live.lane_id.prefab_token is None
+                    and old.lane_id.road_uid == new_live.lane_id.road_uid
+                    and old.direction == new_live.direction
+                    and old.elevation_layer == new_live.elevation_layer
+                    and abs(old.lane_index - new_live.lane_index) == 1
+                    and (old.start_uid, old.end_uid) in shared_uid_edges
+                    and (new_live.start_uid, new_live.end_uid)
+                        == (old.start_uid, old.end_uid))), None)
+            if lateral_anchor is None:
+                return "horizon refresh has no common LaneId"
+            return ""
         proven_common = [(old, new) for old, new in common
                          if (old.start_uid, old.end_uid) in shared_uid_edges
                          and (new.start_uid, new.end_uid)
                              == (old.start_uid, old.end_uid)]
         if not proven_common:
             return "horizon refresh has no common LaneId on the shared UID edge"
-        new_by_id = {segment.lane_id: segment for segment in new_segments}
         if match is not None and match.lane_id not in new_by_id:
             return "live LaneId is outside the newly validated horizon"
         for old, new in proven_common:
@@ -846,8 +867,12 @@ class Plugin(BasePlugin):
         locator_started = time.monotonic()
         diagnostic_requested = needs_build
         locator_capture = {} if diagnostic_requested else None
+        authoritative_segments = (
+            tuple(getattr(previous_lane_path, "segments", ()) or ())
+            if current.get("valid", False) else ())
         match = locator.locate((pos[0], altitude, pos[1]), heading, build_uids,
-                               self._lane_match, diagnostics=locator_capture)
+                               self._lane_match, diagnostics=locator_capture,
+                               authoritative_segments=authoritative_segments)
         if not self._build_is_current(uids, build_revision, build_request):
             if diagnostic_requested:
                 diagnostic = self._new_route_diagnostics(
@@ -859,9 +884,42 @@ class Plugin(BasePlugin):
                     diagnostic, "GPS revision changed during LaneLocator",
                     build_revision)
             return None
+        # A confirmed move to an adjacent lane (or a proven topology
+        # transition) changes lane-centre geometry. Create a validated
+        # same-intent snapshot instead of steering against the old lane or
+        # accepting a live LaneId outside its immutable corridor.
+        match_lane_payload = self._lane_id_payload(
+            match.lane_id if match is not None else None)
+        match_in_corridor = any(
+            entry.get("lane_id") == match_lane_payload
+            for entry in (current.get("lane_corridor", ()) or ()))
+        lane_authority_refresh = bool(
+            match is not None and current.get("valid", False)
+            and not match_in_corridor
+            and match.switch_reason in {
+                "lane_change_confirmed", "topology_transition"})
+        if lane_authority_refresh:
+            needs_build = True
+            self._rolling_route_refresh_needed = True
+            if locator_capture is None:
+                locator_capture = {}
+                locator.locate(
+                    (pos[0], altitude, pos[1]), heading, build_uids,
+                    self._lane_match, diagnostics=locator_capture,
+                    diagnostic_mode=True,
+                    authoritative_segments=authoritative_segments)
+            diagnostic_requested = True
         diagnostic = None
         if diagnostic_requested:
             input_key = self._route_build_input_key(build_uids, match)
+            if lane_authority_refresh:
+                # Returning to a lane used earlier in the same intent is a
+                # different replacement of the current corridor, not a
+                # duplicate callback from that earlier completed build.
+                input_key += (
+                    "lane-authority-refresh",
+                    current.get("route_build_id"),
+                )
             if self._build_guard.input_completed(
                     self.sdk.get("navigation_intent_id"), input_key):
                 return self._lane_path if current.get("valid", False) else None
@@ -893,8 +951,8 @@ class Plugin(BasePlugin):
                     "lane_match": {
                         "revision": self._lane_revision,
                         "valid": False,
-                        "lateral_error_m": 1_000_000.0,
-                        "heading_error_rad": math.pi,
+                        "lateral_error_m": 0.0,
+                        "heading_error_rad": 0.0,
                         "failure_reason": "live lane localization unavailable",
                     },
                     "lane_trajectory_heartbeat": time.monotonic(),
@@ -917,7 +975,8 @@ class Plugin(BasePlugin):
                 locator.locate(
                     (pos[0], altitude, pos[1]), heading, build_uids,
                     self._lane_match, diagnostics=locator_capture,
-                    diagnostic_mode=True)
+                    diagnostic_mode=True,
+                    authoritative_segments=authoritative_segments)
             outcome = locator_capture.get("outcome", "no_match")
             safe_diagnostic_call(diagnostic, "observe_locator",
                                  locator_capture, None)
@@ -981,7 +1040,8 @@ class Plugin(BasePlugin):
             locator.locate(
                 (pos[0], altitude, pos[1]), heading, build_uids,
                 self._lane_match, diagnostics=locator_capture,
-                diagnostic_mode=True)
+                diagnostic_mode=True,
+                authoritative_segments=authoritative_segments)
             safe_diagnostic_call(diagnostic, "observe_locator",
                                  locator_capture, match)
             safe_diagnostic_call(

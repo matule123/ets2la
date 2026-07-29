@@ -143,6 +143,152 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
         self.assertEqual(current["points"], snapshot["points"])
         self.assertEqual(plugin._lane_match.lane_id, segments[1].lane_id)
 
+    def test_confirmed_adjacent_lane_change_publishes_matching_corridor(self):
+        plugin, sdk, _point = build_map_plugin()
+        before = sdk.get("lane_trajectory")
+        before_revision = before["revision"]
+        intent_id = before["navigation_intent_id"]
+        publication_start = len(sdk.shared_state.batches)
+        build_calls = 0
+        original_build = plugin.road_net.build_lane_path
+
+        def counted_build(*args, **kwargs):
+            nonlocal build_calls
+            build_calls += 1
+            return original_build(*args, **kwargs)
+
+        plugin.road_net.build_lane_path = counted_build
+        source = plugin._lane_match.lane_id
+        target = next(lane for lane in plugin.road_net._lane_id_index.values()
+                      if (lane.lane_id.road_uid == source.road_uid
+                          and lane.direction == source.direction
+                          and abs(lane.lane_index - source.lane_index) == 1))
+        source_segment = plugin.road_net._lane_id_index[source]
+        source_x = source_segment.centerline[0].x
+        target_x = target.centerline[0].x
+
+        # Two progressive observations across the physical midpoint are the
+        # LaneLocator proof; neither an instantaneous jump nor a lane index
+        # alone may replace the corridor.
+        first_x = source_x + (target_x - source_x) * 0.64
+        second_x = source_x + (target_x - source_x) * 0.90
+        for offset in range(4):
+            plugin._update_lane_trajectory(
+                (first_x, 14.0 + offset * 0.1), math.pi)
+        self.assertEqual(sdk.get("lane_trajectory")["revision"],
+                         before_revision)
+        plugin._update_lane_trajectory((second_x, 24.0), math.pi)
+        for offset in range(4):
+            plugin._update_lane_trajectory(
+                (target_x, 25.0 + offset), math.pi)
+
+        after = sdk.get("lane_trajectory")
+        self.assertTrue(after["valid"])
+        self.assertEqual(after["revision"], before_revision + 1)
+        self.assertEqual(after["navigation_intent_id"], intent_id)
+        self.assertEqual(sdk.get("navigation_intent_id"), intent_id)
+        self.assertEqual(build_calls, 1)
+        old_callback = type("OldLaneBuild", (), {
+            "build_id": before["route_build_id"],
+        })()
+        self.assertFalse(plugin._build_is_current(
+            tuple(sdk.get("game_route_node_uids")), before_revision,
+            sdk.get("nav_recalc_request"), old_callback))
+        self.assertIs(sdk.get("lane_trajectory"), after)
+        self.assertEqual(after["active_lane_id"],
+                         plugin._lane_id_payload(target.lane_id))
+        self.assertTrue(any(
+            entry["lane_id"] == after["active_lane_id"]
+            for entry in after["lane_corridor"]))
+        self.assertEqual(sdk.get("lane_match")["revision"],
+                         after["revision"])
+        self.assertEqual(sdk.get("nav_trajectory_revision"),
+                         after["revision"])
+        valid_publications = [
+            batch for batch in sdk.shared_state.batches[publication_start:]
+            if ((batch.get("lane_trajectory") or {}).get("valid", False)
+                and batch["lane_trajectory"].get("revision")
+                    > before_revision)
+        ]
+        self.assertEqual(len(valid_publications), 1)
+        publication = valid_publications[0]
+        self.assertEqual(publication["lane_trajectory_revision"],
+                         after["revision"])
+        self.assertEqual(publication["lane_match"]["revision"],
+                         after["revision"])
+        self.assertEqual(publication["nav_trajectory_revision"],
+                         after["revision"])
+        self.assertIs(publication["nav_path"], after["display_points"])
+        self.assertIs(publication["map_path"], after["points"])
+
+        hud = type("HUDReader", (), {
+            "shared_state": sdk.shared_state,
+            "_rear_cam_side": "off", "_rear_cam_until": 0.0,
+        })()
+        ar = type("ARReader", (), {"state": sdk.shared_state})()
+        self.assertIs(UltraPilotHUD._read(hud)["nav_path"],
+                      after["display_points"])
+        self.assertEqual(AROverlay._current_display_points(ar),
+                         (after["revision"], after["display_points"]))
+        self.assertIs(live_map_navigation_points(sdk.shared_state),
+                      after["display_points"])
+        self.assertEqual(lane_authority_rejection_reason(
+            sdk.shared_state, after), "")
+        sdk.set("system_state", "CRUISE")
+        sdk.set("danger_level", 0.0)
+        sdk.set("traffic", [])
+        sdk.set("autopilot_active", False)
+        sdk.controller = Controller()
+        sdk.telemetry = Telemetry()
+        autopilot = AutopilotPlugin(sdk)
+        autopilot.tags = Tags()
+        autopilot.on_start()
+        autopilot.on_tick(0.02)
+        self.assertEqual(sdk.get("autopilot_lane_revision"),
+                         after["revision"])
+        self.assertEqual(sdk.get("autopilot_navigation_readiness")["revision"],
+                         after["revision"])
+
+        # Returning progressively to the original adjacent lane is another
+        # real corridor replacement, even though that input was completed
+        # earlier in this same navigation intent.
+        changed_revision = after["revision"]
+        first_back = target_x + (source_x - target_x) * 0.64
+        second_back = target_x + (source_x - target_x) * 0.90
+        plugin._update_lane_trajectory((first_back, 29.0), math.pi)
+        plugin._update_lane_trajectory((second_back, 35.0), math.pi)
+        returned = sdk.get("lane_trajectory")
+        self.assertEqual(returned["revision"], changed_revision + 1)
+        self.assertEqual(returned["navigation_intent_id"], intent_id)
+        self.assertEqual(build_calls, 2)
+        self.assertEqual(returned["active_lane_id"],
+                         plugin._lane_id_payload(source))
+        self.assertTrue(any(
+            entry["lane_id"] == returned["active_lane_id"]
+            for entry in returned["lane_corridor"]))
+
+    def test_lane_change_refresh_cannot_cross_direction_or_elevation(self):
+        plugin, sdk, _point = build_map_plugin()
+        snapshot = sdk.get("lane_trajectory")
+        old = plugin._lane_path.segments[0]
+        for lane_id, layer in (
+                (LaneId(old.lane_id.road_uid, -old.direction,
+                        old.lane_index + 1), old.elevation_layer),
+                (LaneId(old.lane_id.road_uid, old.direction,
+                        old.lane_index + 1), old.elevation_layer + 1)):
+            with self.subTest(lane_id=lane_id, layer=layer):
+                replacement = replace(
+                    old, lane_id=lane_id, direction=lane_id.direction,
+                    lane_index=lane_id.lane_index, elevation_layer=layer)
+                new_path = replace(plugin._lane_path,
+                                   segments=(replacement,))
+                match = replace(plugin._lane_match, lane_id=lane_id,
+                                switch_reason="lane_change_confirmed")
+                reason = plugin._horizon_continuity_reason(
+                    snapshot, replace(plugin._lane_path, segments=(old,)),
+                    new_path, (1, 2, 3), match)
+                self.assertIn("no common LaneId", reason)
+
     def test_rolling_rebase_refreshes_only_near_horizon_end(self):
         plugin, sdk, _point = build_map_plugin()
         snapshot = dict(sdk.get("lane_trajectory"))

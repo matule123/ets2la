@@ -81,6 +81,9 @@ def lane_authority_rejection_reason(state, snapshot, now=None):
                              or snapshot_revision)
         if match_revision != snapshot_revision:
             return "live lane localisation belongs to a stale trajectory"
+        if live_match.get("valid") is False:
+            return str(live_match.get("failure_reason")
+                       or "live lane localisation is temporarily unavailable")
         live_lane_id = live_match.get("active_lane_id")
         corridor = snapshot.get("lane_corridor", ()) or ()
         corridor_entry = next((entry for entry in corridor
@@ -207,6 +210,7 @@ class Plugin(BasePlugin):
         self._drive_request_t = 0.0
         self._drive_engage_started = 0.0
         self._lane_lock_acquired = False
+        self._last_authority_stop_reason = None
 
     def on_stop(self):
         logging.info("Autopilot Plugin stopped.")
@@ -389,6 +393,11 @@ class Plugin(BasePlugin):
         # fall back to vision driving. While moving we perform a controlled
         # stop; once stationary we release all automation and disengage.
         if autopilot_engaged and not navigation_authority_safe:
+            if authority_reason != self._last_authority_stop_reason:
+                logging.warning(
+                    "Autopilot lost navigation authority; controlled stop: %s",
+                    authority_reason)
+                self._last_authority_stop_reason = authority_reason
             self.sdk.controller.set_throttle(0.0)
             self._last_throttle = 0.0
             self._last_steering = self._ramp_steering(0.0, dt)
@@ -408,8 +417,14 @@ class Plugin(BasePlugin):
                 self.sdk.shared_state.set("nav_steering", 0.0)
                 self.sdk.shared_state.set(
                     "autopilot_disable_reason", authority_reason)
+                logging.warning(
+                    "Autopilot automatically disengaged after safety stop: %s",
+                    authority_reason)
             self._publish_control_tags(speed_kmh, False)
             return
+
+        if navigation_authority_safe:
+            self._last_authority_stop_reason = None
 
         reversing = bool(autopilot_engaged and
                          (float(speed) < -0.10 or gear < 0
@@ -435,6 +450,8 @@ class Plugin(BasePlugin):
                 self.sdk.shared_state.set("nav_steering", 0.0)
                 self.sdk.shared_state.set(
                     "autopilot_disable_reason", "unexpected reverse gear")
+                logging.warning(
+                    "Autopilot automatically disengaged: unexpected reverse gear")
                 self.sdk.shared_state.set(
                     "navigation_status", "Autopilot vypnutý po spiatočke")
             self._publish_control_tags(speed_kmh, False)

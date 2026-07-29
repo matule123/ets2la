@@ -58,7 +58,10 @@ K_CTE_CURVE = 1.80        # hold the mapped lane centre against curve cutting
 K_SOFT = 1.0              # softening constant → CTE term never explodes at v=0
 TRUCK_WHEELBASE_M = 5.0
 NORMALIZED_STEERING_ANGLE_RAD = 0.18
-STEERING_CURVATURE_WINDOW_M = 12.0
+STEERING_CURVATURE_MIN_WINDOW_M = 4.0
+STEERING_CURVATURE_MAX_WINDOW_M = 8.0
+STEERING_TANGENT_MIN_WINDOW_M = 2.0
+STEERING_TANGENT_MAX_WINDOW_M = 4.0
 # A longer window is retained for anticipatory curve braking; steering uses
 # the shorter local window above so it cannot cut across a bend.
 CURV_WINDOW_M = 40.0
@@ -88,6 +91,26 @@ def curve_cte_gain(radius_m: float) -> float:
     radius = float(radius_m)
     weight = _clamp((500.0 - radius) / (500.0 - TIGHT_CURVE_RADIUS), 0.0, 1.0)
     return K_CTE + (K_CTE_CURVE - K_CTE) * weight
+
+
+def steering_geometry_windows(speed_ms: float) -> Tuple[float, float]:
+    """Return bounded local tangent/curvature windows for lane steering.
+
+    The previous fixed 12 m curvature window applied the full steering angle
+    several seconds before a low-speed junction bend. A short local window is
+    sufficient at low speed; faster travel gets limited preview for actuator
+    slew without turning the long braking lookahead into lateral authority.
+    """
+    speed = max(0.0, abs(float(speed_ms)))
+    tangent = _clamp(
+        STEERING_TANGENT_MIN_WINDOW_M + speed * 0.08,
+        STEERING_TANGENT_MIN_WINDOW_M,
+        STEERING_TANGENT_MAX_WINDOW_M)
+    curvature = _clamp(
+        STEERING_CURVATURE_MIN_WINDOW_M + speed * 0.16,
+        STEERING_CURVATURE_MIN_WINDOW_M,
+        STEERING_CURVATURE_MAX_WINDOW_M)
+    return tangent, curvature
 
 
 class Route:
@@ -412,13 +435,13 @@ class Route:
         # onto a neighbouring arm and immediately pull across the median.
         idx = self.tracking_index(pos, heading)
 
-        # The long window remains useful for braking and curve-dependent CTE
-        # gain. Steering direction itself is taken from the local tangent.
-        radius = self.curvature_ahead(pos, heading)
+        # Steering direction and curve-dependent CTE gain both use local
+        # geometry. The independent 40 m preview remains braking-only.
         # Stanley uses the local path tangent. A direction to a 70 m chord
         # cuts one bend toward the median and the opposite bend toward grass.
+        tangent_window, curvature_window = steering_geometry_windows(speed_ms)
         projection = self.lookahead_point(idx, pos, 0.0)
-        tangent_target = self.lookahead_point(idx, pos, 6.0)
+        tangent_target = self.lookahead_point(idx, pos, tangent_window)
         path_dx = tangent_target[0] - projection[0]
         path_dz = tangent_target[1] - projection[1]
         path_length = math.hypot(path_dx, path_dz)
@@ -452,9 +475,12 @@ class Route:
         # old pure-gain sum produced in S-bends. The speed_gain schedule scales
         # the whole command down with speed (gentle inputs at 90 km/h).
         v = max(abs(speed_ms), 0.0)
-        cte_steer = math.atan((curve_cte_gain(radius) * cte) / (K_SOFT + v))
         local_curvature = self.signed_curvature_ahead(
-            pos, heading, STEERING_CURVATURE_WINDOW_M)
+            pos, heading, curvature_window)
+        local_radius = (1e6 if abs(local_curvature) < 1e-9
+                        else 1.0 / abs(local_curvature))
+        cte_steer = math.atan(
+            (curve_cte_gain(local_radius) * cte) / (K_SOFT + v))
         feed_forward = (math.atan(TRUCK_WHEELBASE_M * local_curvature)
                         / NORMALIZED_STEERING_ANGLE_RAD)
         steer = feed_forward + speed_gain(speed_ms) * (
@@ -464,6 +490,14 @@ class Route:
         steer = max(-0.7, min(0.7, steer))
         if v < 5.0:
             standstill_limit = 0.22 + (v / 5.0) * 0.48
+            # The crawl limit protects a straight/off-centre acquisition from
+            # full lock, but it must not clip the wheel angle physically
+            # required by a proven local bend. Otherwise a truck crawling
+            # through a roundabout follows a much larger radius and leaves its
+            # lane before the CTE term can recover it.
+            standstill_limit = max(
+                standstill_limit,
+                min(0.7, abs(feed_forward) + 0.02))
             steer = _clamp(steer, -standstill_limit, standstill_limit)
         # Straight geometry retains the conservative guard. A proven curve may
         # use the physical steering required to hold its lane centre.
