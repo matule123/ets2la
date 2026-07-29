@@ -133,6 +133,13 @@ class LaneLocatorConfig:
     # not a valid fallback for the truck's lane and must never become steering
     # authority merely because it is geometrically nearby.
     max_lateral_m: float = 2.4
+    # Acquisition remains strict.  Retention is lane-width-aware only for the
+    # exact previously confirmed LaneId, so a curved road sample or delayed
+    # telemetry tick cannot erase a valid match before score hysteresis runs.
+    # It is never available to a neighbouring/opposing/new candidate.
+    same_lane_retention_width_fraction: float = 0.75
+    same_lane_retention_max_distance_m: float = 3.4
+    same_lane_retention_max_progress_m: float = 35.0
     max_vertical_m: float = 4.0
     # More than 65 degrees means an intersecting/opposing arm, not the lane the
     # truck is currently travelling on.  The former 100 degree allowance could
@@ -259,6 +266,25 @@ class LaneLocator:
             longitudinal = math.sqrt(max(
                 0.0, distance * distance - lateral * lateral))
             heading_error = abs(wrap_angle(heading - point.heading))
+            same_previous_lane = bool(
+                previous is not None and lane.lane_id == previous.lane_id)
+            previous_progress = (
+                math.dist(
+                    (point.x, point.y, point.z),
+                    (previous.point.x, previous.point.y, previous.point.z))
+                if same_previous_lane else float("inf"))
+            retention_distance_limit = max(
+                self.config.max_lateral_m,
+                min(self.config.same_lane_retention_max_distance_m,
+                    lane.width_m
+                    * self.config.same_lane_retention_width_fraction))
+            retention_allowed = bool(
+                same_previous_lane
+                and previous_progress
+                    <= self.config.same_lane_retention_max_progress_m)
+            distance_limit = (
+                retention_distance_limit if retention_allowed
+                else self.config.max_lateral_m)
             candidate_diagnostic = None
             if diagnostics is not None:
                 candidate_diagnostic = {
@@ -275,6 +301,11 @@ class LaneLocator:
                     "distance_m": float(distance),
                     "signed_lateral_m": float(signed),
                     "longitudinal_overrun_m": float(longitudinal),
+                    "previous_progress_m": (
+                        float(previous_progress)
+                        if math.isfinite(previous_progress) else None),
+                    "same_lane_retention": bool(retention_allowed),
+                    "distance_limit_m": float(distance_limit),
                     "nearest_world": {
                         "x": float(point.x), "y": float(point.y),
                         "z": float(point.z),
@@ -291,12 +322,12 @@ class LaneLocator:
                     "score_components": {},
                 }
                 diagnostics["candidate_lanes"].append(candidate_diagnostic)
-            if (distance > self.config.max_lateral_m
+            if (distance > distance_limit
                     or vertical > self.config.max_vertical_m
                     or heading_error > self.config.max_heading_rad):
                 if candidate_diagnostic is not None:
                     rejected = []
-                    if distance > self.config.max_lateral_m:
+                    if distance > distance_limit:
                         rejected.append("lateral")
                     if vertical > self.config.max_vertical_m:
                         rejected.append("elevation")

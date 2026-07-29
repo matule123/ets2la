@@ -8,7 +8,8 @@ from core.hud import UltraPilotHUD
 from core.navigation.route import Route
 from plugins.autopilot.main import Plugin as AutopilotPlugin
 from plugins.map.main import (
-    RUNTIME_ROUTE_HORIZON_M, RUNTIME_ROUTE_MAX_UIDS, Plugin as MapPlugin,
+    LANE_MATCH_GRACE_FRAMES, RUNTIME_ROUTE_HORIZON_M,
+    RUNTIME_ROUTE_MAX_UIDS, Plugin as MapPlugin,
 )
 from UI.map_page import (
     MapView, live_map_navigation_points,
@@ -206,6 +207,11 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
         self.assertFalse(sdk.get("nav_active"))
         self.assertEqual(sdk.get("nav_steering"), 0.0)
         self.assertTrue(sdk.get("navigation_unreliable"))
+        loss_batch = next(
+            batch for batch in reversed(sdk.shared_state.batches)
+            if (batch.get("lane_match") or {}).get("valid") is False)
+        self.assertFalse(loss_batch["nav_active"])
+        self.assertEqual(loss_batch["nav_steering"], 0.0)
         hud = type("HUDReader", (), {
             "shared_state": sdk.shared_state,
             "_rear_cam_side": "off", "_rear_cam_until": 0.0,
@@ -225,9 +231,99 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
         self.assertIs(recovered, original)
         self.assertEqual(recovered["revision"], original_revision)
         self.assertTrue(sdk.get("lane_match")["valid"])
+        self.assertEqual(sdk.get("lane_match")["active_lane_id"],
+                         original["active_lane_id"])
         self.assertFalse(sdk.get("navigation_unreliable"))
         self.assertEqual(sdk.get("navigation_failure_reason"), "")
         self.assertTrue(sdk.get("nav_active"))
+
+    def test_localization_grace_expires_and_invalidates_geometry(self):
+        plugin, sdk, point = build_map_plugin()
+        original_revision = sdk.get("lane_trajectory_revision")
+        locator = plugin.road_net._runtime_lane_locator
+        with mock.patch.object(locator, "locate", return_value=None):
+            for _ in range(LANE_MATCH_GRACE_FRAMES):
+                plugin._update_lane_trajectory(
+                    (point.x, point.z), point.heading)
+                self.assertTrue(sdk.get("lane_trajectory")["valid"])
+                self.assertFalse(sdk.get("nav_active"))
+                self.assertEqual(sdk.get("nav_steering"), 0.0)
+            plugin._update_lane_trajectory((point.x, point.z), point.heading)
+
+        expired = sdk.get("lane_trajectory")
+        self.assertFalse(expired["valid"])
+        self.assertEqual(expired["points"], [])
+        self.assertGreater(expired["revision"], original_revision)
+        self.assertEqual(expired["failure_code"], "LOCALIZATION_NO_MATCH")
+
+    def test_localization_grace_also_has_a_time_limit(self):
+        plugin, sdk, point = build_map_plugin()
+        locator = plugin.road_net._runtime_lane_locator
+        plugin._lane_loss_started_at = time.monotonic() - 1.0
+        plugin._lane_loss_frames = 1
+        with mock.patch.object(locator, "locate", return_value=None):
+            plugin._update_lane_trajectory((point.x, point.z), point.heading)
+        self.assertFalse(sdk.get("lane_trajectory")["valid"])
+        self.assertEqual(sdk.get("lane_trajectory")["points"], [])
+        self.assertFalse(sdk.get("nav_active"))
+        self.assertEqual(sdk.get("nav_steering"), 0.0)
+
+    def test_snapshot_hold_requires_same_session_map_and_dataset(self):
+        mutations = (
+            ("game_session_id", "new-session"),
+            ("active_map_key", "another-map"),
+            ("active_dataset_fingerprint", "another-fingerprint"),
+        )
+        for key, changed in mutations:
+            with self.subTest(key=key):
+                plugin, sdk, point = build_map_plugin()
+                old = sdk.get("lane_trajectory")
+                sdk.set(key, changed)
+                plugin._update_lane_trajectory(
+                    (point.x, point.z), point.heading)
+                current = sdk.get("lane_trajectory")
+                self.assertIsNot(current, old)
+                self.assertFalse(current["valid"])
+                self.assertEqual(current["points"], [])
+                self.assertFalse(sdk.get("nav_active"))
+                self.assertEqual(sdk.get("nav_steering"), 0.0)
+                self.assertIsNone(plugin._lane_match)
+                self.assertIsNone(
+                    plugin.road_net._runtime_lane_locator.previous)
+
+        plugin, sdk, point = build_map_plugin()
+        changed_build = dict(sdk.get("lane_trajectory"))
+        changed_build["route_build_id"] = "different-build"
+        sdk.set("lane_trajectory", changed_build)
+        plugin._update_lane_trajectory((point.x, point.z), point.heading)
+        self.assertFalse(sdk.get("lane_trajectory")["valid"])
+        self.assertEqual(sdk.get("lane_trajectory")["points"], [])
+        self.assertIsNone(plugin._lane_match)
+
+    def test_teleport_invalidates_before_fresh_localization(self):
+        plugin, sdk, point = build_map_plugin()
+        old_revision = sdk.get("lane_trajectory_revision")
+        plugin._update_lane_trajectory((point.x, point.z + 60.0),
+                                       point.heading)
+        current = sdk.get("lane_trajectory")
+        self.assertFalse(current["valid"])
+        self.assertEqual(current["points"], [])
+        self.assertGreater(current["revision"], old_revision)
+        self.assertIn("discontinuously", current["failure_reason"])
+        self.assertFalse(sdk.get("nav_active"))
+        self.assertEqual(sdk.get("nav_steering"), 0.0)
+
+    def test_wrong_direction_cannot_recover_held_snapshot(self):
+        plugin, sdk, point = build_map_plugin()
+        original = sdk.get("lane_trajectory")
+        opposite = point.heading + math.pi
+        for _ in range(LANE_MATCH_GRACE_FRAMES + 1):
+            plugin._update_lane_trajectory((point.x, point.z), opposite)
+        current = sdk.get("lane_trajectory")
+        self.assertIsNot(current, original)
+        self.assertFalse(current["valid"])
+        self.assertEqual(current["points"], [])
+        self.assertFalse(sdk.get("nav_active"))
 
     def test_xyz_and_vertical_layers_are_preserved(self):
         plugin, sdk, _ = build_map_plugin(y=12.0)
