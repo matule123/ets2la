@@ -3,7 +3,9 @@ import math
 import logging
 import time
 from PyQt6.QtWidgets import QApplication, QWidget
-from PyQt6.QtGui import QPainter, QColor, QFont, QPen, QPolygonF, QRadialGradient, QLinearGradient, QBrush
+from PyQt6.QtGui import (QPainter, QColor, QFont, QPen, QPolygonF,
+                         QRadialGradient, QLinearGradient, QBrush,
+                         QPainterPath)
 from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
 from core.navigation.navigation_intent import snapshot_matches_navigation_intent
 
@@ -100,6 +102,79 @@ def _clip_truck_road_segment(a, b, ahead_min=-HUD_ROAD_BEHIND_M,
             t1 = min(t1, ratio)
     return ((a[0] + da * t0, a[1] + dl * t0),
             (a[0] + da * t1, a[1] + dl * t1), t0, t1)
+
+
+def _lane_boundary_points(points, half_width):
+    """Offset a dense lane centreline without changing its topology.
+
+    This is display-only geometry. Each normal comes from adjacent validated
+    samples, so junctions and roundabouts follow the selected LanePath instead
+    of inventing a chord between unrelated map arms.
+    """
+    if len(points) < 2:
+        return [], []
+    left, right = [], []
+    for index, point in enumerate(points):
+        previous = points[max(0, index - 1)]
+        following = points[min(len(points) - 1, index + 1)]
+        da = following[0] - previous[0]
+        dl = following[1] - previous[1]
+        length = math.hypot(da, dl)
+        if length < 1e-6:
+            # A duplicate sample must not collapse both visible edges onto the
+            # centreline. Reuse the preceding normal while retaining height.
+            if left:
+                left.append((left[-1][0], left[-1][1], point[2]))
+                right.append((right[-1][0], right[-1][1], point[2]))
+            continue
+        na, nl = -dl / length, da / length
+        left.append((point[0] + na * half_width,
+                     point[1] + nl * half_width, point[2]))
+        right.append((point[0] - na * half_width,
+                      point[1] - nl * half_width, point[2]))
+    return left, right
+
+
+def _rounded_screen_path(points):
+    """Build a locally bounded curve from projected dense lane samples.
+
+    Midpoint quadratics remain inside neighbouring screen-space chords. Unlike
+    a free spline they cannot overshoot a tight roundabout or cut across a
+    junction, but they hide the visible joins between rotated straight lines.
+    """
+    path = QPainterPath()
+    if not points:
+        return path
+    path.moveTo(points[0])
+    if len(points) == 1:
+        return path
+    if len(points) == 2:
+        path.lineTo(points[1])
+        return path
+    first_midpoint = QPointF((points[0].x() + points[1].x()) * .5,
+                             (points[0].y() + points[1].y()) * .5)
+    path.lineTo(first_midpoint)
+    for index in range(1, len(points) - 1):
+        current, following = points[index], points[index + 1]
+        midpoint = QPointF((current.x() + following.x()) * .5,
+                           (current.y() + following.y()) * .5)
+        path.quadTo(current, midpoint)
+    path.lineTo(points[-1])
+    return path
+
+
+def _continuous_lane_chunks(points, max_gap=8.0):
+    """Split display geometry rather than drawing across an unproven gap."""
+    chunks, current = [], []
+    for point in points:
+        if current and math.dist(point, current[-1]) > max_gap:
+            if len(current) >= 2:
+                chunks.append(current)
+            current = []
+        current.append(point)
+    if len(current) >= 2:
+        chunks.append(current)
+    return chunks
 
 
 def _car_colour(v):
@@ -275,6 +350,12 @@ class UltraPilotHUD(QWidget):
         runtime_match = s.get("lane_match") or {}
         if int(runtime_match.get("revision", -2) or -2) != current_revision:
             runtime_match = trajectory.get("lane_match") or {}
+        try:
+            lane_width = float(runtime_match.get("lane_width_m", 4.5) or 4.5)
+            if not math.isfinite(lane_width) or not 2.4 <= lane_width <= 6.5:
+                lane_width = 4.5
+        except (TypeError, ValueError, OverflowError):
+            lane_width = 4.5
         raw_blinker = s.get("active_blinker") or "off"
         explicit_rear = bool(s.get("rear_cam", False))
         if raw_blinker in ("left", "right"):
@@ -306,6 +387,7 @@ class UltraPilotHUD(QWidget):
             "active_lane_id": (trajectory.get("active_lane_id")
                                if trajectory_current else None),
             "lane_match": (runtime_match if trajectory_current else {}),
+            "lane_width_m": lane_width if trajectory_current else 4.5,
             "lane_confidence": lane_confidence,
             "navigation_failure_reason": hud_reason,
             "road_segments": s.get("map_road_segments", []) or [],
@@ -875,20 +957,38 @@ class UltraPilotHUD(QWidget):
                 #    reads as moving, driven by the _tick animation clock.
                 # 4) Anticipated route (blue) glow on the road.
                 # Height zero pins the route to the asphalt plane.
-                pts = [self._project(a, l, view, height)
-                       for a, l, height in al]
-                pts = [p for p in pts if p is not None]
-                if len(pts) >= 2:
+                half_lane = max(1.2, min(3.25,
+                                        float(d.get("lane_width_m", 4.5)) * .5))
+                qp.setBrush(Qt.BrushStyle.NoBrush)
+                for chunk in _continuous_lane_chunks(al):
+                    left, right = _lane_boundary_points(chunk, half_lane)
+                    qp.setPen(QPen(QColor(186, 199, 218, 205), 2.3,
+                                   Qt.PenStyle.SolidLine,
+                                   Qt.PenCapStyle.RoundCap,
+                                   Qt.PenJoinStyle.RoundJoin))
+                    for boundary in (left, right):
+                        projected = [self._project(a, l, view, height)
+                                     for a, l, height in boundary]
+                        projected = [p for p in projected if p is not None]
+                        if len(projected) >= 2:
+                            qp.drawPath(_rounded_screen_path(projected))
+
+                    projected = [self._project(a, l, view, height)
+                                 for a, l, height in chunk]
+                    projected = [p for p in projected if p is not None]
+                    if len(projected) < 2:
+                        continue
+                    route_curve = _rounded_screen_path(projected)
                     qp.setPen(QPen(QColor(59, 130, 246, 85), 14,
                                    Qt.PenStyle.SolidLine,
                                    Qt.PenCapStyle.RoundCap,
                                    Qt.PenJoinStyle.RoundJoin))
-                    qp.drawPolyline(QPolygonF(pts))
+                    qp.drawPath(route_curve)
                     qp.setPen(QPen(QColor("#3B82F6"), 6,
                                    Qt.PenStyle.SolidLine,
                                    Qt.PenCapStyle.RoundCap,
                                    Qt.PenJoinStyle.RoundJoin))
-                    qp.drawPolyline(QPolygonF(pts))
+                    qp.drawPath(route_curve)
             # With no GPS route we intentionally draw no invented straight
             # ribbon. Only real nearby map segments remain visible.
 

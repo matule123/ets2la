@@ -3,8 +3,10 @@ import struct
 import unittest
 
 from PyQt6.QtCore import QPointF, QRectF
+from PyQt6.QtGui import QPainterPath
 
-from core.hud import UltraPilotHUD
+from core.hud import (UltraPilotHUD, _continuous_lane_chunks,
+                      _lane_boundary_points, _rounded_screen_path)
 from core.sdk.scs_sdk import SCSTelemetry
 from tests.test_lane_route_builder import SyntheticMap
 
@@ -59,6 +61,16 @@ class HudPoseStabilityTests(unittest.TestCase):
 
     def test_driving_view_renders_authoritative_xyz_path_without_legacy_shift(self):
         class Painter:
+            def __init__(self):
+                self.curves = 0
+                self.polylines = 0
+
+            def drawPath(self, _path):
+                self.curves += 1
+
+            def drawPolyline(self, _polyline):
+                self.polylines += 1
+
             def __getattr__(self, _name):
                 return lambda *_args, **_kwargs: None
 
@@ -74,21 +86,65 @@ class HudPoseStabilityTests(unittest.TestCase):
         hud._view_yaw = 0.0
         hud._road_scene_shift = 2.5
         hud._draw_low_poly_ego = lambda *_args, **_kwargs: None
+        painter = Painter()
         data = {
             "pos": (100.0, 200.0), "heading": 0.0, "speed_kmh": 20.0,
             "altitude": 10.0, "road_segments": [], "traffic": [],
             "nav_path": [[100.0, 10.0, 200.0],
-                         [100.0, 10.0, 180.0],
-                         [104.0, 10.0, 150.0]],
+                         [100.0, 10.0, 194.0],
+                         [101.0, 10.0, 188.0],
+                         [102.0, 10.0, 182.0],
+                         [104.0, 10.0, 176.0]],
             "lanes": 2, "lane_revision": 5,
             "trailer_attached": False,
         }
-        hud._draw_driving_view(Painter(), View(), data)
+        hud._draw_driving_view(painter, View(), data)
         self.assertEqual(hud._road_scene_shift, 0.0)
+        self.assertGreaterEqual(painter.curves, 4)
+        self.assertEqual(painter.polylines, 0)
         self.assertEqual(UltraPilotHUD._matched_ego_lateral({
             "lane_revision": 2,
             "lane_match": {"lateral_error_m": float("nan")},
         }), 0.0)
+
+    def test_confirmed_lane_boundaries_follow_roundabout_curve(self):
+        radius = 18.0
+        centreline = [
+            (radius * math.sin(angle), radius * math.cos(angle), 0.0)
+            for angle in (index * math.pi / 24 for index in range(13))
+        ]
+        left, right = _lane_boundary_points(centreline, 2.25)
+        self.assertEqual(len(left), len(centreline))
+        self.assertEqual(len(right), len(centreline))
+        for centre, outer, inner in zip(centreline, left, right):
+            self.assertAlmostEqual(math.dist(centre[:2], outer[:2]), 2.25,
+                                   places=6)
+            self.assertAlmostEqual(math.dist(centre[:2], inner[:2]), 2.25,
+                                   places=6)
+        # The middle of the quarter-circle remains curved; neither boundary
+        # degenerates into a direct chord from entry to exit.
+        chord_mid = ((left[0][0] + left[-1][0]) * .5,
+                     (left[0][1] + left[-1][1]) * .5)
+        self.assertGreater(math.dist(left[len(left) // 2][:2], chord_mid), 3.0)
+
+    def test_projected_lane_uses_curves_not_rotated_straight_segments(self):
+        points = [QPointF(0.0, 20.0), QPointF(8.0, 13.0),
+                  QPointF(13.0, 5.0), QPointF(15.0, -5.0)]
+        path = _rounded_screen_path(points)
+        element_types = [path.elementAt(index).type
+                         for index in range(path.elementCount())]
+        self.assertIn(QPainterPath.ElementType.CurveToElement, element_types)
+        self.assertEqual((path.elementAt(0).x, path.elementAt(0).y),
+                         (points[0].x(), points[0].y()))
+        self.assertEqual((path.elementAt(path.elementCount() - 1).x,
+                          path.elementAt(path.elementCount() - 1).y),
+                         (points[-1].x(), points[-1].y()))
+
+    def test_lane_display_never_draws_across_unproven_junction_gap(self):
+        samples = [(0.0, 0.0, 0.0), (3.0, 0.0, 0.0),
+                   (20.0, 10.0, 0.0), (23.0, 10.0, 0.0)]
+        chunks = _continuous_lane_chunks(samples)
+        self.assertEqual(chunks, [samples[:2], samples[2:]])
 
     def test_live_trailer_heading_drives_articulation_across_wrap(self):
         data = {
