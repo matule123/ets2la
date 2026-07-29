@@ -251,12 +251,15 @@ class UpdateConfirmDialog(QDialog):
         self.progress.setValue(max(0, min(100, int(float(fraction) * 100))))
         self.progress_text.setText(str(text))
 
-    def set_ready(self):
+    def set_ready(self, size_text=None):
         self.title_lbl.setText("Aktualizácia je pripravená na inštaláciu")
         self.note.setText(
             "Balík bol úplne stiahnutý a overený. Kliknutím na tlačidlo "
             "sa aktualizácia nainštaluje a UltraPilot sa reštartuje.")
         self.progress.setValue(100)
+        if size_text:
+            self.progress_text.setVisible(True)
+            self.progress_text.setText(str(size_text))
         self.primary_btn.setText("Inštalovať a reštartovať")
         self.primary_btn.setEnabled(True)
         self.cancel_btn.setEnabled(True)
@@ -442,10 +445,8 @@ class UpdateCheckerWidget(QWidget):
                     or str(staged.get("target_commit", "")) == str(latest))):
                 dlg.progress.setVisible(True)
                 dlg.progress_text.setVisible(True)
-                total = int(staged.get("total_bytes", 0) or 0)
-                from core.update_check import _format_download_progress
-                dlg.progress_text.setText(_format_download_progress(total, total))
-                dlg.set_ready()
+                from core.update_check import _format_prepared_update_size
+                dlg.set_ready(_format_prepared_update_size(staged))
         except Exception:
             pass
         dlg.exec()
@@ -480,7 +481,14 @@ class UpdateCheckerWidget(QWidget):
             self.status_lbl.setText("Aktualizácia je pripravená")
             self.btn.setText("Aktualizovať")
             if self._update_dialog is not None:
-                self._update_dialog.set_ready()
+                try:
+                    from core.update_check import (prepared_update_info,
+                                                   _format_prepared_update_size)
+                    size_text = _format_prepared_update_size(
+                        prepared_update_info())
+                except Exception:
+                    size_text = None
+                self._update_dialog.set_ready(size_text)
         else:
             self.status_lbl.setText("Sťahovanie aktualizácie zlyhalo")
             if self._update_dialog is not None:

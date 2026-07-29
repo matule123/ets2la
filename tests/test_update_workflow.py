@@ -25,9 +25,10 @@ def update_archive():
 class StreamingResponse:
     status_code = 200
 
-    def __init__(self, data):
+    def __init__(self, data, reported_length=None):
         self.data = data
-        self.headers = {"Content-Length": str(len(data))}
+        self.headers = {"Content-Length": str(
+            len(data) if reported_length is None else reported_length)}
 
     def iter_content(self, chunk_size=128 * 1024):
         for offset in range(0, len(self.data), max(1, chunk_size // 3)):
@@ -68,7 +69,12 @@ class UpdateStagingTests(unittest.TestCase):
                 self.assertFalse(os.path.exists(
                     os.path.join(app, "core", "new_module.py")))
                 self.assertTrue(update_check.prepared_update_info())
-                self.assertIn(" MB / ", progress[-1][1])
+                info = update_check.prepared_update_info()
+                self.assertEqual(info["archive_bytes"], len(data))
+                self.assertGreater(info["unpacked_bytes"], 0)
+                self.assertEqual(info["file_count"], 2)
+                self.assertIn("Stiahnuté ", progress[-1][1])
+                self.assertIn("po rozbalení", progress[-1][1])
                 self.assertEqual(progress[-1][0], 1.0)
 
                 self.assertTrue(update_check.install_prepared_update())
@@ -80,6 +86,26 @@ class UpdateStagingTests(unittest.TestCase):
                 self.assertTrue(update_check.take_update_startup_notice())
                 self.assertFalse(update_check.take_update_startup_notice())
 
+    def test_verified_size_replaces_incorrect_http_content_length(self):
+        with WorkspaceDirectory() as root:
+            data = update_archive()
+            progress = []
+            response = StreamingResponse(data, reported_length=800 * 1024)
+            with (mock.patch.object(update_check, "_update_cache_dir",
+                                    return_value=root),
+                  mock.patch("requests.get", return_value=response)):
+                self.assertTrue(update_check.prepare_update(
+                    progress_cb=lambda fraction, text:
+                    progress.append((fraction, text)),
+                    target_commit="abcdef0"))
+                info = update_check.prepared_update_info()
+                self.assertEqual(info["total_bytes"], len(data))
+                self.assertEqual(info["archive_bytes"], len(data))
+                self.assertNotIn("0.78 MB", progress[-1][1])
+                self.assertEqual(
+                    progress[-1][1],
+                    update_check._format_prepared_update_size(info))
+
     def test_failed_download_never_creates_ready_manifest(self):
         response = mock.Mock(status_code=503, headers={})
         with (WorkspaceDirectory() as root,
@@ -88,6 +114,24 @@ class UpdateStagingTests(unittest.TestCase):
               mock.patch("requests.get", return_value=response)):
             self.assertFalse(update_check.prepare_update(target_commit="abcdef0"))
             self.assertEqual(update_check.prepared_update_info(), {})
+
+    def test_old_manifest_is_enriched_from_existing_verified_zip(self):
+        with WorkspaceDirectory() as root:
+            archive_path = os.path.join(root, "update.zip")
+            manifest_path = os.path.join(root, "update.json")
+            data = update_archive()
+            with open(archive_path, "wb") as stream:
+                stream.write(data)
+            with open(manifest_path, "w", encoding="utf-8") as stream:
+                stream.write(
+                    '{"target_commit":"abcdef0","total_bytes":838861}')
+            with mock.patch.object(update_check, "_update_cache_dir",
+                                   return_value=root):
+                info = update_check.prepared_update_info()
+            self.assertEqual(info["archive_bytes"], len(data))
+            self.assertEqual(info["total_bytes"], len(data))
+            self.assertGreater(info["unpacked_bytes"], 0)
+            self.assertEqual(info["file_count"], 2)
 
 
 class UpdateUiStateTests(unittest.TestCase):
@@ -106,12 +150,16 @@ class UpdateUiStateTests(unittest.TestCase):
         self.assertEqual(dialog.progress_text.text(), "5.0 MB / 10.0 MB")
         self.assertFalse(dialog.primary_btn.isEnabled())
 
-        dialog.set_ready()
+        dialog.set_ready(
+            "Stiahnuté 0.84 MB • po rozbalení 3.42 MB")
         self.assertEqual(
             dialog.title_lbl.text(),
             "Aktualizácia je pripravená na inštaláciu")
         self.assertEqual(dialog.primary_btn.text(),
                          "Inštalovať a reštartovať")
+        self.assertEqual(
+            dialog.progress_text.text(),
+            "Stiahnuté 0.84 MB • po rozbalení 3.42 MB")
         self.assertTrue(dialog.primary_btn.isEnabled())
         dialog.close()
 

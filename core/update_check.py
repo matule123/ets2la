@@ -51,8 +51,23 @@ def _prepared_paths():
 def _format_download_progress(downloaded: int, total: int) -> str:
     done_mb = max(0, int(downloaded)) / (1024 * 1024)
     if total > 0:
-        return f"{done_mb:.1f} MB / {total / (1024 * 1024):.1f} MB"
-    return f"{done_mb:.1f} MB / neznáma veľkosť"
+        return f"{done_mb:.2f} MB / {total / (1024 * 1024):.2f} MB"
+    return f"{done_mb:.2f} MB / neznáma veľkosť"
+
+
+def _format_prepared_update_size(info: dict) -> str:
+    """Describe verified staging size without confusing ZIP and install size."""
+    info = info if isinstance(info, dict) else {}
+    archive_bytes = int(info.get("archive_bytes", 0)
+                        or info.get("downloaded_bytes", 0)
+                        or info.get("total_bytes", 0) or 0)
+    unpacked_bytes = int(info.get("unpacked_bytes", 0) or 0)
+    archive_text = f"{archive_bytes / (1024 * 1024):.2f} MB"
+    if unpacked_bytes > 0:
+        unpacked_text = f"{unpacked_bytes / (1024 * 1024):.2f} MB"
+        return (f"Stiahnuté {archive_text} • po rozbalení "
+                f"{unpacked_text}")
+    return f"Stiahnuté {archive_text}"
 
 
 def _app_dir():
@@ -348,25 +363,37 @@ def prepare_update(progress_cb=None, target_commit=None) -> bool:
                     fraction = min(0.99, downloaded / total) if total else 0.0
                     progress_cb(fraction,
                                 _format_download_progress(downloaded, total))
+        unpacked_bytes = 0
+        file_count = 0
         with open(archive_tmp, "rb") as stream:
             with zipfile.ZipFile(stream) as archive:
                 bad_member = archive.testzip()
                 if bad_member:
                     raise ValueError("poškodený súbor v archíve: " + bad_member)
-                if not archive.namelist():
+                members = [member for member in archive.infolist()
+                           if not member.is_dir()]
+                if not members:
                     raise ValueError("prázdny aktualizačný archív")
+                unpacked_bytes = sum(max(0, int(member.file_size))
+                                     for member in members)
+                file_count = len(members)
         os.replace(archive_tmp, archive_path)
         manifest = {
             "target_commit": str(target or ""),
             "downloaded_bytes": downloaded,
-            "total_bytes": total or downloaded,
+            # HTTP Content-Length is useful only while streaming. Redirects,
+            # content encoding and proxy responses can make it differ from the
+            # bytes actually stored, so the verified file is authoritative.
+            "total_bytes": downloaded,
+            "archive_bytes": downloaded,
+            "unpacked_bytes": unpacked_bytes,
+            "file_count": file_count,
         }
         with open(manifest_tmp, "w", encoding="utf-8") as stream:
             json.dump(manifest, stream, ensure_ascii=False)
         os.replace(manifest_tmp, manifest_path)
         if progress_cb:
-            progress_cb(1.0, _format_download_progress(
-                downloaded, total or downloaded))
+            progress_cb(1.0, _format_prepared_update_size(manifest))
         return True
     except Exception as e:
         logging.warning("update download failed: %s", e)
@@ -389,7 +416,25 @@ def prepared_update_info() -> dict:
             return {}
         with open(manifest_path, "r", encoding="utf-8") as stream:
             info = json.load(stream)
-        return info if isinstance(info, dict) else {}
+        if not isinstance(info, dict):
+            return {}
+        # Upgrade manifests created by the older UI. They stored only the HTTP
+        # Content-Length (the misleading 0.8 MB value) and omitted unpacked
+        # size. The verified ZIP itself is authoritative and can be inspected
+        # locally without downloading it again.
+        actual_archive_bytes = os.path.getsize(archive_path)
+        info["archive_bytes"] = actual_archive_bytes
+        info["downloaded_bytes"] = actual_archive_bytes
+        info["total_bytes"] = actual_archive_bytes
+        if int(info.get("unpacked_bytes", 0) or 0) <= 0:
+            import zipfile
+            with zipfile.ZipFile(archive_path) as archive:
+                members = [member for member in archive.infolist()
+                           if not member.is_dir()]
+                info["unpacked_bytes"] = sum(
+                    max(0, int(member.file_size)) for member in members)
+                info["file_count"] = len(members)
+        return info
     except Exception:
         return {}
 
