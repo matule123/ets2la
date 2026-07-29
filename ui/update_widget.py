@@ -4,8 +4,8 @@ Update checker widget for the UltraPilot sidebar + a reusable spinner.
 Replaces the old pre-launch splash window: the app opens immediately and this
 widget shows the current version. Pressing „Skontrolovať“ spins the ring while
 it asks GitHub whether a newer release exists; if so, an „Aktualizovať“ button
-appears. Confirming it runs the hybrid update (git pull → zip fallback) with a
-progress bar and then restarts the app.
+appears. Its dialog downloads and verifies the package first, displays byte
+progress, and applies it only after „Inštalovať a reštartovať“ is confirmed.
 
 The spinner is a plain ring (the requested „obvod kolieska“ style): a partial
 arc that rotates every frame, drawn entirely in ``paintEvent`` so it looks the
@@ -105,26 +105,50 @@ class _CheckWorker(QThread):
             self.done.emit(False, None)
 
 
-class _UpdateWorker(QThread):
-    """Runs perform_update; emits (fraction, text) progress and a final bool."""
+class _DownloadWorker(QThread):
+    """Downloads and verifies an update without changing the application."""
+    progress = pyqtSignal(float, str)
+    done = pyqtSignal(bool)
+
+    def __init__(self, target_commit="", parent=None):
+        super().__init__(parent)
+        self.target_commit = target_commit
+
+    def run(self):
+        try:
+            from core.update_check import prepare_update
+            ok = prepare_update(
+                progress_cb=lambda f, t: self.progress.emit(f, t),
+                target_commit=self.target_commit)
+            self.done.emit(bool(ok))
+        except Exception as e:
+            logging.error("update download failed: %s", e)
+            self.progress.emit(1.0, "chyba: " + str(e))
+            self.done.emit(False)
+
+
+class _InstallWorker(QThread):
+    """Applies only the already downloaded and verified update."""
     progress = pyqtSignal(float, str)
     done = pyqtSignal(bool)
 
     def run(self):
         try:
-            from core.update_check import perform_update
-            ok = perform_update(progress_cb=lambda f, t: self.progress.emit(f, t))
+            from core.update_check import install_prepared_update
+            ok = install_prepared_update(
+                progress_cb=lambda f, t: self.progress.emit(f, t))
             self.done.emit(bool(ok))
         except Exception as e:
-            logging.error("update failed: %s", e)
+            logging.error("update install failed: %s", e)
             self.progress.emit(1.0, "chyba: " + str(e))
             self.done.emit(False)
 
 
 class UpdateConfirmDialog(QDialog):
-    """A clean light ETS2LA-style confirmation dialog (replaces the drab
-    native QMessageBox). Shows the new version, a short note that the app will
-    restart, and green/grey Yes–No buttons."""
+    """Staged update dialog: download, ready, then install and restart."""
+
+    download_requested = pyqtSignal()
+    install_requested = pyqtSignal()
 
     def __init__(self, latest_tag, title="", description="", parent=None):
         super().__init__(parent)
@@ -132,7 +156,7 @@ class UpdateConfirmDialog(QDialog):
         latest_tag = _display_commit(str(latest_tag)) or str(latest_tag)
         self.setWindowTitle("Aktualizovať UltraPilot")
         self.setModal(True)
-        self.setFixedSize(470, 310)
+        self.setFixedSize(500, 390)
         # Match the application's default white ETS2LA-style surfaces.
         self.setStyleSheet(
             "UpdateConfirmDialog{background:#FFFFFF;}"
@@ -150,9 +174,9 @@ class UpdateConfirmDialog(QDialog):
         head.addWidget(icon)
         col = QVBoxLayout()
         col.setSpacing(2)
-        title = QLabel("Dostupná aktualizácia")
-        title.setStyleSheet("font-size:18px;font-weight:800;color:#111827;")
-        col.addWidget(title)
+        self.title_lbl = QLabel("Dostupná aktualizácia")
+        self.title_lbl.setStyleSheet("font-size:18px;font-weight:800;color:#111827;")
+        col.addWidget(self.title_lbl)
         ver = QLabel("Commit: " + str(latest_tag))
         ver.setStyleSheet("font-size:12px;color:#047857;font-weight:700;")
         col.addWidget(ver)
@@ -164,37 +188,113 @@ class UpdateConfirmDialog(QDialog):
         commit_title.setStyleSheet("font-size:14px;font-weight:800;color:#111827;")
         lay.addWidget(commit_title)
         note_text = description or "Táto verzia obsahuje najnovšie opravy a vylepšenia."
-        note = QLabel(note_text + "\n\nAplikácia sa po dokončení reštartuje. "
-                      "Nastavenia, trasy a mapy zostanú zachované.")
-        note.setWordWrap(True)
-        note.setStyleSheet("font-size:13px;color:#4B5563;background:#F9FAFB;border:1px solid #E5E7EB;border-radius:10px;padding:12px;")
-        lay.addWidget(note)
+        self.note = QLabel(
+            note_text + "\n\nNajprv sa bezpečne stiahne a overí. "
+            "Aplikácia sa zmení až po potvrdení inštalácie.")
+        self.note.setWordWrap(True)
+        self.note.setStyleSheet("font-size:13px;color:#4B5563;background:#F9FAFB;border:1px solid #E5E7EB;border-radius:10px;padding:12px;")
+        lay.addWidget(self.note)
+
+        self.progress_text = QLabel("")
+        self.progress_text.setStyleSheet(
+            "font-size:12px;color:#374151;font-weight:700;")
+        self.progress_text.setVisible(False)
+        lay.addWidget(self.progress_text)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setFixedHeight(14)
+        self.progress.setTextVisible(False)
+        self.progress.setStyleSheet(
+            "QProgressBar{background:#E5E7EB;border:none;border-radius:7px;}"
+            "QProgressBar::chunk{background:#10B981;border-radius:7px;}")
+        self.progress.setVisible(False)
+        lay.addWidget(self.progress)
         lay.addStretch()
 
         row = QHBoxLayout()
         row.addStretch()
-        no = QPushButton("Zrušiť")
-        no.setCursor(Qt.CursorShape.PointingHandCursor)
-        no.setFixedWidth(110)
-        no.setStyleSheet(
+        self.cancel_btn = QPushButton("Zrušiť")
+        self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cancel_btn.setFixedWidth(110)
+        self.cancel_btn.setStyleSheet(
             "QPushButton{background:#FFFFFF;color:#374151;border:1px solid #D1D5DB;"
             "border-radius:8px;padding:9px;font-weight:600;}"
             "QPushButton:hover{background:#F9FAFB;border-color:#9CA3AF;}")
-        no.clicked.connect(self.reject)
-        row.addWidget(no)
-        yes = QPushButton("Aktualizovať")
-        yes.setCursor(Qt.CursorShape.PointingHandCursor)
-        yes.setFixedWidth(130)
-        yes.setStyleSheet(
+        self.cancel_btn.clicked.connect(self.reject)
+        row.addWidget(self.cancel_btn)
+        self.primary_btn = QPushButton("Stiahnuť")
+        self.primary_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.primary_btn.setMinimumWidth(150)
+        self.primary_btn.setStyleSheet(
             "QPushButton{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
             "stop:0 #10B981, stop:1 #059669);color:#FFFFFF;border:none;"
             "border-radius:8px;padding:9px;font-weight:700;}"
+            "QPushButton:disabled{background:#A7F3D0;color:#ECFDF5;}"
             "QPushButton:hover{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
             "stop:0 #34D399, stop:1 #059669);}")
-        yes.clicked.connect(self.accept)
-        yes.setDefault(True)
-        row.addWidget(yes)
+        self.primary_btn.clicked.connect(self.download_requested.emit)
+        self.primary_btn.setDefault(True)
+        row.addWidget(self.primary_btn)
         lay.addLayout(row)
+
+    def set_downloading(self):
+        self.title_lbl.setText("Sťahujem aktualizáciu")
+        self.progress.setVisible(True)
+        self.progress_text.setVisible(True)
+        self.progress.setValue(0)
+        self.progress_text.setText("0.0 MB / zisťujem veľkosť…")
+        self.primary_btn.setEnabled(False)
+        self.primary_btn.setText("Sťahujem…")
+        self.cancel_btn.setEnabled(False)
+
+    def set_progress(self, fraction, text):
+        self.progress.setValue(max(0, min(100, int(float(fraction) * 100))))
+        self.progress_text.setText(str(text))
+
+    def set_ready(self):
+        self.title_lbl.setText("Aktualizácia je pripravená na inštaláciu")
+        self.note.setText(
+            "Balík bol úplne stiahnutý a overený. Kliknutím na tlačidlo "
+            "sa aktualizácia nainštaluje a UltraPilot sa reštartuje.")
+        self.progress.setValue(100)
+        self.primary_btn.setText("Inštalovať a reštartovať")
+        self.primary_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(True)
+        try:
+            self.primary_btn.clicked.disconnect()
+        except Exception:
+            pass
+        self.primary_btn.clicked.connect(self.install_requested.emit)
+
+    def set_installing(self):
+        self.title_lbl.setText("Inštalácia aktualizácie")
+        self.progress_text.setText("Inštalujem pripravené súbory…")
+        self.primary_btn.setText("Inštalujem…")
+        self.primary_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(False)
+
+    def set_failed(self, text="Aktualizácia zlyhala — skús znova."):
+        self.title_lbl.setText("Aktualizácia sa nepodarila")
+        self.progress_text.setVisible(True)
+        self.progress_text.setText(text)
+        self.primary_btn.setText("Skúsiť znova")
+        self.primary_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(True)
+        try:
+            self.primary_btn.clicked.disconnect()
+        except Exception:
+            pass
+        self.primary_btn.clicked.connect(self.download_requested.emit)
+
+    def set_install_failed(self):
+        self.set_failed(
+            "Inštalácia zlyhala. Stiahnutý balík zostal pripravený.")
+        self.primary_btn.setText("Skúsiť inštaláciu znova")
+        try:
+            self.primary_btn.clicked.disconnect()
+        except Exception:
+            pass
+        self.primary_btn.clicked.connect(self.install_requested.emit)
 
 
 class UpdateCheckerWidget(QWidget):
@@ -207,7 +307,9 @@ class UpdateCheckerWidget(QWidget):
         self._version = VERSION
         self._commit = git_commit()
         self._check_worker = None
-        self._update_worker = None
+        self._download_worker = None
+        self._install_worker = None
+        self._update_dialog = None
         self._build()
         # Auto-check once shortly after launch (non-blocking).
         QTimer.singleShot(2500, self.check)
@@ -306,7 +408,7 @@ class UpdateCheckerWidget(QWidget):
             self._latest_tag = str(latest)
             summary = self._latest_title or "Nová verzia UltraPilot"
             self.status_lbl.setText("Commit " + str(latest) + "\n" + summary)
-            self.btn.setText("Stiahnuť " + str(latest))
+            self.btn.setText("Aktualizovať")
             self._apply_btn_style(update_available=True)
             try:
                 self.btn.clicked.disconnect()
@@ -330,42 +432,92 @@ class UpdateCheckerWidget(QWidget):
             title=getattr(self, "_latest_title", ""),
             description=getattr(self, "_latest_description", ""),
             parent=self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        self._do_update()
+        self._update_dialog = dlg
+        dlg.download_requested.connect(self._start_download)
+        dlg.install_requested.connect(self._start_install)
+        try:
+            from core.update_check import prepared_update_info
+            staged = prepared_update_info()
+            if (staged and (not latest
+                    or str(staged.get("target_commit", "")) == str(latest))):
+                dlg.progress.setVisible(True)
+                dlg.progress_text.setVisible(True)
+                total = int(staged.get("total_bytes", 0) or 0)
+                from core.update_check import _format_download_progress
+                dlg.progress_text.setText(_format_download_progress(total, total))
+                dlg.set_ready()
+        except Exception:
+            pass
+        dlg.exec()
+        self._update_dialog = None
 
-    def _do_update(self):
-        if self._update_worker is not None and self._update_worker.isRunning():
+    def _start_download(self):
+        if (self._download_worker is not None
+                and self._download_worker.isRunning()):
+            return
+        dlg = self._update_dialog
+        if dlg is None:
             return
         self.btn.hide()
         self.spinner.show()
-        self.status_lbl.setText("Aktualizujem…")
-        self.progress.setVisible(True)
-        self.progress.setRange(0, 100)
-        self._update_worker = _UpdateWorker()
-        self._update_worker.progress.connect(self._on_progress)
-        self._update_worker.done.connect(self._on_updated)
-        self._update_worker.start()
+        self.status_lbl.setText("Sťahujem aktualizáciu…")
+        dlg.set_downloading()
+        self._download_worker = _DownloadWorker(
+            getattr(self, "_latest_tag", ""), self)
+        self._download_worker.progress.connect(self._on_download_progress)
+        self._download_worker.done.connect(self._on_downloaded)
+        self._download_worker.start()
 
-    def _on_progress(self, fraction, text):
-        self.progress.setValue(int(fraction * 100))
-        self.status_lbl.setText("Aktualizujem… " + text)
+    def _on_download_progress(self, fraction, text):
+        if self._update_dialog is not None:
+            self._update_dialog.set_progress(fraction, text)
+        self.status_lbl.setText("Sťahujem aktualizáciu…")
 
-    def _on_updated(self, ok):
+    def _on_downloaded(self, ok):
         self.spinner.hide()
-        self.progress.setVisible(False)
+        self.btn.show()
         if ok:
-            self.status_lbl.setText("✔ Aktualizované — reštartujem…")
-            QTimer.singleShot(800, self._restart)
+            self.status_lbl.setText("Aktualizácia je pripravená")
+            self.btn.setText("Aktualizovať")
+            if self._update_dialog is not None:
+                self._update_dialog.set_ready()
         else:
-            self.status_lbl.setText("Aktualizácia zlyhala — skús znova.")
+            self.status_lbl.setText("Sťahovanie aktualizácie zlyhalo")
+            if self._update_dialog is not None:
+                self._update_dialog.set_failed(
+                    "Sťahovanie zlyhalo — skontroluj pripojenie a skús znova.")
+
+    def _start_install(self):
+        if (self._install_worker is not None
+                and self._install_worker.isRunning()):
+            return
+        if self._update_dialog is None:
+            return
+        self.btn.hide()
+        self.spinner.show()
+        self.status_lbl.setText("Inštalácia aktualizácie…")
+        self._update_dialog.set_installing()
+        self._install_worker = _InstallWorker(self)
+        self._install_worker.progress.connect(self._on_install_progress)
+        self._install_worker.done.connect(self._on_installed)
+        self._install_worker.start()
+
+    def _on_install_progress(self, fraction, text):
+        if self._update_dialog is not None:
+            self._update_dialog.set_progress(fraction, text)
+
+    def _on_installed(self, ok):
+        self.spinner.hide()
+        if ok:
+            self.status_lbl.setText("Aktualizácia nainštalovaná — reštartujem…")
+            if self._update_dialog is not None:
+                self._update_dialog.accept()
+            QTimer.singleShot(400, self._restart)
+        else:
             self.btn.show()
-            self.btn.setText("Aktualizácia")
-            try:
-                self.btn.clicked.disconnect()
-            except Exception:
-                pass
-            self.btn.clicked.connect(self.check)
+            self.status_lbl.setText("Inštalácia aktualizácie zlyhala")
+            if self._update_dialog is not None:
+                self._update_dialog.set_install_failed()
 
     def _restart(self):
         """Re-launch the app (bootloader / main.py) and exit this process.

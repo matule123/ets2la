@@ -1,0 +1,141 @@
+import io
+import os
+import shutil
+import unittest
+import uuid
+import zipfile
+from unittest import mock
+
+from PyQt6.QtTest import QTest
+from PyQt6.QtWidgets import QApplication
+
+from core import update_check
+from UI.splash import BootSplash
+from UI.update_widget import UpdateCheckerWidget, UpdateConfirmDialog
+
+
+def update_archive():
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, "w") as archive:
+        archive.writestr("ets2la-main/core/new_module.py", "new = True")
+        archive.writestr("ets2la-main/routes/user.json", "must not replace")
+    return data.getvalue()
+
+
+class StreamingResponse:
+    status_code = 200
+
+    def __init__(self, data):
+        self.data = data
+        self.headers = {"Content-Length": str(len(data))}
+
+    def iter_content(self, chunk_size=128 * 1024):
+        for offset in range(0, len(self.data), max(1, chunk_size // 3)):
+            yield self.data[offset:offset + max(1, chunk_size // 3)]
+
+
+class WorkspaceDirectory:
+    def __enter__(self):
+        self.path = os.path.join(
+            os.path.dirname(__file__), ".update-workflow-" + uuid.uuid4().hex)
+        os.makedirs(self.path)
+        return self.path
+
+    def __exit__(self, *_):
+        shutil.rmtree(self.path, ignore_errors=True)
+
+
+class UpdateStagingTests(unittest.TestCase):
+    def test_download_reports_mb_and_does_not_install_until_confirmed(self):
+        with WorkspaceDirectory() as root:
+            cache = os.path.join(root, "cache")
+            app = os.path.join(root, "app")
+            os.makedirs(os.path.join(app, "routes"))
+            user_route = os.path.join(app, "routes", "user.json")
+            with open(user_route, "w", encoding="utf-8") as stream:
+                stream.write("keep")
+            progress = []
+            data = update_archive()
+            with (mock.patch.object(update_check, "_update_cache_dir",
+                                    return_value=cache),
+                  mock.patch.object(update_check, "_app_dir", return_value=app),
+                  mock.patch("requests.get",
+                             return_value=StreamingResponse(data))):
+                self.assertTrue(update_check.prepare_update(
+                    progress_cb=lambda fraction, text:
+                    progress.append((fraction, text)),
+                    target_commit="abcdef0"))
+                self.assertFalse(os.path.exists(
+                    os.path.join(app, "core", "new_module.py")))
+                self.assertTrue(update_check.prepared_update_info())
+                self.assertIn(" MB / ", progress[-1][1])
+                self.assertEqual(progress[-1][0], 1.0)
+
+                self.assertTrue(update_check.install_prepared_update())
+                self.assertTrue(os.path.isfile(
+                    os.path.join(app, "core", "new_module.py")))
+                with open(user_route, "r", encoding="utf-8") as stream:
+                    self.assertEqual(stream.read(), "keep")
+                self.assertFalse(update_check.prepared_update_info())
+                self.assertTrue(update_check.take_update_startup_notice())
+                self.assertFalse(update_check.take_update_startup_notice())
+
+    def test_failed_download_never_creates_ready_manifest(self):
+        response = mock.Mock(status_code=503, headers={})
+        with (WorkspaceDirectory() as root,
+              mock.patch.object(update_check, "_update_cache_dir",
+                                return_value=root),
+              mock.patch("requests.get", return_value=response)):
+            self.assertFalse(update_check.prepare_update(target_commit="abcdef0"))
+            self.assertEqual(update_check.prepared_update_info(), {})
+
+
+class UpdateUiStateTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_dialog_has_explicit_download_progress_and_install_states(self):
+        dialog = UpdateConfirmDialog("abcdef0")
+        self.assertEqual(dialog.primary_btn.text(), "Stiahnuť")
+        self.assertFalse(dialog.progress.isVisible())
+
+        dialog.set_downloading()
+        dialog.set_progress(0.5, "5.0 MB / 10.0 MB")
+        self.assertEqual(dialog.progress.value(), 50)
+        self.assertEqual(dialog.progress_text.text(), "5.0 MB / 10.0 MB")
+        self.assertFalse(dialog.primary_btn.isEnabled())
+
+        dialog.set_ready()
+        self.assertEqual(
+            dialog.title_lbl.text(),
+            "Aktualizácia je pripravená na inštaláciu")
+        self.assertEqual(dialog.primary_btn.text(),
+                         "Inštalovať a reštartovať")
+        self.assertTrue(dialog.primary_btn.isEnabled())
+        dialog.close()
+
+    def test_available_update_uses_plain_update_button(self):
+        with (mock.patch.object(update_check, "git_commit",
+                                return_value="1234567"),
+              mock.patch.object(update_check, "latest_commit_info",
+                                return_value={"title": "Opravy",
+                                              "description": ""})):
+            widget = UpdateCheckerWidget(object())
+            widget._on_checked(True, "abcdef0")
+            self.assertEqual(widget.btn.text(), "Aktualizovať")
+            widget.close()
+
+    def test_startup_shows_installation_before_initializing(self):
+        splash = BootSplash()
+        splash.show_update_installation(duration_ms=20)
+        self.assertEqual(splash.status_lbl.text(),
+                         "Inštalácia aktualizácie…")
+        QTest.qWait(35)
+        self.app.processEvents()
+        self.assertEqual(splash.status_lbl.text(), "Initializing...")
+        splash.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

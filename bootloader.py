@@ -65,6 +65,14 @@ def run_splash(shared_dict):
     state = SharedState(shared_dict)
     splash = BootSplash()
     splash.setWindowIcon(_app_icon())
+    update_notice = False
+    try:
+        from core.update_check import take_update_startup_notice
+        update_notice = take_update_startup_notice()
+    except Exception:
+        pass
+    if update_notice:
+        splash.show_update_installation()
     splash.show()
 
     def finish_when_ready():

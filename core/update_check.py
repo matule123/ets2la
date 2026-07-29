@@ -9,6 +9,8 @@ module is the pure logic layer the UI calls into:
 * ``current_version()`` — same, as a function.
 * ``latest_release()``  — the newest GitHub release tag, or None.
 * ``check_for_update()``— ``(available: bool, latest_tag: str)``.
+* ``prepare_update()``  — download and verify without changing the app.
+* ``install_prepared_update()`` — apply the staged package without network I/O.
 * ``perform_update(progress_cb)``— hybrid update: ``git pull`` if the install is a
   git checkout, otherwise download the latest release zip and overwrite files
   (settings.json / routes / map-cache are preserved).
@@ -24,12 +26,33 @@ import os
 import subprocess
 import sys
 import re
+import json
+import tempfile
 
 VERSION = "0.4.1"
 _LATEST_COMMIT_INFO = {}
 REPO = "matule123/ets2la"
 API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 ARCHIVE_URL = f"https://github.com/{REPO}/archive/refs/heads/main.zip"
+
+
+def _update_cache_dir() -> str:
+    """Writable per-user staging directory, never inside the source tree."""
+    local = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+    return os.path.join(local, "UltraPilot", "update-cache")
+
+
+def _prepared_paths():
+    root = _update_cache_dir()
+    return (os.path.join(root, "update.zip"),
+            os.path.join(root, "update.json"))
+
+
+def _format_download_progress(downloaded: int, total: int) -> str:
+    done_mb = max(0, int(downloaded)) / (1024 * 1024)
+    if total > 0:
+        return f"{done_mb:.1f} MB / {total / (1024 * 1024):.1f} MB"
+    return f"{done_mb:.1f} MB / neznáma veľkosť"
 
 
 def _app_dir():
@@ -242,21 +265,16 @@ _OBSOLETE = {
 }
 
 
-def _zip_update(progress_cb=None, target_commit=None) -> bool:
-    """Fallback: download the main-branch zip and overwrite non-protected files."""
+def _apply_zip_bytes(data, progress_cb=None, target_commit=None) -> bool:
+    """Validate and apply one downloaded archive to the application tree."""
     try:
-        import requests, zipfile, io
+        import zipfile, io
         if progress_cb:
-            progress_cb(0.1, "Sťahujem balík aktualizácie…")
-        r = requests.get(ARCHIVE_URL, timeout=180, stream=True)
-        if r.status_code != 200:
-            if progress_cb:
-                progress_cb(1.0, "download HTTP " + str(r.status_code))
-            return False
-        data = r.content
-        if progress_cb:
-            progress_cb(0.5, "Rozbaľujem…")
+            progress_cb(0.05, "Overujem stiahnutý balík…")
         zf = zipfile.ZipFile(io.BytesIO(data))
+        bad_member = zf.testzip()
+        if bad_member:
+            raise ValueError("poškodený súbor v archíve: " + bad_member)
         names = zf.namelist()
         # GitHub zips nest under "<repo>-main/".
         prefix = names[0].split("/")[0] if names else ""
@@ -289,8 +307,159 @@ def _zip_update(progress_cb=None, target_commit=None) -> bool:
             with open(os.path.join(_app_dir(), "commit.txt"), "w", encoding="utf-8") as f:
                 f.write(str(target_commit).strip())
         if progress_cb:
-            progress_cb(1.0, f"Aktualizované ({replaced} súborov)")
+            progress_cb(1.0, f"Nainštalované ({replaced} súborov)")
         return True
+    except Exception as e:
+        logging.warning("update archive apply failed: %s", e)
+        if progress_cb:
+            progress_cb(1.0, "chyba: " + str(e))
+        return False
+
+
+def prepare_update(progress_cb=None, target_commit=None) -> bool:
+    """Download and verify an update without modifying application files."""
+    archive_path, manifest_path = _prepared_paths()
+    archive_tmp = archive_path + ".tmp"
+    manifest_tmp = manifest_path + ".tmp"
+    try:
+        import requests, zipfile
+        os.makedirs(os.path.dirname(archive_path), exist_ok=True)
+        target = target_commit or latest_release()
+        response = requests.get(ARCHIVE_URL, timeout=180, stream=True)
+        if response.status_code != 200:
+            if progress_cb:
+                progress_cb(1.0, "Sťahovanie zlyhalo (HTTP "
+                            + str(response.status_code) + ")")
+            return False
+        try:
+            total = int(response.headers.get("Content-Length", 0) or 0)
+        except (TypeError, ValueError):
+            total = 0
+        downloaded = 0
+        if progress_cb:
+            progress_cb(0.0, _format_download_progress(0, total))
+        with open(archive_tmp, "wb") as stream:
+            for chunk in response.iter_content(chunk_size=128 * 1024):
+                if not chunk:
+                    continue
+                stream.write(chunk)
+                downloaded += len(chunk)
+                if progress_cb:
+                    fraction = min(0.99, downloaded / total) if total else 0.0
+                    progress_cb(fraction,
+                                _format_download_progress(downloaded, total))
+        with open(archive_tmp, "rb") as stream:
+            with zipfile.ZipFile(stream) as archive:
+                bad_member = archive.testzip()
+                if bad_member:
+                    raise ValueError("poškodený súbor v archíve: " + bad_member)
+                if not archive.namelist():
+                    raise ValueError("prázdny aktualizačný archív")
+        os.replace(archive_tmp, archive_path)
+        manifest = {
+            "target_commit": str(target or ""),
+            "downloaded_bytes": downloaded,
+            "total_bytes": total or downloaded,
+        }
+        with open(manifest_tmp, "w", encoding="utf-8") as stream:
+            json.dump(manifest, stream, ensure_ascii=False)
+        os.replace(manifest_tmp, manifest_path)
+        if progress_cb:
+            progress_cb(1.0, _format_download_progress(
+                downloaded, total or downloaded))
+        return True
+    except Exception as e:
+        logging.warning("update download failed: %s", e)
+        for path in (archive_tmp, manifest_tmp):
+            try:
+                if os.path.isfile(path):
+                    os.remove(path)
+            except Exception:
+                pass
+        if progress_cb:
+            progress_cb(1.0, "chyba: " + str(e))
+        return False
+
+
+def prepared_update_info() -> dict:
+    """Return verified staging metadata, or an empty dict."""
+    archive_path, manifest_path = _prepared_paths()
+    try:
+        if not os.path.isfile(archive_path):
+            return {}
+        with open(manifest_path, "r", encoding="utf-8") as stream:
+            info = json.load(stream)
+        return info if isinstance(info, dict) else {}
+    except Exception:
+        return {}
+
+
+def mark_update_startup_notice() -> None:
+    """Ask the next startup splash to show the installation transition."""
+    marker = os.path.join(_update_cache_dir(), "installed.notice")
+    os.makedirs(os.path.dirname(marker), exist_ok=True)
+    temporary = marker + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as stream:
+        stream.write("installed")
+    os.replace(temporary, marker)
+
+
+def take_update_startup_notice() -> bool:
+    """Atomically consume the one-shot startup installation notice."""
+    marker = os.path.join(_update_cache_dir(), "installed.notice")
+    try:
+        if not os.path.isfile(marker):
+            return False
+        os.remove(marker)
+        return True
+    except Exception:
+        return False
+
+
+def install_prepared_update(progress_cb=None) -> bool:
+    """Install the already verified archive; never performs network I/O."""
+    archive_path, manifest_path = _prepared_paths()
+    info = prepared_update_info()
+    if not info:
+        if progress_cb:
+            progress_cb(1.0, "Stiahnutá aktualizácia sa nenašla")
+        return False
+    try:
+        with open(archive_path, "rb") as stream:
+            data = stream.read()
+        ok = _apply_zip_bytes(
+            data, progress_cb=progress_cb,
+            target_commit=info.get("target_commit"))
+        if not ok:
+            return False
+        mark_update_startup_notice()
+        for path in (archive_path, manifest_path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        return True
+    except Exception as e:
+        logging.warning("prepared update install failed: %s", e)
+        if progress_cb:
+            progress_cb(1.0, "chyba: " + str(e))
+        return False
+
+
+def _zip_update(progress_cb=None, target_commit=None) -> bool:
+    """Backward-compatible immediate ZIP download and installation."""
+    try:
+        import requests
+        if progress_cb:
+            progress_cb(0.1, "Sťahujem balík aktualizácie…")
+        response = requests.get(ARCHIVE_URL, timeout=180, stream=True)
+        if response.status_code != 200:
+            if progress_cb:
+                progress_cb(1.0, "download HTTP " + str(response.status_code))
+            return False
+        return _apply_zip_bytes(
+            response.content, progress_cb=progress_cb,
+            target_commit=target_commit)
     except Exception as e:
         logging.warning("update zip failed: %s", e)
         if progress_cb:

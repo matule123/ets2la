@@ -3,7 +3,7 @@
 import os
 import sys
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor, QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
@@ -141,6 +141,13 @@ class BootSplash(QWidget):
 
     def set_status(self, text: str):
         self.status_lbl.setText(text)
+
+    def show_update_installation(self, duration_ms=1200):
+        """Show the one-shot update phase before normal initialization."""
+        self.set_status("Inštalácia aktualizácie…")
+        QTimer.singleShot(
+            max(0, int(duration_ms)),
+            lambda: self.set_status("Initializing..."))
 
     def showEvent(self, event):
         super().showEvent(event)
