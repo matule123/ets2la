@@ -50,11 +50,11 @@ class WindowControlDot(QPushButton):
         self.setAccessibleName(tooltip)
         self.setToolTip(tooltip)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedSize(13, 13)
+        self.setFixedSize(11, 11)
         self.setStyleSheet(
-            f"QPushButton{{background:{color};border:1px solid rgba(0,0,0,0.20);"
-            "border-radius:6px;padding:0;margin:0;}"
-            "QPushButton:hover{border:1px solid rgba(0,0,0,0.46);}")
+            f"QPushButton{{background:{color};border:1px solid rgba(0,0,0,0.34);"
+            "border-radius:5px;padding:0;margin:0;}"
+            "QPushButton:hover{border:1px solid rgba(0,0,0,0.62);}")
         self.clicked.connect(action)
 
     def paintEvent(self, event):
@@ -82,15 +82,15 @@ class MacTitleBar(QFrame):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setStyleSheet("#MacTitleBar{background:transparent;border:none;}")
         row = QHBoxLayout(self)
-        row.setContentsMargins(12, 7, 9, 11)
-        row.setSpacing(6)
+        row.setContentsMargins(14, 8, 9, 11)
+        row.setSpacing(7)
         self.controls = {}
         for key, color, glyph, tip, action in (
-                ("maximize", "#28C840", "+", "Maximalizovať",
+                ("maximize", "#00D647", "+", "Maximalizovať",
                  self._toggle_maximize),
-                ("minimize", "#FEBC2E", "−", "Minimalizovať",
+                ("minimize", "#FFB800", "−", "Minimalizovať",
                  window.showMinimized),
-                ("close", "#FF5F57", "×", "Zavrieť", window.close)):
+                ("close", "#FF3B30", "×", "Zavrieť", window.close)):
             dot = WindowControlDot(color, glyph, f"WindowControl-{key}",
                                    tip, action, self)
             row.addWidget(dot)

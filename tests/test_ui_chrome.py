@@ -46,7 +46,7 @@ class UiChromeTests(unittest.TestCase):
         bar = MacTitleBar(host, palette("light"))
         self.assertEqual(list(bar.controls), ["maximize", "minimize", "close"])
         controls = list(bar.controls.values())
-        self.assertTrue(all(button.width() == 13 and button.height() == 13
+        self.assertTrue(all(button.width() == 11 and button.height() == 11
                             for button in controls))
         self.assertEqual([button.accessibleName() for button in controls],
                          ["Maximalizovať", "Minimalizovať", "Zavrieť"])
