@@ -6,7 +6,8 @@ from PyQt6.QtCore import QPointF, QRectF
 from PyQt6.QtGui import QPainterPath
 
 from core.hud import (UltraPilotHUD, _continuous_lane_chunks,
-                      _lane_boundary_points, _rounded_screen_path)
+                      _lane_boundary_points, _ordered_display_path_runs,
+                      _rounded_screen_path, _variable_lane_boundary_points)
 from core.sdk.scs_sdk import SCSTelemetry
 from tests.test_lane_route_builder import SyntheticMap
 
@@ -219,16 +220,18 @@ class HudPoseStabilityTests(unittest.TestCase):
                 covering.append(centre_x-half <= truck.x <= centre_x+half)
         self.assertIn(True, covering)
 
-    def test_connected_prefab_curves_fill_junction_without_markings(self):
+    def test_connected_prefab_curves_publish_continuous_lane_envelope(self):
         synthetic = SyntheticMap()
         synthetic.node(1, 0.0, 0.0)
         synthetic.node(2, 0.0, 80.0)
         synthetic.road(1, 2)
         calls = []
 
-        def prefab_segments(pos, radius, limit, allowed_node_uids):
+        def prefab_segments(pos, radius, limit, allowed_node_uids,
+                            include_path_metadata=False):
             calls.append(frozenset(allowed_node_uids))
-            return [((0.0, 32.0, 0.0), (7.0, 38.0, 0.0))]
+            segment = ((0.0, 32.0, 0.0), (7.0, 38.0, 0.0))
+            return [segment + ("p0:0", 0)] if include_path_metadata else [segment]
 
         synthetic.net.prefab_segments_3d_near = prefab_segments
         segments = synthetic.net.hud_segments_3d_near(
@@ -237,7 +240,67 @@ class HudPoseStabilityTests(unittest.TestCase):
         self.assertEqual(len(prefab), 1)
         self.assertEqual(calls, [frozenset((1, 2))])
         self.assertFalse(prefab[0][5])       # no dashed line
-        self.assertTrue(prefab[0][9])        # suppress every marking
+        self.assertTrue(prefab[0][9])        # no invented painted divider
+        self.assertEqual(prefab[0][10:], ("p0:0", 0))
+
+    def test_prefab_lane_outline_is_curved_and_never_chords_between_arms(self):
+        samples = []
+        radius = 16.0
+        points = [(radius * math.sin(index * math.pi / 24),
+                   radius * math.cos(index * math.pi / 24), 0.0)
+                  for index in range(13)]
+        for index, (first, second) in enumerate(zip(points, points[1:])):
+            samples.append((index, first, second, 2.25))
+        runs = _ordered_display_path_runs(samples)
+        self.assertEqual(len(runs), 1)
+        centreline = [item[0] for item in runs[0]]
+        widths = [item[1] for item in runs[0]]
+        left, right = _variable_lane_boundary_points(centreline, widths)
+        self.assertEqual(len(left), len(points))
+        self.assertEqual(len(right), len(points))
+        chord_mid = ((left[0][0] + left[-1][0]) * .5,
+                     (left[0][1] + left[-1][1]) * .5)
+        self.assertGreater(math.dist(left[len(left)//2][:2], chord_mid), 2.5)
+
+        # A missing curve sample is never bridged by the display smoother.
+        split = samples[:4] + [
+            (8, (50.0, 50.0, 0.0), (52.0, 50.0, 0.0), 2.25)]
+        self.assertEqual(len(_ordered_display_path_runs(split)), 2)
+
+    def test_hud_draws_prefab_and_suppressed_approach_outer_boundaries(self):
+        class Painter:
+            def __init__(self): self.paths = 0
+            def drawPath(self, _path): self.paths += 1
+            def __getattr__(self, _name): return lambda *_a, **_k: None
+
+        class View:
+            def top(self): return 0.0
+            def bottom(self): return 600.0
+            def left(self): return 0.0
+            def width(self): return 900.0
+            def height(self): return 600.0
+            def center(self): return QPointF(450.0, 300.0)
+
+        hud = self.make_hud()
+        hud._view_yaw = 0.0
+        hud._draw_low_poly_ego = lambda *_args, **_kwargs: None
+        data = {
+            "pos": (0.0, 0.0), "heading": 0.0, "speed_kmh": 15.0,
+            "altitude": 0.0, "traffic": [], "nav_path": [], "lanes": 1,
+            "lane_revision": -1, "trailer_attached": False,
+            "road_segments": [
+                [[0.0, -5.0, 0.0], [0.0, -10.0, 0.0], "road", 2,
+                 False, True, False, False, 5.0, True, "r0:0", 0],
+                [[0.0, -10.0, 0.0], [2.0, -14.0, 0.0], "lane", 1,
+                 False, False, False, False, 3.05, True, "p0:0", 0],
+                [[2.0, -14.0, 0.0], [5.0, -17.0, 0.0], "lane", 1,
+                 False, False, False, False, 3.05, True, "p0:0", 1],
+            ],
+        }
+        painter = Painter()
+        hud._draw_driving_view(painter, View(), data)
+        # Two road edges and two continuously curved prefab-lane edges.
+        self.assertGreaterEqual(painter.paths, 4)
 
     def test_traffic_light_is_world_anchored_and_never_uses_string_brush(self):
         class StrictPainter:

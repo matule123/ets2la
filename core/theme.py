@@ -52,14 +52,38 @@ QMainWindow {{ background-color: {c['bg']}; }}
 QWidget {{ background-color: {c['bg']}; color: {c['text']};
     font-family: 'Segoe UI', 'Inter', sans-serif; font-size: 14px; }}
 
-/* Sidebar — ETS2LA deep panel with a faint accent glow at the top. */
+/* Sidebar — compact reference-style navigation cards. */
 QFrame#Sidebar {{ background-color: #FFFFFF; border: none;
     border-right: 1px solid #E5E7EB; }}
-QFrame#Sidebar QPushButton {{ background-color: transparent; border: none;
-    border-radius: 10px; padding: 11px 14px; margin: 2px 8px; text-align: left;
-    color: {c['muted']}; font-weight: 600; }}
-QFrame#Sidebar QPushButton:hover {{ background-color: {c['field']}; color: {c['text']}; }}
-QFrame#Sidebar QPushButton:checked {{ background-color: {ACCENT}; color: #FFFFFF; }}
+QFrame#Sidebar QLabel#BrandSubtitle {{ color: #7B818A; font-size: 10px;
+    font-weight: 600; border: none; }}
+QFrame#Sidebar QLabel#NavSection {{ color: #777D86; font-size: 11px;
+    font-weight: 500; padding: 10px 8px 4px 8px; border: none; }}
+QFrame#Sidebar QPushButton#NavButton {{ background-color: transparent;
+    border: 1px solid transparent; border-radius: 8px; padding: 7px 10px;
+    margin: 1px 0; text-align: left; color: #343941; font-size: 13px;
+    font-weight: 500; }}
+QFrame#Sidebar QPushButton#NavButton:hover {{ background-color: #F6F7F8;
+    border-color: #EFF0F2; color: #111827; }}
+QFrame#Sidebar QPushButton#NavButton:checked {{ background-color: #EEEFF1;
+    border-color: #E7E8EA; color: #111827; font-weight: 650; }}
+QFrame#Sidebar QFrame#SidebarUpdateCard, QFrame#Sidebar QFrame#SidebarStatusCard {{
+    background-color: #FAFAFB; border: 1px solid #E4E6E9;
+    border-radius: 9px; }}
+QFrame#Sidebar QLabel#SidebarConnection {{ color: #59606A; font-size: 11px;
+    font-weight: 650; border: none; }}
+QFrame#Sidebar QLabel#SidebarConnection[connectionState="connected"] {{
+    color: #0E9F6E; }}
+QFrame#Sidebar QLabel#SidebarConnection[connectionState="autopilot"] {{
+    color: #057A55; font-weight: 700; }}
+QFrame#Sidebar QPushButton#SidebarPerformance {{ background-color: #FFFFFF;
+    border: 1px solid #DDE0E4; border-radius: 7px; padding: 5px 9px;
+    margin: 0; color: #535A64; font-size: 11px; font-weight: 650;
+    text-align: left; }}
+QFrame#Sidebar QPushButton#SidebarPerformance:hover {{ background-color:#F2F3F5;
+    border-color:#C9CDD2; color:#1F242B; }}
+QFrame#Sidebar QPushButton#SidebarPerformance[active="true"] {{
+    background-color:#20242A; border-color:#20242A; color:#FFFFFF; }}
 
 /* General buttons — soft, rounded, accent on hover. */
 QPushButton {{ background-color: {c['surface']}; border: 1px solid {c['border']};

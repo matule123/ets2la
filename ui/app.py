@@ -5,7 +5,8 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QWidget, QStackedWidget, QFrame, QScrollArea,
 )
-from PyQt6.QtCore import QTimer, Qt, QSize
+from PyQt6.QtCore import QTimer, Qt, QSize, QRectF
+from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 
 from ui.settings_menu import SettingsMenu
 from ui.map_page import MapPage
@@ -14,31 +15,88 @@ from ui.map_page import MapPage
 # old inline LIGHT_THEME/DARK_THEME strings here were dead code (never applied).
 
 
+def window_control_notch_path(width, height):
+    """Reference-shaped top-right notch for the three window controls."""
+    width, height = float(width), float(height)
+    path = QPainterPath()
+    path.moveTo(0.0, 0.0)
+    path.lineTo(width, 0.0)
+    path.lineTo(width, height - 9.0)
+    path.quadTo(width, height, width - 10.0, height)
+    path.lineTo(15.0, height)
+    path.cubicTo(7.0, height, 7.0, height - 7.0, 0.0, height - 9.0)
+    path.closeSubpath()
+    return path
+
+
+class WindowControlDot(QPushButton):
+    """A crisp traffic-light control with a subtle hover symbol."""
+
+    def __init__(self, color, glyph, name, tooltip, action, parent=None):
+        super().__init__("", parent)
+        self._glyph = glyph
+        self.setObjectName(name)
+        self.setAccessibleName(tooltip)
+        self.setToolTip(tooltip)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedSize(13, 13)
+        self.setStyleSheet(
+            f"QPushButton{{background:{color};border:1px solid rgba(0,0,0,0.20);"
+            "border-radius:6px;padding:0;margin:0;}"
+            "QPushButton:hover{border:1px solid rgba(0,0,0,0.46);}")
+        self.clicked.connect(action)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self.underMouse():
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(30, 35, 40, 180), 1.15,
+                            Qt.PenStyle.SolidLine,
+                            Qt.PenCapStyle.RoundCap))
+        painter.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._glyph)
+
+
 class MacTitleBar(QFrame):
-    """Three small window controls embedded in the top-right corner."""
+    """Three window controls seated in the content card's curved notch."""
 
     def __init__(self, window, palette):
         super().__init__()
         self.window = window
-        self.setFixedSize(66, 26)
+        self._palette = palette
+        self.setFixedSize(82, 34)
         self.setObjectName("MacTitleBar")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setStyleSheet("#MacTitleBar{background:transparent;border:none;}")
         row = QHBoxLayout(self)
-        row.setContentsMargins(5, 5, 5, 5)
-        row.setSpacing(5)
-        for color, tip, action in (
-                ("#28C840", "Maximalizovať", self._toggle_maximize),
-                ("#FEBC2E", "Minimalizovať", window.showMinimized),
-                ("#FF5F57", "Zavrieť", window.close)):
-            dot = QPushButton("")
-            dot.setToolTip(tip)
-            dot.setFixedSize(10, 10)
-            dot.setStyleSheet(
-                f"QPushButton{{background:{color};border:1px solid rgba(0,0,0,0.18);"
-                "border-radius:5px;padding:0;margin:0;}"
-                "QPushButton:hover{border:1px solid rgba(0,0,0,0.55);}")
-            dot.clicked.connect(action)
+        row.setContentsMargins(12, 7, 9, 11)
+        row.setSpacing(6)
+        self.controls = {}
+        for key, color, glyph, tip, action in (
+                ("maximize", "#28C840", "+", "Maximalizovať",
+                 self._toggle_maximize),
+                ("minimize", "#FEBC2E", "−", "Minimalizovať",
+                 window.showMinimized),
+                ("close", "#FF5F57", "×", "Zavrieť", window.close)):
+            dot = WindowControlDot(color, glyph, f"WindowControl-{key}",
+                                   tip, action, self)
             row.addWidget(dot)
+            self.controls[key] = dot
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        path = window_control_notch_path(self.width(), self.height())
+        painter.setPen(QPen(QColor(self._palette["border"]), 1.0))
+        painter.setBrush(QColor(self._palette["sidebar"]))
+        painter.drawPath(path)
+        painter.end()
+
+    def set_palette(self, palette):
+        self._palette = palette
+        self.update()
 
     def _toggle_maximize(self):
         self.window.showNormal() if self.window.isMaximized() else self.window.showMaximized()
@@ -414,27 +472,27 @@ class UltraPilotApp(QMainWindow):
         self.drag_area.raise_()
         self.title_bar = MacTitleBar(self, self._pal)
         self.title_bar.setParent(central)
-        self.title_bar.move(central.width() - self.title_bar.width() - 6, 4)
+        self.title_bar.move(central.width() - self.title_bar.width(), 0)
         self.title_bar.raise_()
 
         self.sidebar = QFrame()
         self.sidebar.setObjectName("Sidebar")
-        self.sidebar.setFixedWidth(224)
+        self.sidebar.setFixedWidth(232)
         sb = QVBoxLayout(self.sidebar)
-        sb.setContentsMargins(0, 16, 0, 12)
+        sb.setContentsMargins(10, 17, 10, 12)
         sb.setSpacing(0)
 
         # Brand block at the top: logo + wordmark + version.
         from PyQt6.QtGui import QPixmap, QIcon
         from core.paths import resource as _res
         brand_row = QHBoxLayout()
-        brand_row.setContentsMargins(18, 0, 12, 0)
-        brand_row.setSpacing(10)
+        brand_row.setContentsMargins(8, 0, 8, 0)
+        brand_row.setSpacing(9)
         logo = QLabel()
-        _pm = QIcon(_res("assets", "favicon.ico")).pixmap(40, 40)
+        _pm = QIcon(_res("assets", "favicon.ico")).pixmap(34, 34)
         if _pm.isNull():
             _pm = QPixmap(_res("assets", "logo.png")).scaledToWidth(
-                40, Qt.TransformationMode.SmoothTransformation)
+                34, Qt.TransformationMode.SmoothTransformation)
         if not _pm.isNull():
             logo.setPixmap(_pm)
         logo.setStyleSheet("border:none;")
@@ -442,20 +500,30 @@ class UltraPilotApp(QMainWindow):
         brand_txt = QVBoxLayout()
         brand_txt.setSpacing(0)
         word = QLabel("UltraPilot")
-        word.setStyleSheet("font-size: 18px; font-weight: 800; color: " + self._pal['title'] + "; border:none;")
+        word.setStyleSheet("font-size:17px;font-weight:800;color:#20242A;border:none;")
         brand_txt.addWidget(word)
-        # The update checker widget lives where „Pro Edition“ used to — it shows
-        # the current version and an Update button when a newer release exists.
-        from ui.update_widget import UpdateCheckerWidget
-        self.update_checker = UpdateCheckerWidget(self.state)
-        brand_txt.addWidget(self.update_checker)
+        edition = QLabel("Driving assistant")
+        edition.setObjectName("BrandSubtitle")
+        brand_txt.addWidget(edition)
         brand_row.addLayout(brand_txt)
         brand_row.addStretch()
         brand_w = QWidget()
         brand_w.setLayout(brand_row)
         brand_w.setStyleSheet("border:none;")
         sb.addWidget(brand_w)
-        sb.addSpacing(18)
+        sb.addSpacing(11)
+
+        # Version/update is a full-width card, matching the reference layout;
+        # the existing update workflow remains entirely unchanged.
+        from ui.update_widget import UpdateCheckerWidget
+        update_card = QFrame()
+        update_card.setObjectName("SidebarUpdateCard")
+        update_layout = QVBoxLayout(update_card)
+        update_layout.setContentsMargins(10, 7, 10, 7)
+        self.update_checker = UpdateCheckerWidget(self.state)
+        update_layout.addWidget(self.update_checker)
+        sb.addWidget(update_card)
+        sb.addSpacing(8)
 
         # ETS2LA-style navigation. The glyphs come from Windows' monochrome
         # Segoe MDL2 icon font (not emoji), so they stay crisp at every DPI.
@@ -466,18 +534,19 @@ class UltraPilotApp(QMainWindow):
             ("visualization", "Visualization", 2),
             ("Plugins", None, None),
             ("plugins", "Manager", 3),
-            ("Application", None, None),
-            ("settings", "Settings", 4),
+            ("Help", None, None),
             ("about", "About", 5),
+            ("__stretch__", None, None),
+            ("settings", "Settings", 4),
         ]
         self._nav_btns = []
         for icon_text, text, idx in nav:
             if idx is None:
+                if icon_text == "__stretch__":
+                    sb.addStretch()
+                    continue
                 section = QLabel(icon_text)
                 section.setObjectName("NavSection")
-                section.setStyleSheet(
-                    "color:#7B818A;font-size:11px;font-weight:500;"
-                    "padding:14px 18px 5px 18px;border:none;")
                 sb.addWidget(section)
                 continue
             from ui.icons import line_icon
@@ -485,42 +554,37 @@ class UltraPilotApp(QMainWindow):
             b.setIcon(line_icon(icon_text))
             b.setIconSize(QSize(20, 20))
             b.setObjectName("NavButton")
+            b.setFixedHeight(38)
             b.setProperty("navIndex", idx)
             b.setProperty("navKey", "plugins" if text == "Manager" else text.lower())
-            b.setStyleSheet(
-                "QPushButton{font-family:'Segoe UI';"
-                "font-size:13px;text-align:left;background:transparent;color:#30343B;"
-                "border:none;border-radius:7px;padding:8px 12px;margin:1px 10px;}"
-                "QPushButton:hover{background:#F5F5F6;color:#111827;}"
-                "QPushButton:checked{background:#EEEEF0;color:#111827;font-weight:600;}"
-            )
             b.setCheckable(True)
             b.clicked.connect(lambda _=False, i=idx: self._goto(i))
             sb.addWidget(b)
             self._nav_btns.append(b)
         self._nav_btns[0].setChecked(True)
-        sb.addStretch()
-
-        # Sidebar footer: live connection + autopilot indicator.
-        self.side_conn = QLabel("● Čakám na hru")
-        self.side_conn.setStyleSheet(
-            "color: " + self._pal['muted'] + "; font-size: 11px; font-weight: 600; border:none; "
-            "padding: 10px 18px;")
-        sb.addWidget(self.side_conn)
+        # Sidebar footer: connection and performance controls share one compact
+        # card instead of floating as unrelated text/buttons.
+        footer_card = QFrame()
+        footer_card.setObjectName("SidebarStatusCard")
+        footer_layout = QVBoxLayout(footer_card)
+        footer_layout.setContentsMargins(9, 7, 9, 8)
+        footer_layout.setSpacing(4)
+        self.side_conn = QLabel("●  Čakám na hru")
+        self.side_conn.setObjectName("SidebarConnection")
+        self.side_conn.setProperty("connectionState", "waiting")
+        footer_layout.addWidget(self.side_conn)
 
         # Hamburger button: toggles the small floating performance overlay.
         self.perf_overlay = None
         self.perf_btn = QPushButton("◫  Performance")
         self.perf_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.perf_btn.setFixedHeight(34)
+        self.perf_btn.setFixedHeight(32)
         self.perf_btn.setToolTip("Performance")
-        self.perf_btn.setStyleSheet(
-            "QPushButton{background:transparent;border:1px solid " + self._pal['border'] + ";"
-            "border-radius:8px;color:" + self._pal['muted'] + ";font-size:12px;font-weight:700;}"
-            "QPushButton:hover{border-color:" + self._pal['title'] + ";color:" + self._pal['title'] + ";}")
+        self.perf_btn.setObjectName("SidebarPerformance")
         # Black/white style toggle kept minimal — colour flips with state below.
         self.perf_btn.clicked.connect(self.toggle_perf_overlay)
-        sb.addWidget(self.perf_btn)
+        footer_layout.addWidget(self.perf_btn)
+        sb.addWidget(footer_card)
         main_layout.addWidget(self.sidebar)
 
         self.pages = QStackedWidget()
@@ -606,25 +670,20 @@ class UltraPilotApp(QMainWindow):
                 self.perf_overlay = PerfOverlay(self.state, self)
             if self.perf_overlay.isVisible():
                 self.perf_overlay.hide()
-                self.perf_btn.setStyleSheet(
-                    "QPushButton{background:transparent;border:1px solid " + self._pal['border'] + ";"
-                    "border-radius:8px;color:" + self._pal['muted'] + ";font-size:16px;font-weight:700;}"
-                    "QPushButton:hover{border-color:" + self._pal['title'] + ";color:" + self._pal['title'] + ";}")
+                self.perf_btn.setProperty("active", False)
             else:
                 self.perf_overlay.show_above(self.perf_btn)
                 self.perf_overlay.refresh()
-                # Active state: filled accent chip.
-                self.perf_btn.setStyleSheet(
-                    "QPushButton{background:" + self._pal['title'] + ";color:#FFFFFF;"
-                    "border:1px solid " + self._pal['title'] + ";border-radius:8px;font-size:12px;font-weight:700;}"
-                    "QPushButton:hover{border-color:" + self._pal['title'] + ";}")
+                self.perf_btn.setProperty("active", True)
+            self.perf_btn.style().unpolish(self.perf_btn)
+            self.perf_btn.style().polish(self.perf_btn)
         except Exception as e:
             logging.warning("perf overlay toggle failed: %s", e)
 
     def _goto(self, index):
         self.pages.setCurrentIndex(index)
-        for i, b in enumerate(getattr(self, "_nav_btns", [])):
-            b.setChecked(i == index)
+        for button in getattr(self, "_nav_btns", []):
+            button.setChecked(int(button.property("navIndex")) == index)
 
     def _apply_language(self, code):
         from core.i18n import t
@@ -641,7 +700,7 @@ class UltraPilotApp(QMainWindow):
             self.drag_area.raise_()
         if hasattr(self, "title_bar"):
             self.title_bar.move(self.centralWidget().width()
-                                - self.title_bar.width() - 6, 4)
+                                - self.title_bar.width(), 0)
             self.title_bar.raise_()
 
     def showEvent(self, event):
@@ -710,6 +769,7 @@ class UltraPilotApp(QMainWindow):
             from core.theme import stylesheet, palette
             self._pal = palette(new_theme)
             self.setStyleSheet(stylesheet(new_theme))
+            self.title_bar.set_palette(self._pal)
             # Re-render the chrome widgets that cache colours from the palette
             # (brand wordmark, hamburger, sidebar footer, start button).
             self._render_start_btn()
@@ -741,16 +801,17 @@ class UltraPilotApp(QMainWindow):
         active = bool(self.state.get("autopilot_active", False))
         if active:
             self.side_conn.setText("● Autopilot aktívny")
-            self.side_conn.setStyleSheet(
-                "color: " + self._pal['title'] + "; font-size: 11px; font-weight: 700; border:none; padding: 10px 18px;")
+            connection_state = "autopilot"
         elif connected:
             self.side_conn.setText("● Hra pripojená")
-            self.side_conn.setStyleSheet(
-                "color: " + self._pal['success'] + "; font-size: 11px; font-weight: 600; border:none; padding: 10px 18px;")
+            connection_state = "connected"
         else:
             self.side_conn.setText("● Čakám na hru")
-            self.side_conn.setStyleSheet(
-                "color: " + self._pal['muted'] + "; font-size: 11px; font-weight: 600; border:none; padding: 10px 18px;")
+            connection_state = "waiting"
+        if self.side_conn.property("connectionState") != connection_state:
+            self.side_conn.setProperty("connectionState", connection_state)
+            self.side_conn.style().unpolish(self.side_conn)
+            self.side_conn.style().polish(self.side_conn)
 
 
 if __name__ == "__main__":
