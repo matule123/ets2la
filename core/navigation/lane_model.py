@@ -21,6 +21,20 @@ def wrap_angle(value: float) -> float:
     return (float(value) + math.pi) % (2.0 * math.pi) - math.pi
 
 
+def gps_uids_are_rolling_suffix(previous, current) -> bool:
+    """Return whether ``current`` only drops a passed GPS UID prefix.
+
+    Relative UID order and the final target must remain identical. This is a
+    normal SDK window advance, not a new destination or a reroute.
+    """
+    before = tuple(int(uid) for uid in (previous or ()))
+    after = tuple(int(uid) for uid in (current or ()))
+    if len(before) < 3 or len(after) < 2 or before == after:
+        return False
+    return any(tuple(before[index:]) == after
+               for index in range(1, len(before) - 1))
+
+
 @dataclass(frozen=True, slots=True)
 class LaneId:
     road_uid: int

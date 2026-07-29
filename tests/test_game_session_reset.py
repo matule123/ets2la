@@ -1,6 +1,10 @@
 import unittest
 
-from core.engine import _live_route_suffix, _telemetry_loss_navigation_payload
+from core.engine import (
+    _game_route_distance_reset, _live_route_suffix,
+    _telemetry_loss_navigation_payload,
+)
+from core.navigation.lane_model import gps_uids_are_rolling_suffix
 from unittest import mock
 
 from core.modules.game_watcher import GameWatcher
@@ -58,6 +62,24 @@ class GameSessionResetTests(unittest.TestCase):
         self.assertEqual(passed, 2)
         self.assertEqual(matched, 200.0)
         self.assertEqual([item["uid"] for item in suffix], [12, 13])
+
+    def test_rolling_uid_suffix_is_not_a_new_destination(self):
+        self.assertTrue(gps_uids_are_rolling_suffix(
+            (10, 11, 12, 13, 14), (12, 13, 14)))
+        self.assertFalse(gps_uids_are_rolling_suffix(
+            (10, 11, 12, 13), (10, 11, 12, 13)))
+        self.assertFalse(gps_uids_are_rolling_suffix(
+            (10, 11, 12, 13), (11, 12, 99)))
+        self.assertFalse(gps_uids_are_rolling_suffix(
+            (10, 11, 12), (11, 10, 12)))
+
+    def test_decreasing_route_distance_never_resets_destination(self):
+        # Captured runtime movement included 19.7 -> 19.3 -> 19.0 km and
+        # 18.4 -> 15.5 km. Those are progress, not destination changes.
+        self.assertFalse(_game_route_distance_reset(19_700.0, 19_300.0))
+        self.assertFalse(_game_route_distance_reset(18_400.0, 15_500.0))
+        self.assertFalse(_game_route_distance_reset(44_100.0, 44_300.0))
+        self.assertTrue(_game_route_distance_reset(31_500.0, 213_700.0))
 
     def test_game_close_disables_master_and_clears_route(self):
         engine = _Engine()

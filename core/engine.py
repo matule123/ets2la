@@ -15,6 +15,7 @@ from core.modules.traffic_analysis import TrafficAnalysis
 from core.planner import UltraPilotPlanner
 from core.camera import CameraSnapshotProducer
 from core.navigation.runtime_preflight import build_runtime_preflight
+from core.navigation.lane_model import gps_uids_are_rolling_suffix
 from sdk.plugin_sdk import (
     CTL_STEERING, CTL_THROTTLE, CTL_BRAKE, CTL_BLINKER, CTL_PAY_TOLL,
     CTL_SELECT_DRIVE,
@@ -49,6 +50,18 @@ def _live_route_suffix(planned_items, route_distance):
     # Do not retain matched_index-1. At a fork that point can belong to the
     # arm already passed, manufacturing an impossible prefab transition.
     return list(planned_items[matched_index:]), matched_index, matched_distance
+
+
+def _game_route_distance_reset(previous, current):
+    """Return only a large upward route-distance reset, never normal progress."""
+    try:
+        previous = float(previous or 0.0)
+        current = float(current or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return bool(
+        previous > 0.0 and current > 0.0
+        and current - previous > max(5000.0, previous * 0.25))
 
 
 def _telemetry_loss_navigation_payload(state):
@@ -154,6 +167,7 @@ class UltraPilotEngine:
         self._last_game_route_distance = None
         self._last_game_destination = ""
         self._last_route_signature = None
+        self._last_planned_route_uids = ()
         self._had_game_destination = False
         self._last_navigation_log_seq = None
         self._last_runtime_preflight = 0.0
@@ -781,9 +795,13 @@ class UltraPilotEngine:
                     arrival_pending = False
                 destination_changed = bool(
                     dest_city and dest_city != self._last_game_destination)
-                route_changed = bool(
-                    route_distance > 0 and prev_distance is not None and prev_distance > 0
-                    and abs(route_distance - prev_distance) > 80.0)
+                # routeDistance normally decreases while driving and can move
+                # by more than one sparse SDK-node interval between usable
+                # telemetry frames. It is never a destination identity. Only
+                # a large reset upwards is an early invalidation signal while
+                # waiting for the UID buffer to expose the new target.
+                distance_reset = _game_route_distance_reset(
+                    prev_distance, route_distance)
                 # A Local\ETS2LARoute mapping can retain its previous UIDs after
                 # the player removes the waypoint. The live SCS route distance
                 # (or an active job destination) is the gate that tells us a
@@ -924,9 +942,16 @@ class UltraPilotEngine:
                 else:
                     self.shared_state.set("game_route_node_uids", [])
                     self.shared_state.set("game_route_points", [])
+                planned_uid_tuple = tuple(planned_uids)
                 planned_route_changed = bool(
-                    route_signature and route_signature != self._last_route_signature)
-                if destination_changed or route_changed or first_route or planned_route_changed:
+                    route_signature
+                    and planned_uid_tuple != self._last_planned_route_uids)
+                rolling_route_advance = gps_uids_are_rolling_suffix(
+                    self._last_planned_route_uids, planned_uid_tuple)
+                route_geometry_changed = bool(
+                    planned_route_changed and not rolling_route_advance)
+                if (destination_changed or distance_reset or first_route
+                        or route_geometry_changed):
                     # Drop every old representation immediately. Otherwise the
                     # map plugin can keep steering along the previous target
                     # while the native route buffer is being rebuilt.
@@ -971,11 +996,13 @@ class UltraPilotEngine:
                     self.shared_state.set("game_route_meta", planned_items)
                 if route_signature:
                     self._last_route_signature = route_signature
+                    self._last_planned_route_uids = planned_uid_tuple
                 if has_game_destination and route_distance > 0:
                     self._last_game_route_distance = route_distance
                 elif not has_game_destination:
                     self._last_game_route_distance = None
                     self._last_route_signature = None
+                    self._last_planned_route_uids = ()
                 if dest_city:
                     self._last_game_destination = dest_city
                 elif not has_game_destination:

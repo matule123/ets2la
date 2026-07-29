@@ -11,6 +11,7 @@ from core.navigation.route_diagnostics import (
     safe_diagnostic_call,
 )
 from core.navigation.runtime_preflight import CONFIDENCE_THRESHOLD
+from core.navigation.lane_model import gps_uids_are_rolling_suffix
 from core.paths import app_dir
 
 # routes/ lives next to the app (works both from source and when frozen).
@@ -61,6 +62,7 @@ class Plugin(BasePlugin):
         self._roads_revision = int(self.sdk.get(
             "map_road_segments_revision", 0) or 0)
         self._lane_signature = None
+        self._rolling_route_refresh_needed = False
         self._lane_path = None
         self._lane_route = None
         self._lane_match = None
@@ -258,6 +260,44 @@ class Plugin(BasePlugin):
             return tuple(_uid(uid) for uid in (raw_uids or ()) if _uid(uid))
         except Exception:
             return ()
+
+    def _rebase_rolling_snapshot(self, snapshot, uids, request_id):
+        """Rebind unchanged geometry to a proven monotonic GPS suffix."""
+        old_uids = self._normalise_gps_uids(
+            snapshot.get("source_gps_uids", ()) or ())
+        uids = tuple(uids or ())
+        if (not snapshot.get("valid", False)
+                or not gps_uids_are_rolling_suffix(old_uids, uids)
+                or snapshot.get("request_id") != request_id
+                or not snapshot.get("route_build_id")
+                or snapshot.get("source_game_session_id")
+                    != self.sdk.get("game_session_id")
+                or snapshot.get("source_map_key")
+                    != self.sdk.get("active_map_key")
+                or snapshot.get("source_dataset_fingerprint")
+                    != self.sdk.get("active_dataset_fingerprint")):
+            return None, False
+        covered = self._normalise_gps_uids(
+            snapshot.get("covered_gps_uids", ()) or ())
+        covered_index = next((
+            index for index in range(len(covered))
+            if tuple(covered[index:]) == uids[:len(covered) - index]
+        ), None)
+        if covered_index is None:
+            # The truck advanced beyond the geometry horizon. Old points no
+            # longer prove the current route and must not be retained.
+            return None, False
+        remaining_covered = covered[covered_index:]
+        rebased = dict(snapshot)
+        rebased["source_gps_uids"] = [int(uid) for uid in uids]
+        rebased["covered_gps_uids"] = [int(uid) for uid in remaining_covered]
+        capacity = max(2, int(snapshot.get(
+            "covered_gps_uid_capacity", len(covered)) or len(covered)))
+        rebased["covered_gps_uid_capacity"] = capacity
+        refresh_needed = bool(
+            not snapshot.get("route_horizon_complete", False)
+            and len(remaining_covered) <= max(2, capacity // 3))
+        return rebased, refresh_needed
 
     def _game_gps_navigation_present(self, *, include_snapshot=True):
         """Return whether the game owns navigation, independent of UID health.
@@ -466,7 +506,28 @@ class Plugin(BasePlugin):
         uids = self._normalise_gps_uids(raw_uids)
         signature = uids
         if signature != self._lane_signature:
+            current_snapshot = self.sdk.get("lane_trajectory", {}) or {}
+            rebased, refresh_needed = self._rebase_rolling_snapshot(
+                current_snapshot, uids, self.sdk.get("nav_recalc_request"))
+            if rebased is not None:
+                self._lane_signature = signature
+                self._rolling_route_refresh_needed = bool(refresh_needed)
+                self.sdk.shared_state.update_batch({
+                    "lane_trajectory": rebased,
+                    "nav_path": list(rebased.get("display_points", ()) or ()),
+                    "map_path": list(rebased.get("points", ()) or ()),
+                    "nav_trajectory_revision": rebased.get("revision", -1),
+                })
+                self._lane_authority_identity = (
+                    tuple(rebased["source_gps_uids"]),
+                    rebased["request_id"], rebased["route_build_id"],
+                    rebased["source_game_session_id"],
+                    rebased["source_map_key"],
+                    rebased["source_dataset_fingerprint"],
+                )
+                return self._lane_path
             self._lane_signature = signature
+            self._rolling_route_refresh_needed = False
             self._lane_match = None
             self._lane_localization_current = False
             self._reset_lane_loss()
@@ -520,7 +581,9 @@ class Plugin(BasePlugin):
                 "Vehicle position changed discontinuously", uids,
                 "GPS route is being recalculated", log_failure=False)
             return None
-        needs_build = not bool(current.get("valid", False))
+        needs_build = bool(
+            self._rolling_route_refresh_needed
+            or not current.get("valid", False))
         failure_signature = (uids, str(current.get("failure_reason", "")))
         if (needs_build and self._lane_failure_signature == failure_signature
                 and time.monotonic() < self._lane_retry_at):
@@ -814,6 +877,7 @@ class Plugin(BasePlugin):
             "distance_m": float(trajectory.distance_m), "failure_reason": "",
             "source_gps_uids": [int(uid) for uid in uids],
             "covered_gps_uids": [int(uid) for uid in build_uids],
+            "covered_gps_uid_capacity": len(build_uids),
             "route_horizon_complete": len(build_uids) == len(uids),
             "request_id": build_request,
             "route_build_id": diagnostic.build_id,
@@ -868,6 +932,7 @@ class Plugin(BasePlugin):
         self._lane_path = trajectory
         self._lane_route = Route(control_points, name="gps-lane-trajectory")
         self._lane_failure_signature = None
+        self._rolling_route_refresh_needed = False
         self._last_logged_lane_failure = None
         self._lane_retry_at = 0.0
         self._reset_lane_loss()
@@ -995,6 +1060,7 @@ class Plugin(BasePlugin):
             self._net_attempted = False
             self._net_loading = False
             self._lane_signature = None
+            self._rolling_route_refresh_needed = False
             self._lane_path = None
             self._lane_route = None
             self._lane_match = None

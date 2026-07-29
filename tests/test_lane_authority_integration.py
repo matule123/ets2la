@@ -88,6 +88,70 @@ def build_map_plugin(y=3.0):
 
 
 class LaneAuthorityIntegrationTests(unittest.TestCase):
+    def test_rolling_gps_prefix_does_not_invalidate_valid_snapshot(self):
+        plugin, sdk, point = build_map_plugin()
+        before = dict(sdk.get("lane_trajectory"))
+        revision = before["revision"]
+        route_build_id = before["route_build_id"]
+        points = list(before["points"])
+        request = sdk.get("nav_recalc_request")
+        lane_match = plugin._lane_match
+        batch_count = len(sdk.shared_state.batches)
+
+        sdk.set("game_route_node_uids", [2, 3])
+        plugin._update_lane_trajectory((point.x, point.z), point.heading)
+
+        after = sdk.get("lane_trajectory")
+        self.assertTrue(after["valid"])
+        self.assertEqual(after["revision"], revision)
+        self.assertEqual(after["route_build_id"], route_build_id)
+        self.assertEqual(after["points"], points)
+        self.assertEqual(after["source_gps_uids"], [2, 3])
+        self.assertEqual(after["covered_gps_uids"], [2, 3])
+        self.assertEqual(sdk.get("nav_recalc_request"), request)
+        self.assertEqual(sdk.get("nav_path"), after["display_points"])
+        self.assertEqual(sdk.get("map_path"), after["points"])
+        self.assertEqual(sdk.get("nav_trajectory_revision"), revision)
+        self.assertIs(plugin._lane_match, lane_match)
+        new_batches = sdk.shared_state.batches[batch_count:]
+        self.assertFalse(any(
+            isinstance(batch.get("lane_trajectory"), dict)
+            and not batch["lane_trajectory"].get("valid", False)
+            for batch in new_batches))
+
+    def test_rolling_rebase_refreshes_only_near_horizon_end(self):
+        plugin, sdk, _point = build_map_plugin()
+        snapshot = dict(sdk.get("lane_trajectory"))
+        snapshot.update({
+            "source_gps_uids": list(range(1, 11)),
+            "covered_gps_uids": list(range(1, 7)),
+            "covered_gps_uid_capacity": 6,
+            "route_horizon_complete": False,
+        })
+        rebased, refresh = plugin._rebase_rolling_snapshot(
+            snapshot, tuple(range(5, 11)), sdk.get("nav_recalc_request"))
+        self.assertIsNotNone(rebased)
+        self.assertEqual(rebased["covered_gps_uids"], [5, 6])
+        self.assertTrue(refresh)
+
+    def test_rolling_rebase_rejects_target_or_authority_change(self):
+        plugin, sdk, _point = build_map_plugin()
+        snapshot = dict(sdk.get("lane_trajectory"))
+        request = sdk.get("nav_recalc_request")
+
+        changed_target, _refresh = plugin._rebase_rolling_snapshot(
+            snapshot, (2, 99), request)
+        self.assertIsNone(changed_target)
+
+        changed_request, _refresh = plugin._rebase_rolling_snapshot(
+            snapshot, (2, 3), "different-request")
+        self.assertIsNone(changed_request)
+
+        sdk.set("game_session_id", "different-session")
+        changed_session, _refresh = plugin._rebase_rolling_snapshot(
+            snapshot, (2, 3), request)
+        self.assertIsNone(changed_session)
+
     def test_100_km_gps_route_uses_ordered_rolling_runtime_horizon(self):
         plugin = MapPlugin.__new__(MapPlugin)
         uids = tuple(range(1, 5002))
