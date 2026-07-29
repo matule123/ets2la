@@ -586,9 +586,9 @@ class UltraPilotApp(QMainWindow):
         current = bool(self.state.get("autopilot_active", False))
         desired = not current
         seq = time.time_ns()
-        # Apply immediately for responsive UI, then let Engine authoritatively
-        # acknowledge the explicit desired state (not a second toggle).
-        self.state.set("autopilot_active", desired)
+        # Engine owns the master state. Publishing it directly here allowed the
+        # worker plugin to observe an unvalidated enable before the command was
+        # acknowledged and before an engagement request id existed.
         self.state.set("autopilot_command", {"seq": seq, "enabled": desired})
         self.state.set("autopilot_command_pending", seq)
         if not desired:
@@ -597,7 +597,6 @@ class UltraPilotApp(QMainWindow):
             self.state.set("ctl_throttle", 0.0)
             self.state.set("ctl_brake", 0.0)
         logging.info("Autopilot requested -> %s (command %s)", desired, seq)
-        self._render_start_btn()
 
     def toggle_perf_overlay(self):
         """Show/hide the small floating performance panel."""

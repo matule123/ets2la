@@ -1,5 +1,6 @@
 import os
 import io
+import math
 import struct
 import sys
 import time
@@ -21,9 +22,15 @@ from core.engine import UltraPilotEngine
 from core.controller import (
     Controller as PhysicalController, _discover_blinker_keys,
 )
-from core.navigation.route import Route, K_CTE, K_CTE_CURVE, curve_cte_gain
+from core.navigation.route import (
+    NORMALIZED_STEERING_ANGLE_RAD, TRUCK_WHEELBASE_M, Route, K_CTE,
+    K_CTE_CURVE, curve_cte_gain,
+)
 from core.sdk.scs_controller_writer import SCSControlsWriter, _FIELDS, _SIZE
-from plugins.autopilot.main import Plugin as AutopilotPlugin
+from plugins.autopilot.main import (
+    Plugin as AutopilotPlugin, engagement_lateral_limit,
+    lane_authority_rejection_reason,
+)
 from plugins.lanecontrol.main import Plugin as LaneControlPlugin
 from plugins.map.main import Plugin as MapPlugin
 from sdk.plugin_sdk import (
@@ -109,6 +116,100 @@ def ready_navigation_state(**extra):
 
 
 class ControlSafetyRegressionTests(unittest.TestCase):
+    def test_real_start_match_engages_once_and_stays_enabled(self):
+        # Runtime capture 2026-07-29 09:13:06: lateral=1.1742428 m and
+        # heading error=0.0127 rad. Engine said enabled, then the plugin's old
+        # hidden 1.10 m gate disabled it on the next process tick.
+        state = ready_navigation_state(autopilot_active=False)
+        state.values["lane_trajectory"]["confidence"] = 0.7853809672165706
+        plugin = autopilot({"speed": 15.0, "gear": 3}, state)
+        live_match = {
+            "revision": 7,
+            "lateral_error_m": 1.174242800891218,
+            "heading_error_rad": 0.0126999698872159,
+            "lane_width_m": 4.5,
+        }
+        state.set("lane_match", live_match)
+        plugin.on_tick(0.05)
+        self.assertTrue(state.get("autopilot_navigation_readiness")["ready"])
+
+        state.set("autopilot_active", True)
+        plugin.on_tick(0.05)
+        self.assertTrue(state.get("autopilot_active"))
+        self.assertTrue(plugin._lane_lock_acquired)
+
+    def test_unsafe_start_is_rejected_before_engine_reports_enabled(self):
+        state = ready_navigation_state(autopilot_active=False)
+        state.values["lane_trajectory"]["confidence"] = 0.90
+        plugin = autopilot({"speed": 15.0, "gear": 3}, state)
+        state.set("lane_match", {
+            "revision": 7,
+            "lateral_error_m": 1.60,
+            "heading_error_rad": 0.0,
+            "lane_width_m": 4.5,
+        })
+        plugin.on_tick(0.05)
+        readiness = state.get("autopilot_navigation_readiness")
+        self.assertFalse(readiness["ready"])
+        self.assertIn("not centred", readiness["reason"])
+
+    def test_engagement_gate_is_derived_from_lane_width(self):
+        self.assertAlmostEqual(engagement_lateral_limit({"lane_width_m": 4.5}),
+                               1.50)
+        self.assertAlmostEqual(engagement_lateral_limit({"lane_width_m": 3.0}),
+                               1.00)
+        self.assertAlmostEqual(engagement_lateral_limit({}), 1.10)
+        self.assertAlmostEqual(engagement_lateral_limit(
+            {"lane_width_m": float("nan")}), 1.10)
+
+    def test_enabled_message_waits_for_control_initialization(self):
+        state = ready_navigation_state(
+            autopilot_active=False, nav_active=True, nav_steering=0.1)
+        state.get("lane_match")["lane_width_m"] = 4.5
+        state.set("autopilot_navigation_readiness", {
+            "ready": True, "reason": "", "timestamp": time.monotonic(),
+        })
+        state.set("autopilot_command", {"seq": 71, "enabled": True})
+        engine = UltraPilotEngine.__new__(UltraPilotEngine)
+        engine.shared_state = state
+        engine.controller = Controller()
+        engine._last_autopilot_command = None
+        engine._process_autopilot_command()
+        self.assertTrue(state.get("autopilot_active"))
+        self.assertNotEqual(state.get("autopilot_engagement_confirmed"), 71)
+        self.assertNotEqual(state.get("tts_message"), "Autopilot enabled.")
+
+        plugin = autopilot({"speed": 10.0, "gear": 3}, state)
+        plugin.on_tick(0.05)
+        self.assertEqual(state.get("autopilot_engagement_confirmed"), 71)
+        self.assertEqual(state.get("tts_message"), "Autopilot enabled.")
+
+    def test_neighbour_lane_opposite_heading_and_wrong_deck_fail_closed(self):
+        state = ready_navigation_state()
+        snapshot = state.get("lane_trajectory")
+        lane_a = {"road_uid": 4, "direction": 1, "lane_index": 0}
+        lane_b = {"road_uid": 4, "direction": 1, "lane_index": 1}
+        snapshot["active_lane_id"] = lane_a
+        snapshot["lane_match"].update({
+            "active_lane_id": lane_a, "elevation_layer": 0,
+        })
+        live = dict(snapshot["lane_match"])
+        live.update({"revision": 7, "active_lane_id": lane_b,
+                     "elevation_layer": 0})
+        state.set("lane_match", live)
+        self.assertIn("different GPS lane", lane_authority_rejection_reason(
+            state, snapshot))
+
+        live["active_lane_id"] = lane_a
+        live["heading_error_rad"] = math.radians(179.0)
+        self.assertIn("heading differs", lane_authority_rejection_reason(
+            state, snapshot))
+
+        live["heading_error_rad"] = 0.0
+        live["elevation_layer"] = 3
+        self.assertIn("elevation layer", lane_authority_rejection_reason(
+            state, snapshot))
+
     def test_steering_unwinds_faster_than_it_winds_into_curve(self):
         plugin = autopilot({"speed": 10.0, "gear": 3}, State())
         plugin._last_steering = 0.40

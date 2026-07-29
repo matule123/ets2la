@@ -110,6 +110,41 @@ class Plugin(BasePlugin):
             "connector_path": list(lane_id.connector_path),
         }
 
+    def _lane_runtime_metadata(self, lane_id):
+        """Return immutable control metadata for the exact localized lane."""
+        index = getattr(self.road_net, "_lane_id_index", {}) or {}
+        segment = index.get(lane_id)
+        if segment is None:
+            return {"lane_width_m": None, "elevation_layer": None}
+        try:
+            width = float(segment.width_m)
+            if not math.isfinite(width) or width <= 0.0:
+                width = None
+        except (TypeError, ValueError, OverflowError):
+            width = None
+        return {
+            "lane_width_m": width,
+            "elevation_layer": int(segment.elevation_layer),
+        }
+
+    def _lane_match_payload(self, match, revision):
+        metadata = self._lane_runtime_metadata(match.lane_id)
+        return {
+            "revision": int(revision),
+            "valid": True,
+            "active_lane_id": self._lane_id_payload(match.lane_id),
+            "point": [float(match.point.x), float(match.point.y),
+                      float(match.point.z)],
+            "lateral_error_m": float(match.lateral_error_m),
+            "heading_error_rad": float(match.heading_error_rad),
+            "vertical_error_m": float(match.vertical_error_m),
+            "score": float(match.score),
+            "confidence": float(match.confidence),
+            "score_components": dict(match.score_components),
+            "switch_reason": match.switch_reason,
+            **metadata,
+        }
+
     def _next_lane_revision(self):
         shared_revision = int(self.sdk.get(
             "lane_trajectory_revision", 0) or 0)
@@ -723,20 +758,8 @@ class Plugin(BasePlugin):
         if not needs_build and self._lane_path is not None:
             # Keep the geometry snapshot immutable. Runtime localization and
             # liveness are published separately under the same revision.
-            self.sdk.set("lane_match", {
-                "revision": self._lane_revision,
-                "valid": True,
-                "active_lane_id": self._lane_id_payload(match.lane_id),
-                "point": [float(match.point.x), float(match.point.y),
-                          float(match.point.z)],
-                "lateral_error_m": float(match.lateral_error_m),
-                "heading_error_rad": float(match.heading_error_rad),
-                "vertical_error_m": float(match.vertical_error_m),
-                "score": float(match.score),
-                "confidence": float(match.confidence),
-                "score_components": dict(match.score_components),
-                "switch_reason": match.switch_reason,
-            })
+            self.sdk.set("lane_match", self._lane_match_payload(
+                match, self._lane_revision))
             self.sdk.shared_state.update_batch({
                 "lane_trajectory_heartbeat": time.monotonic(),
                 "navigation_unreliable": False,
@@ -843,6 +866,7 @@ class Plugin(BasePlugin):
                 build_revision)
             return None
         revision = diagnostic.revision
+        live_match_payload = self._lane_match_payload(match, revision)
         control_points = [[float(p.x), float(p.y), float(p.z)]
                           for p in trajectory.points]
         # Phase 4 requires controller, HUD and AR to consume geometrically
@@ -862,17 +886,7 @@ class Plugin(BasePlugin):
                 "threshold": CONFIDENCE_THRESHOLD,
             },
             "active_lane_id": self._lane_id_payload(match.lane_id),
-            "lane_match": {
-                "point": [float(match.point.x), float(match.point.y),
-                          float(match.point.z)],
-                "lateral_error_m": float(match.lateral_error_m),
-                "heading_error_rad": float(match.heading_error_rad),
-                "vertical_error_m": float(match.vertical_error_m),
-                "score": float(match.score),
-                "confidence": float(match.confidence),
-                "score_components": dict(match.score_components),
-                "switch_reason": match.switch_reason,
-            },
+            "lane_match": dict(live_match_payload),
             "points": control_points, "display_points": display_points,
             "distance_m": float(trajectory.distance_m), "failure_reason": "",
             "source_gps_uids": [int(uid) for uid in uids],
@@ -898,6 +912,7 @@ class Plugin(BasePlugin):
             "map_path": control_points,
             "nav_trajectory_revision": revision,
             "lane_trajectory_heartbeat": time.monotonic(),
+            "lane_match": live_match_payload,
             "navigation_source": "gps_lane",
             "recorded_route_active": False,
             # A new revision must never coexist with steering derived from the
@@ -1454,8 +1469,47 @@ class Plugin(BasePlugin):
                 # Applying the generic road-centre offset once more moved the
                 # target towards the median (and made HUD and steering disagree
                 # with the truck's actual lane).
+                # LaneLocator and steering consume the same authoritative lane
+                # identity. Its signed error is opposite Route's CTE sign.
+                live_match = self.sdk.get("lane_match", {}) or {}
+                lane_payload = self._lane_id_payload(
+                    self._lane_match.lane_id if self._lane_match else None)
+                metadata = self._lane_runtime_metadata(
+                    self._lane_match.lane_id if self._lane_match else None)
+                snapshot_match = snapshot.get("lane_match", {}) or {}
+                same_lane_authority = bool(
+                    self._lane_match is not None
+                    and metadata["lane_width_m"] is not None
+                    and metadata["elevation_layer"] is not None
+                    and live_match.get("valid", False)
+                    and int(live_match.get("revision", -1) or -1)
+                        == int(snapshot.get("revision", -2) or -2)
+                    and live_match.get("active_lane_id") == lane_payload
+                    and snapshot.get("active_lane_id") == lane_payload
+                    and live_match.get("elevation_layer")
+                        == metadata["elevation_layer"]
+                    and snapshot_match.get("elevation_layer")
+                        == metadata["elevation_layer"]
+                    and live_match.get("lane_width_m")
+                        == metadata["lane_width_m"]
+                    and snapshot_match.get("lane_width_m")
+                        == metadata["lane_width_m"])
+                if not same_lane_authority:
+                    self.sdk.shared_state.update_batch({
+                        "nav_active": False, "nav_steering": 0.0,
+                    })
+                    self.tags.nav_steering = 0.0
+                    return
+                live_cte = -float(live_match["lateral_error_m"])
+                if not math.isfinite(live_cte):
+                    self.sdk.shared_state.update_batch({
+                        "nav_active": False, "nav_steering": 0.0,
+                    })
+                    self.tags.nav_steering = 0.0
+                    return
                 steer = route.steering(pos, heading, speed,
-                                       lane_offset_m=0.0)
+                                       lane_offset_m=0.0,
+                                       cross_track_error_m=live_cte)
                 # Safety: if the truck is far from the snapped path (wrong map
                 # dataset, or we're off-road on a ferry / car park), the CTE is
                 # huge and Stanley saturates to full-lock. Detect that and

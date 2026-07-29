@@ -468,13 +468,21 @@ class UltraPilotEngine:
                     self.shared_state.set(
                         "navigation_status",
                         f"Autopilot zablokovaný: {rejection_reason}")
-            self.shared_state.set("autopilot_active", new_state)
             msg = (f"Autopilot unavailable: {rejection_reason}"
                    if rejection_reason else
-                   ("Autopilot enabled." if new_state
+                   ("Autopilot activation requested." if new_state
                     else "Autopilot disabled."))
+            request_id = time.monotonic_ns() if new_state else None
+            # Publish the request and its preliminary message together. The
+            # worker cannot confirm control initialization and then have this
+            # older message overwrite its final "enabled" confirmation.
+            self.shared_state.update_batch({
+                "autopilot_active": new_state,
+                "autopilot_engagement_request": request_id,
+                "autopilot_engagement_confirmed": None,
+                "tts_message": msg,
+            })
             logging.info("Hotkey N -> %s", msg)
-            self.shared_state.set("tts_message", msg)
             if not new_state:
                 self.controller.release_all()
                 self._was_active = False
@@ -521,7 +529,11 @@ class UltraPilotEngine:
             self.shared_state.set(
                 "navigation_status",
                 f"Autopilot zablokovaný: {rejection_reason}")
-        self.shared_state.set("autopilot_active", desired)
+        self.shared_state.update_batch({
+            "autopilot_active": desired,
+            "autopilot_engagement_request": seq if desired else None,
+            "autopilot_engagement_confirmed": None,
+        })
         if not desired:
             self.controller.release_all()
             self._was_active = False
@@ -535,7 +547,7 @@ class UltraPilotEngine:
         self.shared_state.set("autopilot_command_ack", seq)
         self.shared_state.set("autopilot_command_pending", None)
         logging.info("Autopilot %s (command acknowledged).",
-                     "enabled" if desired else "disabled")
+                     "activation requested" if desired else "disabled")
 
     def _camera_diagnostic(self, snapshot, game_active=True):
         """Publish/log camera readiness at most once per second."""

@@ -7,8 +7,8 @@ from core.navigation.runtime_preflight import CONFIDENCE_THRESHOLD
 
 
 # --- Tuning (kept here, mirrored into settings under "autopilot" section) -----
-STEER_RATE_LIMIT = 0.16      # rate for adding steering into a confirmed bend
-STEER_UNWIND_RATE = 0.48     # release lock promptly after the apex / CTE crossing
+STEER_RATE_LIMIT = 0.60      # acquire confirmed curve steering before lane drift
+STEER_UNWIND_RATE = 1.80     # release confirmed lock faster than it is acquired
 MIN_LANE_TRAJECTORY_CONFIDENCE = CONFIDENCE_THRESHOLD
 # 0.72 rejects ambiguous/off-route matches while retaining a wide margin below
 # ProMods-1.59 centre samples (min 0.895, p05 0.950, median 0.966) and
@@ -22,6 +22,9 @@ BRAKE_MIN_HOLD = 0.04        # below this, treat brake as zero (avoid flutter)
 THROTTLE_RAMP = 3.0          # throttle slew rate per second
 DRIVE_ENGAGE_SETTLE_S = 0.45 # allow the selector pulse to reach the gearbox
 DRIVE_RETRY_S = 1.50         # retry D without blocking throttle indefinitely
+ENGAGEMENT_DEFAULT_LATERAL_M = 1.10
+ENGAGEMENT_MAX_LATERAL_M = 1.50
+ENGAGEMENT_MAX_HEADING_RAD = math.radians(18.0)
 
 # Anticipatory curve braking (Fáza 3c). The lateral acceleration a truck can
 # hold comfortably is ~2.5 m/s²; the safe speed for a bend of radius R is
@@ -83,6 +86,17 @@ def lane_authority_rejection_reason(state, snapshot, now=None):
                              or snapshot_revision)
         if match_revision != snapshot_revision:
             return "live lane localisation belongs to a stale trajectory"
+        snapshot_lane_id = snapshot.get("active_lane_id")
+        live_lane_id = live_match.get("active_lane_id")
+        if (snapshot_lane_id is not None and live_lane_id is not None
+                and live_lane_id != snapshot_lane_id):
+            return "live localisation belongs to a different GPS lane"
+        snapshot_layer = (snapshot.get("lane_match") or {}).get(
+            "elevation_layer")
+        live_layer = live_match.get("elevation_layer")
+        if (snapshot_layer is not None and live_layer is not None
+                and int(live_layer) != int(snapshot_layer)):
+            return "live localisation belongs to a different elevation layer"
         lateral = abs(float(live_match.get("lateral_error_m", 0.0) or 0.0))
         heading = abs(float(live_match.get("heading_error_rad", 0.0) or 0.0))
         if not math.isfinite(lateral) or lateral > 1.80:
@@ -130,6 +144,23 @@ def recorded_route_rejection_reason(state):
     except (TypeError, ValueError, OverflowError):
         return "recorded route metadata is malformed"
     return ""
+
+
+def engagement_lateral_limit(live_match):
+    """Return a lane-width-aware initial localisation gate in metres.
+
+    The central two thirds of the measured lane are eligible for engagement.
+    A missing width (old shared state) retains the former conservative 1.10 m
+    gate, while unusually wide lanes can never relax beyond 1.50 m.
+    """
+    try:
+        width = float((live_match or {}).get("lane_width_m"))
+    except (TypeError, ValueError, OverflowError):
+        return ENGAGEMENT_DEFAULT_LATERAL_M
+    if not math.isfinite(width) or width < 2.4 or width > 12.0:
+        return ENGAGEMENT_DEFAULT_LATERAL_M
+    return min(ENGAGEMENT_MAX_LATERAL_M,
+               max(0.60, width / 3.0))
 
 
 class Plugin(BasePlugin):
@@ -263,29 +294,30 @@ class Plugin(BasePlugin):
         if not active_requested:
             self._lane_lock_acquired = False
             self._drive_engage_started = 0.0
-        elif (gps_navigation_present and not authority_reason
-              and not self._lane_lock_acquired):
+        if (gps_navigation_present and not authority_reason
+                and not self._lane_lock_acquired):
             live_match = (self.sdk.shared_state.get("lane_match")
                           or snapshot.get("lane_match"))
             # Legacy/offline consumers can exercise confidence handling
             # without runtime localisation. In the game, map always publishes
             # lane_match and the strict engagement gate below is mandatory.
             if not live_match:
-                self._lane_lock_acquired = True
-                live_match = {}
-            try:
-                engage_lateral = abs(float(
-                    live_match.get("lateral_error_m", float("inf"))))
-                engage_heading = abs(float(
-                    live_match.get("heading_error_rad", float("inf"))))
-            except (TypeError, ValueError, OverflowError):
-                engage_lateral = engage_heading = float("inf")
+                engage_lateral = engage_heading = 0.0
+            else:
+                try:
+                    engage_lateral = abs(float(
+                        live_match.get("lateral_error_m", float("inf"))))
+                    engage_heading = abs(float(
+                        live_match.get("heading_error_rad", float("inf"))))
+                except (TypeError, ValueError, OverflowError):
+                    engage_lateral = engage_heading = float("inf")
+            engage_lateral_limit = engagement_lateral_limit(live_match)
             if (not self._lane_lock_acquired
-                    and (engage_lateral > 1.10
-                         or engage_heading > math.radians(18.0))):
+                    and (engage_lateral > engage_lateral_limit
+                         or engage_heading > ENGAGEMENT_MAX_HEADING_RAD)):
                 authority_reason = (
                     "truck is not centred and aligned in the confirmed GPS lane")
-            elif not self._lane_lock_acquired:
+            elif active_requested and not self._lane_lock_acquired:
                 self._lane_lock_acquired = True
         navigation_authority_safe = not authority_reason
         self.sdk.shared_state.set(
@@ -612,6 +644,28 @@ class Plugin(BasePlugin):
 
         self.sdk.controller.set_steering(steering_val)
 
+        # Confirm engagement only after this plugin has accepted the exact
+        # navigation authority and initialized/applied a safe control output.
+        # The engine may acknowledge the user's request earlier, but must not
+        # claim that the autopilot is enabled before this handshake exists.
+        engagement_request = self.sdk.shared_state.get(
+            "autopilot_engagement_request")
+        engagement_confirmed = self.sdk.shared_state.get(
+            "autopilot_engagement_confirmed")
+        lane_authority_confirmed = bool(
+            authority_source == "recorded_route" or self._lane_lock_acquired)
+        if (active and nav_active and lane_authority_confirmed
+                and engagement_request is not None
+                and engagement_request != engagement_confirmed):
+            self.sdk.shared_state.update_batch({
+                "autopilot_engagement_confirmed": engagement_request,
+                "navigation_status": "Autopilot zapnutý",
+                "tts_message": "Autopilot enabled.",
+            })
+            logging.info(
+                "Autopilot enabled after navigation authority and control "
+                "initialization (request %s).", engagement_request)
+
         # NOTE: turn signals are NOT driven from steering here anymore. Tying the
         # blinkers to the steering value made them flicker on every curve and —
         # worse — toggle a "lane change" during obstacle avoidance, which is
@@ -649,9 +703,14 @@ class Plugin(BasePlugin):
         """
         target = float(np.clip(target, -1.0, 1.0))
         current = float(self._last_steering)
-        unwinding = (abs(target) < abs(current)
-                     or (current * target < 0.0))
+        reversing = current * target < 0.0
+        unwinding = abs(target) < abs(current) or reversing
         rate = STEER_UNWIND_RATE if unwinding else STEER_RATE_LIMIT
         max_step = rate * max(dt, 1e-3)
+        if reversing:
+            # Release the old lock first; do not cross zero at the fast unwind
+            # rate and apply an opposite command in the same control frame.
+            return float(max(0.0, current - max_step)
+                         if current > 0.0 else min(0.0, current + max_step))
         delta = float(np.clip(target - self._last_steering, -max_step, max_step))
         return float(np.clip(self._last_steering + delta, -1.0, 1.0))

@@ -14,7 +14,9 @@ from core.navigation.lane_model import (
 )
 from core.navigation.lane_trajectory import build_lane_trajectory
 from core.navigation.road_network import RoadNetwork
-from core.navigation.route import Route
+from core.navigation.route import (
+    NORMALIZED_STEERING_ANGLE_RAD, TRUCK_WHEELBASE_M, Route,
+)
 from plugins.autopilot.main import Plugin as AutopilotPlugin
 from tests.test_lane_authority_integration import (
     Controller, MapSDK, State, Tags, Telemetry, build_map_plugin,
@@ -56,6 +58,199 @@ def autopilot_state(confidence, *, valid=True, heartbeat=None,
 
 
 class LaneGeometryAuditTests(unittest.TestCase):
+    @staticmethod
+    def _arc(direction, radius=100.0, length_m=100.0):
+        return [
+            (direction * (radius - radius * math.cos(s / radius)),
+             radius * math.sin(s / radius))
+            for s in range(0, int(length_m) + 1, 2)
+        ]
+
+    @staticmethod
+    def _path_heading(first, second):
+        return math.atan2(-(second[0] - first[0]),
+                          -(second[1] - first[1]))
+
+    def test_straight_left_right_and_feedforward_units(self):
+        straight = Route([(0.0, 0.0), (0.0, 50.0), (0.0, 100.0)])
+        self.assertAlmostEqual(straight.steering(
+            (0.0, 10.0), math.pi, 15.0), 0.0, places=7)
+
+        for direction in (-1.0, 1.0):
+            with self.subTest(direction=direction):
+                radius = 100.0
+                route = Route(self._arc(direction, radius, 140.0))
+                pos = route.points[10]
+                tangent = route.lookahead_point(10, pos, 6.0)
+                heading = self._path_heading(pos, tangent)
+                curvature = route.signed_curvature_ahead(pos, heading, 12.0)
+                steering = route.steering(
+                    pos, heading, 15.0, cross_track_error_m=0.0)
+                # Positive X is left of +Z travel in ETS world coordinates;
+                # therefore ``direction=+1`` is a left bend and must command
+                # negative steering (positive controller output is right).
+                self.assertEqual(math.copysign(1.0, steering), -direction)
+                # Curvature is 1/metre; wheelbase*curvature is dimensionless,
+                # atan returns radians, and division maps it to controller
+                # normalized steering units.
+                expected = (math.atan(TRUCK_WHEELBASE_M * curvature)
+                            / NORMALIZED_STEERING_ANGLE_RAD)
+                self.assertAlmostEqual(steering, expected, delta=0.025)
+
+    def test_live_lane_cte_replaces_not_duplicates_route_cte(self):
+        route = Route([(0.0, 0.0), (0.0, 100.0), (0.0, 200.0)])
+        # The geometric CTE is deliberately large and opposite to the supplied
+        # live LaneMatch CTE. Supplying the latter must be the only CTE term.
+        supplied = route.steering(
+            (4.0, 20.0), math.pi, 10.0, cross_track_error_m=0.4)
+        reference = route.steering(
+            (0.4, 20.0), math.pi, 10.0, cross_track_error_m=0.4)
+        self.assertAlmostEqual(supplied, reference, places=7)
+
+    def test_lane_local_and_route_cte_signs_are_opposites_in_both_curves(self):
+        class Network:
+            def __init__(self, segment):
+                self.segment = segment
+
+            def lane_segments_near(self, _position, _radius):
+                return [self.segment]
+
+            def altitude_near(self, _position):
+                return 0.0
+
+            @staticmethod
+            def lanes_connected(first, second):
+                return first == second
+
+        for direction in (-1.0, 1.0):
+            with self.subTest(direction=direction):
+                coordinates = self._arc(direction, 100.0, 100.0)
+                lane_id = LaneId(90 + int(direction), 1, 0)
+                lane_points = []
+                travelled = 0.0
+                for index, point in enumerate(coordinates):
+                    if index:
+                        travelled += math.dist(coordinates[index-1], point)
+                    next_point = coordinates[min(index+1, len(coordinates)-1)]
+                    previous = coordinates[max(0, index-1)]
+                    lane_points.append(LanePoint(
+                        point[0], 0.0, point[1], travelled,
+                        self._path_heading(previous, next_point),
+                        lane_id=lane_id))
+                segment = LaneSegment(
+                    lane_id, 1, 2, 1, 0, 1, 4.5, "derived", 0,
+                    "look", "road", tuple(lane_points),
+                    gps_uids=frozenset((1, 2)))
+                route = Route(coordinates)
+                index = 20
+                first, second = coordinates[index], coordinates[index+1]
+                dx, dz = second[0]-first[0], second[1]-first[1]
+                length = math.hypot(dx, dz)
+                offset = 0.8
+                position = (first[0] - dz/length*offset,
+                            first[1] + dx/length*offset)
+                heading = self._path_heading(first, second)
+                match = LaneLocator(Network(segment)).locate(
+                    (position[0], 0.0, position[1]), heading, (1, 2))
+                self.assertIsNotNone(match)
+                route_cte = route.cross_track_error(
+                    route.tracking_index(position, heading), position)
+                self.assertAlmostEqual(
+                    route_cte, -match.lateral_error_m, delta=0.03)
+
+    def test_s_curve_changes_steering_sign_without_stale_lock(self):
+        x, z, heading = 0.0, 0.0, math.pi
+        points = [(x, z)]
+        step = 2.0
+        for index in range(96):
+            curvature = (1.0 / 120.0 if index < 48 else -1.0 / 120.0)
+            heading -= curvature * step
+            x += -math.sin(heading) * step
+            z += -math.cos(heading) * step
+            points.append((x, z))
+        route = Route(points)
+        commands = []
+        for index in range(4, len(route.points) - 8, 3):
+            pos = route.points[index]
+            tangent = route.points[index + 2]
+            commands.append(route.steering(
+                pos, self._path_heading(pos, tangent), 12.0,
+                cross_track_error_m=0.0))
+        self.assertTrue(any(value > 0.03 for value in commands))
+        self.assertTrue(any(value < -0.03 for value in commands))
+        crossings = [i for i, (a, b) in enumerate(zip(commands, commands[1:]))
+                     if a*b <= 0.0]
+        self.assertTrue(crossings)
+
+    def test_speed_schedule_is_stable_at_crawl_and_motorway_speed(self):
+        route = Route(self._arc(1.0, 160.0, 160.0))
+        pos = route.points[15]
+        heading = self._path_heading(pos, route.points[18])
+        centred = [route.steering(
+            pos, heading, speed, cross_track_error_m=0.0)
+            for speed in (0.5, 5.0, 12.0, 25.0)]
+        self.assertTrue(all(math.isfinite(value) for value in centred))
+        self.assertTrue(all(abs(value) <= 0.7 for value in centred))
+        low = route.steering(pos, heading, 3.0, cross_track_error_m=0.8)
+        high = route.steering(pos, heading, 25.0, cross_track_error_m=0.8)
+        self.assertLessEqual(abs(high), abs(low) + 1e-6)
+
+    def test_s_curve_closed_loop_stays_inside_lane_at_multiple_speeds(self):
+        x, z, heading = 0.0, 0.0, math.pi
+        points = [(x, z)]
+        for index in range(250):
+            curvature = (1.0 / 160.0 if index < 125 else -1.0 / 160.0)
+            heading -= curvature * 2.0
+            x += -math.sin(heading) * 2.0
+            z += -math.cos(heading) * 2.0
+            points.append((x, z))
+        for speed in (5.0, 12.0, 20.0, 25.0):
+            with self.subTest(speed=speed):
+                route = Route(points)
+                plugin = AutopilotPlugin.__new__(AutopilotPlugin)
+                plugin._last_steering = 0.0
+                x, z, heading = 0.0, 0.0, math.pi
+                errors = []
+                for _ in range(int(400.0 / speed / 0.05)):
+                    target = route.steering((x, z), heading, speed)
+                    plugin._last_steering = plugin._ramp_steering(
+                        target, 0.05)
+                    heading -= (speed / 5.0
+                                * plugin._last_steering * 0.18 * 0.05)
+                    x += -math.sin(heading) * speed * 0.05
+                    z += -math.cos(heading) * speed * 0.05
+                    index = route.tracking_index((x, z), heading)
+                    errors.append(route.cross_track_error(index, (x, z)))
+                # The centre of a 4.5 m lane remains at least 0.75 m from its
+                # edge even through the steering sign reversal at 90 km/h.
+                self.assertLess(max(map(abs, errors)), 1.50)
+                self.assertLess(abs(errors[-1]), 0.30)
+
+    def test_prefab_merge_split_and_roundabout_geometry_stays_local(self):
+        paths = {
+            "road-prefab-road": [
+                (0.0, 0.0), (0.0, 20.0), (-1.0, 30.0),
+                (-4.0, 40.0), (-5.0, 50.0), (-5.0, 70.0)],
+            "merge-split": [
+                (0.0, 0.0), (0.0, 20.0), (1.0, 30.0),
+                (2.0, 40.0), (2.0, 60.0), (1.0, 70.0), (0.0, 80.0)],
+            "roundabout": self._arc(1.0, 35.0, 120.0),
+        }
+        for label, points in paths.items():
+            with self.subTest(label=label):
+                route = Route(points)
+                commands = []
+                progresses = []
+                for index in range(len(points) - 1):
+                    heading = self._path_heading(points[index], points[index+1])
+                    commands.append(route.steering(
+                        points[index], heading, 8.0,
+                        cross_track_error_m=0.0))
+                    progresses.append(route._tracking_projection(
+                        points[index], heading)[2])
+                self.assertTrue(all(math.isfinite(v) and abs(v) <= 0.7
+                                    for v in commands))
+                self.assertEqual(progresses, sorted(progresses))
     def test_route_tracking_cannot_jump_to_later_overlapping_arm(self):
         # The final arm deliberately runs almost on top of the first one in the
         # same direction. Once the truck acquired segment 0, a few centimetres
@@ -105,6 +300,38 @@ class LaneGeometryAuditTests(unittest.TestCase):
         self.assertGreater(min(errors), -0.50)
         self.assertLessEqual(crossings, 4)
         self.assertLess(max(abs(error) for error in errors[-100:]), 0.06)
+
+    def test_confirmed_curves_hold_lane_centre_on_both_sides(self):
+        # The old 70 m chord-heading plus a 0.16/s steering ramp reproduced
+        # the real failure: 2-7 m of drift on 80-120 m bends. Exercise the
+        # complete Route target + Autopilot ramp in both turn directions.
+        plugin = AutopilotPlugin.__new__(AutopilotPlugin)
+        speed, dt, wheelbase = 12.0, 0.05, 5.0
+        for direction in (-1.0, 1.0):
+            for radius in (80.0, 120.0):
+                with self.subTest(direction=direction, radius=radius):
+                    points = [
+                        (direction * (radius - radius * math.cos(i * 2 / radius)),
+                         radius * math.sin(i * 2 / radius))
+                        for i in range(180)
+                    ]
+                    route = Route(points)
+                    x, z, heading = 0.0, 0.0, math.pi
+                    plugin._last_steering = 0.0
+                    errors = []
+                    for _ in range(200):
+                        target = route.steering((x, z), heading, speed)
+                        plugin._last_steering = plugin._ramp_steering(
+                            target, dt)
+                        heading -= (speed / wheelbase
+                                    * (plugin._last_steering * 0.18) * dt)
+                        x += -math.sin(heading) * speed * dt
+                        z += -math.cos(heading) * speed * dt
+                        index = route.tracking_index((x, z), heading)
+                        errors.append(route.cross_track_error(index, (x, z)))
+                    self.assertLess(max(map(abs, errors)), 0.70)
+                    self.assertLess(
+                        sum(map(abs, errors[-40:])) / 40.0, 0.25)
 
     def test_runtime_path_rejects_parallel_first_lane_offset(self):
         m = SyntheticMap()
