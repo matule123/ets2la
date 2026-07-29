@@ -10,6 +10,9 @@ def line_icon(name: str, color="#4B5563", size=22) -> QIcon:
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    # All paths below use a 22×22 design grid. Scale the painter rather than
+    # only enlarging the canvas; otherwise 24/30 px icons sit visibly high-left.
+    p.scale(float(size) / 22.0, float(size) / 22.0)
     pen = QPen()
     pen.setColor(QColor(color))
     pen.setWidthF(1.7)
@@ -42,15 +45,28 @@ def line_icon(name: str, color="#4B5563", size=22) -> QIcon:
         p.drawLine(QPointF(17.5, 17.5), QPointF(17.5, 10.5))
         p.drawLine(QPointF(3.0, 18.5), QPointF(19.0, 18.5))
     elif name == "autopilot":
-        p.drawEllipse(QRectF(4.0, 4.0, 14.0, 14.0))
-        p.drawEllipse(QRectF(9.0, 9.0, 4.0, 4.0))
-        p.drawLine(QPointF(6.0, 8.0), QPointF(9.3, 10.1))
-        p.drawLine(QPointF(16.0, 8.0), QPointF(12.7, 10.1))
-        p.drawLine(QPointF(11.0, 13.0), QPointF(11.0, 17.0))
+        # Lane-assist mark: the master action is clearer as a road/heading
+        # symbol than as a steering wheel (which looked like a settings dial).
+        p.drawLine(QPointF(5.0, 19.0), QPointF(8.0, 3.5))
+        p.drawLine(QPointF(17.0, 19.0), QPointF(14.0, 3.5))
+        p.drawLine(QPointF(11.0, 18.5), QPointF(11.0, 14.5))
+        p.drawLine(QPointF(11.0, 11.0), QPointF(11.0, 7.0))
+        p.drawPolygon(QPolygonF([QPointF(8.7, 8.5), QPointF(11.0, 5.5),
+                                 QPointF(13.3, 8.5)]))
+    elif name == "steering":
+        p.drawArc(QRectF(4.0, 4.0, 14.0, 14.0), 20 * 16, 140 * 16)
+        p.drawArc(QRectF(4.0, 4.0, 14.0, 14.0), 200 * 16, 140 * 16)
+        p.drawLine(QPointF(7.0, 12.0), QPointF(15.0, 12.0))
+        p.drawLine(QPointF(11.0, 12.0), QPointF(11.0, 17.2))
+        p.drawEllipse(QRectF(9.2, 10.2, 3.6, 3.6))
     elif name == "settings":
-        p.drawEllipse(QRectF(5,5,12,12)); p.drawEllipse(QRectF(9,9,4,4))
-        for a,b,c,d in ((11,2,11,5),(11,17,11,20),(2,11,5,11),(17,11,20,11),(4,4,6,6),(16,16,18,18),(18,4,16,6),(4,18,6,16)):
-            p.drawLine(a,b,c,d)
+        # Three balanced tuning sliders avoid the generic gear icon and match
+        # the controls users actually find on the page.
+        for y, knob_x in ((5.5, 8.0), (11.0, 14.0), (16.5, 10.5)):
+            p.drawLine(QPointF(3.5, y), QPointF(18.5, y))
+            p.setBrush(QColor(color))
+            p.drawEllipse(QRectF(knob_x - 1.8, y - 1.8, 3.6, 3.6))
+            p.setBrush(Qt.BrushStyle.NoBrush)
     elif name == "about":
         p.drawEllipse(QRectF(4,4,14,14)); p.drawLine(11,10,11,16); p.drawPoint(11,7)
     else:

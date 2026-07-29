@@ -4,7 +4,8 @@ import unittest
 from unittest import mock
 
 from PyQt6.QtCore import QPoint, Qt
-from PyQt6.QtWidgets import QApplication, QWidget, QFrame, QLabel, QStatusBar
+from PyQt6.QtWidgets import (QApplication, QWidget, QFrame, QLabel, QStatusBar,
+                             QPushButton)
 
 from core.theme import palette, stylesheet
 
@@ -13,8 +14,9 @@ from core.theme import palette, stylesheet
 sys.modules.setdefault("ui", importlib.import_module("UI"))
 from UI import app as app_module
 from UI.app import (MacTitleBar, UltraPilotApp, rounded_window_region,
-                    window_control_notch_path)
+                    window_control_notch_path, DashboardPage, AboutPage)
 from UI.icons import line_icon
+from UI.map_page import MapPage
 from UI.perf_overlay import PerfOverlay
 from UI.settings_menu import SettingsMenu
 
@@ -66,7 +68,8 @@ class UiChromeTests(unittest.TestCase):
                          "QPushButton#SidebarPerformance"):
             self.assertIn(selector, css)
         for name in ("dashboard", "navigation", "visualization", "plugins",
-                     "settings", "about", "performance", "autopilot"):
+                     "settings", "about", "performance", "autopilot",
+                     "steering"):
             self.assertFalse(line_icon(name).isNull())
 
     def test_main_window_is_larger_rounded_and_has_no_bottom_status_bar(self):
@@ -100,11 +103,37 @@ class UiChromeTests(unittest.TestCase):
         overlay = PerfOverlay(State({"ui_theme": "light"}))
         self.assertTrue(overlay.testAttribute(
             Qt.WidgetAttribute.WA_TranslucentBackground))
-        self.assertEqual(overlay.width(), 420)
+        self.assertEqual(overlay.width(), 330)
         self.assertEqual(overlay.surface.objectName(), "PerfSurface")
         self.assertIsNotNone(overlay.surface.graphicsEffect())
         self.assertIn("QFrame#PerfSurface", overlay.styleSheet())
+        labels = [label.text() for label in overlay.findChildren(QLabel)]
+        self.assertIn("┌ Plugins", labels)
+        self.assertTrue(any(text.startswith("└ Total:") for text in labels))
         overlay.close()
+
+    def test_navigation_is_game_gps_first_and_live_map_badge_is_visible(self):
+        with mock.patch.object(MapPage, "_populate_maps", autospec=True):
+            page = MapPage(State({"ui_theme": "light"}))
+        labels = [label.text() for label in page.findChildren(QLabel)]
+        buttons = [button.text() for button in page.findChildren(QPushButton)]
+        self.assertIn("●  LIVE MAP", labels)
+        self.assertFalse(any("Record" in text or "Recorded" in text
+                             for text in labels + buttons))
+        self.assertFalse(hasattr(page, "route_combo"))
+        self.assertFalse(hasattr(page, "name_edit"))
+        page.close()
+
+    def test_dashboard_and_about_use_clean_non_emoji_headers(self):
+        state = State({"ui_theme": "light"})
+        dashboard = DashboardPage(state)
+        about = AboutPage(state)
+        self.assertEqual(dashboard.title.text(), "Prehľad")
+        self.assertNotIn("🚀", dashboard.title.text())
+        self.assertEqual(about.title.text(), "O aplikácii")
+        self.assertEqual(len(about.findChildren(QFrame, "AboutFeature")), 3)
+        dashboard.close()
+        about.close()
 
 
 if __name__ == "__main__":

@@ -1,17 +1,13 @@
-import os
 import math
 import time
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit, QComboBox,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
     QProgressBar, QFrame, QSizePolicy,
 )
 from PyQt6.QtGui import QPainter, QColor, QPen, QPolygonF
 from PyQt6.QtCore import Qt, QTimer, QPointF, QPoint, QThread, pyqtSignal
 from core.navigation.navigation_intent import snapshot_matches_navigation_intent
-from core.paths import app_dir
-
-ROUTES_DIR = os.path.join(app_dir(), "routes")
 
 
 def live_map_navigation_points(state, now=None):
@@ -111,7 +107,19 @@ class MapView(QWidget):
         self._drag_at = None
         self.setMinimumHeight(300)
         self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.live_badge = QLabel("●  LIVE MAP", self)
+        self.live_badge.setObjectName("LiveMapBadge")
+        self.live_badge.setStyleSheet(
+            "background:rgba(19,24,28,225);color:#34D399;"
+            "border:1px solid #2F3A3E;border-radius:10px;padding:6px 10px;"
+            "font-size:11px;font-weight:750;")
+        self.live_badge.adjustSize()
         self.apply_theme()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.live_badge.move(14, 14)
+        self.live_badge.raise_()
 
     def reset_view(self):
         self.zoom_radius = 280.0
@@ -198,7 +206,8 @@ class MapView(QWidget):
         if not all_pts:
             qp.setPen(QColor(self._pal['muted']))
             qp.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
-                        "No route loaded.\nRecord or load a route below.")
+                        "Live mapa čaká na polohu kamióna.\n"
+                        "Spusti hru a aktivuj GPS navigáciu.")
             return
 
         minx, maxx, minz, maxz = self._bounds(all_pts)
@@ -292,7 +301,7 @@ class MapView(QWidget):
         return None
 
 class MapPage(QWidget):
-    """Navigation page: record / replay routes and watch the truck follow them."""
+    """Game-GPS navigation, active dataset and authoritative live map."""
 
     def __init__(self, state):
         super().__init__()
@@ -304,62 +313,48 @@ class MapPage(QWidget):
         layout.setSpacing(10)
 
         head = QHBoxLayout()
-        self.title = QLabel("Navigation")
-        self.title.setStyleSheet("font-size:20px;font-weight:700;color:" + self._pal['text'] + ";")
+        self.title = QLabel("Navigácia")
+        self.title.setStyleSheet("font-size:24px;font-weight:800;color:" + self._pal['text'] + ";")
         head.addWidget(self.title)
+        self.title_copy = QLabel("Herná GPS, mapové dáta a živý priebeh trasy")
+        self.title_copy.setStyleSheet("color:" + self._pal['muted'] + ";font-size:12px;margin-left:8px;")
+        head.addWidget(self.title_copy)
         head.addStretch()
-        live = QLabel("●  LIVE MAP")
-        live.setStyleSheet("color:#16A34A;font-size:11px;font-weight:700;")
-        head.addWidget(live)
         layout.addLayout(head)
 
         content = QHBoxLayout()
         content.setSpacing(12)
-        controls = QFrame()
+        self.controls = QFrame()
+        controls = self.controls
         controls.setObjectName("NavigationControls")
-        controls.setFixedWidth(285)
+        controls.setFixedWidth(300)
         controls.setStyleSheet(
-            "#NavigationControls{background:#FFFFFF;border:1px solid #E5E7EB;border-radius:10px;}"
-            "#NavigationControls QLabel{color:#20242A;}"
+            "#NavigationControls{background:" + self._pal['card']
+            + ";border:1px solid " + self._pal['border'] + ";border-radius:12px;}"
         )
         ctl = QVBoxLayout(controls)
         ctl.setContentsMargins(14, 14, 14, 14)
         ctl.setSpacing(9)
 
-        self.status = QLabel("Idle")
+        self.source_cap = QLabel("AKTÍVNA NAVIGÁCIA")
+        self.source_cap.setStyleSheet(
+            "color:#7B818A!important;font-size:10px;font-weight:750;letter-spacing:1px;")
+        ctl.addWidget(self.source_cap)
+        self.status = QLabel("Čakám na hernú GPS trasu")
         self.status.setWordWrap(True)
         self.status.setStyleSheet(
             "background:#F5F6F7;color:#59616C;border-radius:7px;padding:9px;font-size:12px;")
         ctl.addWidget(self.status)
 
-        route_cap = QLabel("ROUTES")
-        route_cap.setStyleSheet("color:#7B818A!important;font-size:10px;font-weight:700;margin-top:5px;")
-        ctl.addWidget(route_cap)
-        self.name_edit = QLineEdit()
-        self.name_edit.setPlaceholderText("Route name")
-        ctl.addWidget(self.name_edit)
-        rec_row = QHBoxLayout()
-        btn_rec = QPushButton("●  Record")
-        btn_stop_rec = QPushButton("■  Save")
-        btn_rec.clicked.connect(self.start_record)
-        btn_stop_rec.clicked.connect(self.stop_record)
-        rec_row.addWidget(btn_rec)
-        rec_row.addWidget(btn_stop_rec)
-        ctl.addLayout(rec_row)
+        self.gps_hint = QLabel(
+            "Cieľ nastav priamo v navigácii hry. UltraPilot automaticky "
+            "použije potvrdenú trasu a rovnakú revíziu zobrazí na HUD, AR aj mape.")
+        self.gps_hint.setWordWrap(True)
+        self.gps_hint.setStyleSheet(
+            "color:#6B7280!important;font-size:11px;line-height:1.3;")
+        ctl.addWidget(self.gps_hint)
 
-        self.route_combo = QComboBox()
-        self.route_combo.setPlaceholderText("Saved routes")
-        ctl.addWidget(self.route_combo)
-        play_row = QHBoxLayout()
-        btn_load = QPushButton("▶  Navigate")
-        btn_clear = QPushButton("■  Stop")
-        btn_load.clicked.connect(self.load_route)
-        btn_clear.clicked.connect(self.stop_nav)
-        play_row.addWidget(btn_load)
-        play_row.addWidget(btn_clear)
-        ctl.addLayout(play_row)
-
-        self.map_title = QLabel("MAP DATASET")
+        self.map_title = QLabel("MAPOVÉ DÁTA")
         self.map_title.setStyleSheet("color:#7B818A;font-size:10px;font-weight:700;margin-top:8px;")
         ctl.addWidget(self.map_title)
         self.map_combo = QComboBox()
@@ -387,7 +382,7 @@ class MapPage(QWidget):
         self.dl_status.setWordWrap(True)
         self.dl_status.setStyleSheet("color:#7B818A!important;font-size:11px;")
         ctl.addWidget(self.dl_status)
-        self.btn_diag = QPushButton("Save last route diagnostic")
+        self.btn_diag = QPushButton("Uložiť poslednú diagnostiku trasy")
         self.btn_diag.clicked.connect(self.save_route_diagnostic)
         self.btn_diag.setEnabled(False)
         ctl.addWidget(self.btn_diag)
@@ -409,15 +404,23 @@ class MapPage(QWidget):
         self.timer = QTimer()
         self.timer.timeout.connect(self.refresh)
         self.timer.start(250)
-        self._last_routes = None
         self._last_diag_export_result = None
 
     def restyle(self, theme):
         """Re-apply palette colours when the theme switches (dark ↔ light)."""
         from core.theme import palette
         self._pal = palette(theme)
-        self.title.setStyleSheet("font-size:20px;font-weight:700;color:" + self._pal['text'] + ";")
-        self.status.setStyleSheet("color: " + self._pal['muted'] + ";")
+        self.title.setStyleSheet("font-size:24px;font-weight:800;color:" + self._pal['text'] + ";")
+        self.title_copy.setStyleSheet(
+            "color:" + self._pal['muted'] + ";font-size:12px;margin-left:8px;")
+        self.controls.setStyleSheet(
+            "#NavigationControls{background:" + self._pal['card']
+            + ";border:1px solid " + self._pal['border'] + ";border-radius:12px;}")
+        self.gps_hint.setStyleSheet(
+            "color:" + self._pal['muted'] + ";font-size:11px;")
+        self.status.setStyleSheet(
+            "background:" + self._pal['card2'] + ";color:" + self._pal['muted']
+            + ";border-radius:8px;padding:10px;font-size:12px;")
         self.map_title.setStyleSheet("color:#7B818A;font-size:10px;font-weight:700;margin-top:8px;")
         self.active_map_lbl.setStyleSheet(
             "color:#FFFFFF;background:#159957;font-size:12px;font-weight:700;"
@@ -562,36 +565,6 @@ class MapPage(QWidget):
                 reason or "Map preparation failed; see the log for details.")
         self._populate_maps()
 
-    # --- Actions --------------------------------------------------------------
-    def start_record(self):
-        name = (self.name_edit.text().strip() or "route").replace(" ", "_")
-        self.state.set("nav_command_result", None)
-        self.state.set("nav_arg", name)
-        self.state.set("nav_cmd", "record")
-        self.status.setText(f"Recording '{name}'… drive the route, then Stop & Save.")
-
-    def stop_record(self):
-        self.state.set("nav_command_result", None)
-        self.state.set("nav_cmd", "stop_record")
-        self.status.setText("Route saved.")
-
-    def load_route(self):
-        name = self.route_combo.currentText()
-        if not name:
-            return
-        self.state.set("nav_command_result", None)
-        self.state.set("nav_arg", name)
-        self.state.set("nav_cmd", "load")
-        # The map plugin validates exclusive ownership. Do not preview JSON
-        # directly here: that drew replay geometry over an active GPS snapshot
-        # even when the plugin correctly rejected the load command.
-        self.status.setText(f"Requesting recorded route '{name}'.")
-
-    def stop_nav(self):
-        self.state.set("nav_command_result", None)
-        self.state.set("nav_cmd", "stop")
-        self.status.setText("Navigation stopped.")
-
     def save_route_diagnostic(self):
         result = self.state.get("route_diagnostic_last_result") or {}
         build_id = result.get("route_build_id")
@@ -636,16 +609,6 @@ class MapPage(QWidget):
         if pose_signature != self._last_pose_signature:
             self._last_pose_signature = pose_signature
             repaint = True
-
-        # Keep the route dropdown in sync with what the map plugin published.
-        routes = self.state.get("nav_routes", []) or []
-        if routes != self._last_routes:
-            self._last_routes = list(routes)
-            current = self.route_combo.currentText()
-            self.route_combo.clear()
-            self.route_combo.addItems(routes)
-            if current in routes:
-                self.route_combo.setCurrentText(current)
 
         command_error = rejected_navigation_command_message(self.state)
         if command_error:

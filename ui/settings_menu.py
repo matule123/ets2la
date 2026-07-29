@@ -167,7 +167,7 @@ class SettingsMenu(QWidget):
 
         # --- Steering Section ---
         steer_frame, steer_layout = self._section_card(
-            "autopilot", "Riadenie",
+            "steering", "Riadenie",
             "Smer a citlivosť výstupu pre volant")
 
         self.invert_toggle = QCheckBox("Obrátiť smer riadenia")

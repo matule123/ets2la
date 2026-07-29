@@ -165,26 +165,97 @@ class AboutPage(Page):
     def __init__(self, state):
         super().__init__(state)
         from core.theme import palette
+        from core.update_check import current_version
         self._pal = palette(state.get("ui_theme", "light") or "light")
-        self.title = QLabel("ℹ️ About UltraPilot")
-        self.title.setStyleSheet("font-size: 24px; font-weight: bold; color: " + self._pal['title'] + "; margin-bottom: 20px;")
+        self.setObjectName("AboutPage")
+        self.title = QLabel("O aplikácii")
+        self.title.setObjectName("PageTitle")
         self.layout.addWidget(self.title)
-        self.text = QLabel(
-            "UltraPilot\n\n"
-            "A professional-grade autopilot for Euro Truck Simulator 2.\n"
-            "Lane Assist, Adaptive Cruise Control, Collision Avoidance, "
-            "Navigation, HUD and Voice — each plugin isolated in its own process."
-        )
-        self.text.setWordWrap(True)
-        self.text.setStyleSheet("font-size: 16px; color: " + self._pal['text'] + ";")
-        self.layout.addWidget(self.text)
+
+        self.hero = QFrame()
+        self.hero.setObjectName("AboutHero")
+        hero_lay = QHBoxLayout(self.hero)
+        hero_lay.setContentsMargins(24, 22, 24, 22)
+        hero_lay.setSpacing(16)
+        logo = QLabel()
+        logo.setFixedSize(58, 58)
+        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        logo.setPixmap(line_icon("autopilot", "#FFFFFF", 38).pixmap(38, 38))
+        logo.setStyleSheet("background:#0E9F6E;border-radius:16px;border:none;")
+        hero_lay.addWidget(logo)
+        hero_text = QVBoxLayout()
+        hero_text.setSpacing(3)
+        product = QLabel("UltraPilot")
+        product.setObjectName("AboutProduct")
+        version = QLabel(f"Verzia {current_version()}  •  Asistent jazdy pre ETS2")
+        version.setObjectName("AboutMeta")
+        summary = QLabel(
+            "Navigácia podľa hernej GPS, udržiavanie v pruhu, adaptívny "
+            "tempomat a bezpečnostné systémy v jednej aplikácii.")
+        summary.setWordWrap(True)
+        summary.setObjectName("AboutSummary")
+        hero_text.addWidget(product)
+        hero_text.addWidget(version)
+        hero_text.addSpacing(5)
+        hero_text.addWidget(summary)
+        hero_lay.addLayout(hero_text, 1)
+        self.layout.addWidget(self.hero)
+
+        cards = QHBoxLayout()
+        cards.setSpacing(12)
+        self._about_cards = []
+        for icon_name, heading, detail in (
+                ("navigation", "Navigácia", "Trasa z hernej GPS a presná strednica jazdného pruhu."),
+                ("autopilot", "Asistencia", "Riadenie, odstup a bezpečné zastavenie pod jednou autoritou."),
+                ("visualization", "Zobrazenie", "HUD, AR a live mapa používajú rovnakú revíziu trasy.")):
+            card = QFrame()
+            card.setObjectName("AboutFeature")
+            row = QVBoxLayout(card)
+            row.setContentsMargins(17, 16, 17, 16)
+            icon = QLabel()
+            icon.setPixmap(line_icon(icon_name, "#0E9F6E", 24).pixmap(24, 24))
+            icon.setFixedHeight(28)
+            name = QLabel(heading)
+            name.setObjectName("AboutFeatureTitle")
+            copy = QLabel(detail)
+            copy.setWordWrap(True)
+            copy.setObjectName("AboutFeatureText")
+            row.addWidget(icon)
+            row.addWidget(name)
+            row.addWidget(copy)
+            row.addStretch()
+            cards.addWidget(card, 1)
+            self._about_cards.append(card)
+        self.layout.addLayout(cards)
+
+        self.note = QLabel(
+            "UltraPilot spracúva hernú telemetriu lokálne. Ide o pomocný systém "
+            "pre videohru — jazdu maj vždy pod dohľadom.")
+        self.note.setWordWrap(True)
+        self.note.setObjectName("AboutNotice")
+        self.layout.addWidget(self.note)
         self.layout.addStretch()
+        self.restyle(state.get("ui_theme", "light") or "light")
 
     def restyle(self, theme):
         from core.theme import palette
         self._pal = palette(theme)
-        self.title.setStyleSheet("font-size: 24px; font-weight: bold; color: " + self._pal['title'] + "; margin-bottom: 20px;")
-        self.text.setStyleSheet("font-size: 16px; color: " + self._pal['text'] + ";")
+        p = self._pal
+        self.setStyleSheet(
+            "QWidget#AboutPage{background:" + p['bg'] + ";}"
+            "QLabel#PageTitle{font-size:24px;font-weight:800;color:" + p['text'] + ";}"
+            "QFrame#AboutHero{background:qlineargradient(x1:0,y1:0,x2:1,y2:1,"
+            "stop:0 " + p['hero_a'] + ",stop:1 " + p['hero_b'] + ");"
+            "border:1px solid " + p['border'] + ";border-radius:17px;}"
+            "QLabel#AboutProduct{font-size:27px;font-weight:850;color:#FFFFFF;}"
+            "QLabel#AboutMeta{font-size:11px;font-weight:650;color:#A7F3D0;}"
+            "QLabel#AboutSummary{font-size:13px;color:#E5E7EB;}"
+            "QFrame#AboutFeature{background:" + p['card'] + ";border:1px solid "
+            + p['border'] + ";border-radius:14px;}"
+            "QLabel#AboutFeatureTitle{font-size:15px;font-weight:750;color:" + p['text'] + ";}"
+            "QLabel#AboutFeatureText{font-size:12px;color:" + p['muted'] + ";}"
+            "QLabel#AboutNotice{background:" + p['card2'] + ";border:1px solid "
+            + p['border'] + ";border-radius:11px;padding:13px;color:" + p['muted'] + ";}")
 
 
 class PluginsPage(Page):
@@ -294,9 +365,12 @@ class DashboardPage(Page):
         super().__init__(state)
         from core.theme import palette
         self._pal = palette(state.get("ui_theme", "light") or "light")
-        title = QLabel("🚀 UltraPilot Telemetry")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: " + self._pal['title'] + "; margin-bottom: 10px;")
-        self.layout.addWidget(title)
+        self.title = QLabel("Prehľad")
+        self.title.setStyleSheet("font-size:24px;font-weight:800;color:" + self._pal['text'] + ";")
+        self.subtitle = QLabel("Aktuálny stav jazdy a asistenčných systémov")
+        self.subtitle.setStyleSheet("font-size:12px;color:" + self._pal['muted'] + ";margin-bottom:6px;")
+        self.layout.addWidget(self.title)
+        self.layout.addWidget(self.subtitle)
 
         # --- Prominent autopilot status card (the eye-catcher of the page) ---
         self.ap_card = QFrame()
@@ -344,12 +418,12 @@ class DashboardPage(Page):
         grid_frame.setObjectName("Card")
         grid = QHBoxLayout(grid_frame)
         grid.setContentsMargins(8, 12, 8, 12)
-        for key, icon, label in [("gear", "⚙️", "PREVOD"), ("rpm", "🔧", "OTÁČKY"),
-                                 ("fuel", "⛽", "PALIVO"), ("limit", "🚦", "LIMIT"),
-                                 ("nav", "🧭", "NAVIGÁCIA")]:
+        for key, label in [("gear", "PREVOD"), ("rpm", "OTÁČKY"),
+                           ("fuel", "PALIVO"), ("limit", "LIMIT"),
+                           ("nav", "NAVIGÁCIA")]:
             col = QVBoxLayout()
             col.setSpacing(2)
-            cap = QLabel(f"{icon}  {label}")
+            cap = QLabel(label)
             cap.setStyleSheet("color: " + self._pal['muted'] + "; font-size: 11px; font-weight: bold; border:none;")
             val = QLabel("—")
             val.setStyleSheet("color: " + self._pal['text'] + "; font-size: 22px; font-weight: bold; border:none;")
@@ -369,6 +443,10 @@ class DashboardPage(Page):
         """Re-apply palette colours when the theme switches (dark ↔ light)."""
         from core.theme import palette
         self._pal = palette(theme)
+        self.title.setStyleSheet(
+            "font-size:24px;font-weight:800;color:" + self._pal['text'] + ";")
+        self.subtitle.setStyleSheet(
+            "font-size:12px;color:" + self._pal['muted'] + ";margin-bottom:6px;")
         # refresh() re-sets every card/label style from self._pal.
         self.refresh()
 
@@ -513,11 +591,9 @@ class UltraPilotApp(QMainWindow):
         brand_txt = QVBoxLayout()
         brand_txt.setSpacing(0)
         word = QLabel("UltraPilot")
-        word.setStyleSheet("font-size:17px;font-weight:800;color:#20242A;border:none;")
+        word.setObjectName("BrandWordmark")
+        word.setStyleSheet("font-size:21px;font-weight:850;color:#20242A;border:none;")
         brand_txt.addWidget(word)
-        edition = QLabel("Driving assistant")
-        edition.setObjectName("BrandSubtitle")
-        brand_txt.addWidget(edition)
         brand_row.addLayout(brand_txt)
         brand_row.addStretch()
         brand_w = QWidget()
@@ -541,13 +617,13 @@ class UltraPilotApp(QMainWindow):
         # ETS2LA-style navigation. The glyphs come from Windows' monochrome
         # Segoe MDL2 icon font (not emoji), so they stay crisp at every DPI.
         nav = [
-            ("Main", None, None),
+            ("HLAVNÉ", None, None),
             ("dashboard", "Dashboard", 0),
             ("navigation", "Navigation", 1),
             ("visualization", "Visualization", 2),
-            ("Plugins", None, None),
+            ("ROZŠÍRENIA", None, None),
             ("plugins", "Manager", 3),
-            ("Help", None, None),
+            ("POMOC", None, None),
             ("about", "About", 5),
             ("__stretch__", None, None),
             ("settings", "Settings", 4),
@@ -588,7 +664,7 @@ class UltraPilotApp(QMainWindow):
 
         # Hamburger button: toggles the small floating performance overlay.
         self.perf_overlay = None
-        self.perf_btn = QPushButton("◫  Performance")
+        self.perf_btn = QPushButton("Performance")
         self.perf_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.perf_btn.setFixedHeight(32)
         self.perf_btn.setToolTip("Performance")
