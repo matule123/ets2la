@@ -114,12 +114,29 @@ class MapView(QWidget):
             "border:1px solid #2F3A3E;border-radius:10px;padding:6px 10px;"
             "font-size:11px;font-weight:750;")
         self.live_badge.adjustSize()
+        self.empty_state = QLabel(
+            "<div style='font-size:17px;font-weight:700;color:#F3F4F6;'>"
+            "Čakám na živú mapu</div>"
+            "<div style='margin-top:7px;color:#9CA3AF;'>"
+            "Spusti hru a nastav GPS cieľ.<br>"
+            "Potvrdená trasa sa zobrazí automaticky.</div>", self)
+        self.empty_state.setObjectName("LiveMapEmptyState")
+        self.empty_state.setTextFormat(Qt.TextFormat.RichText)
+        self.empty_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_state.setWordWrap(True)
+        self.empty_state.setFixedSize(360, 108)
+        self.empty_state.setStyleSheet(
+            "background:rgba(29,32,35,235);border:1px solid #353A40;"
+            "border-radius:14px;padding:12px;")
         self.apply_theme()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.live_badge.move(14, 14)
         self.live_badge.raise_()
+        self.empty_state.move(max(14, (self.width() - self.empty_state.width()) // 2),
+                              max(52, (self.height() - self.empty_state.height()) // 2))
+        self.empty_state.raise_()
 
     def reset_view(self):
         self.zoom_radius = 280.0
@@ -189,12 +206,18 @@ class MapView(QWidget):
         qp.setPen(Qt.PenStyle.NoPen)
         qp.setBrush(QColor("#151515"))
         qp.drawRoundedRect(self.rect(), 10, 10)
+        qp.setPen(QPen(QColor("#202326"), 1))
+        for x in range(0, w, 42):
+            qp.drawLine(x, 0, x, h)
+        for y in range(0, h, 42):
+            qp.drawLine(0, y, w, y)
 
         truck = self.state.get("truck_world_pos")
         heading = self.state.get("truck_heading", 0.0) or 0.0
 
         # Truck-centered view from the engine-published local map snapshot.
         if self.road_segments and truck:
+            self.empty_state.hide()
             self._paint_map(qp, w, h, truck, heading)
             return
 
@@ -204,11 +227,10 @@ class MapView(QWidget):
             if point is not None]
         all_pts = pts + ([truck] if truck else [])
         if not all_pts:
-            qp.setPen(QColor(self._pal['muted']))
-            qp.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
-                        "Live mapa čaká na polohu kamióna.\n"
-                        "Spusti hru a aktivuj GPS navigáciu.")
+            self.empty_state.show()
+            self.empty_state.raise_()
             return
+        self.empty_state.hide()
 
         minx, maxx, minz, maxz = self._bounds(all_pts)
         span = max(maxx - minx, maxz - minz, 50.0)
@@ -322,6 +344,32 @@ class MapPage(QWidget):
         head.addStretch()
         layout.addLayout(head)
 
+        stats = QHBoxLayout()
+        stats.setSpacing(10)
+        self.nav_stats = {}
+        for key, caption in (("gps", "HERNÁ GPS"), ("map", "AKTÍVNA MAPA"),
+                             ("trajectory", "TRAJEKTÓRIA")):
+            card = QFrame()
+            card.setObjectName("NavigationStat")
+            card.setStyleSheet(
+                "QFrame#NavigationStat{background:" + self._pal['card']
+                + ";border:1px solid " + self._pal['border']
+                + ";border-radius:11px;}")
+            box = QVBoxLayout(card)
+            box.setContentsMargins(14, 10, 14, 10)
+            box.setSpacing(2)
+            cap = QLabel(caption)
+            cap.setStyleSheet("font-size:9px;font-weight:750;color:"
+                              + self._pal['muted'] + ";")
+            value = QLabel("—")
+            value.setStyleSheet("font-size:13px;font-weight:700;color:"
+                                + self._pal['text'] + ";")
+            box.addWidget(cap)
+            box.addWidget(value)
+            stats.addWidget(card, 1)
+            self.nav_stats[key] = (card, cap, value)
+        layout.addLayout(stats)
+
         content = QHBoxLayout()
         content.setSpacing(12)
         self.controls = QFrame()
@@ -418,6 +466,15 @@ class MapPage(QWidget):
             + ";border:1px solid " + self._pal['border'] + ";border-radius:12px;}")
         self.gps_hint.setStyleSheet(
             "color:" + self._pal['muted'] + ";font-size:11px;")
+        for card, cap, value in self.nav_stats.values():
+            card.setStyleSheet(
+                "QFrame#NavigationStat{background:" + self._pal['card']
+                + ";border:1px solid " + self._pal['border']
+                + ";border-radius:11px;}")
+            cap.setStyleSheet("font-size:9px;font-weight:750;color:"
+                              + self._pal['muted'] + ";")
+            value.setStyleSheet("font-size:13px;font-weight:700;color:"
+                                + self._pal['text'] + ";")
         self.status.setStyleSheet(
             "background:" + self._pal['card2'] + ";color:" + self._pal['muted']
             + ";border-radius:8px;padding:10px;font-size:12px;")
@@ -642,5 +699,16 @@ class MapPage(QWidget):
         # published (so the user sees the real running map, not just the
         # last selection from the combo).
         self._update_active_map_label()
+        gps_active = bool(self.state.get("game_gps_navigation_active", False))
+        self.nav_stats["gps"][2].setText("Aktívna" if gps_active else "Čakám na cieľ")
+        self.nav_stats["map"][2].setText(str(
+            self.state.get("active_map_name")
+            or self.state.get("active_map_key") or "Nezvolená"))
+        trajectory = self.state.get("lane_trajectory", {}) or {}
+        if trajectory.get("valid", False):
+            self.nav_stats["trajectory"][2].setText(
+                f"Platná  •  rev. {trajectory.get('revision', 0)}")
+        else:
+            self.nav_stats["trajectory"][2].setText("Čakám na výpočet")
         if repaint or self.state.get("nav_active"):
             self.view.update()

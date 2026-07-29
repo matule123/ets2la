@@ -264,7 +264,7 @@ class PluginsPage(Page):
         from core.theme import palette
         self._pal = palette(state.get("ui_theme", "light") or "light")
         self._themed_rows = []
-        self.title = QLabel("🧩 Plugin Management")
+        self.title = QLabel("Pluginy")
         self.title.setStyleSheet("font-size: 24px; font-weight: bold; color: " + self._pal['title'] + "; margin-bottom: 20px;")
         self.layout.addWidget(self.title)
 
@@ -437,6 +437,61 @@ class DashboardPage(Page):
         self.conn_val.setStyleSheet("color: " + self._pal['muted'] + "; font-size: 12px; margin-top: 6px;")
         self.layout.addWidget(self.conn_val)
 
+        detail_row = QHBoxLayout()
+        detail_row.setSpacing(12)
+        self._dashboard_primary = []
+        self._dashboard_muted = []
+        self._dashboard_badges = []
+
+        def info_card(caption):
+            card = QFrame()
+            card.setObjectName("Card")
+            box = QVBoxLayout(card)
+            box.setContentsMargins(18, 15, 18, 15)
+            box.setSpacing(3)
+            cap = QLabel(caption)
+            cap.setStyleSheet("font-size:10px;font-weight:750;color:"
+                              + self._pal['muted'] + ";")
+            value = QLabel("—")
+            value.setStyleSheet("font-size:16px;font-weight:750;color:"
+                                + self._pal['text'] + ";")
+            detail = QLabel("—")
+            detail.setWordWrap(True)
+            detail.setStyleSheet("font-size:11px;color:" + self._pal['muted'] + ";")
+            self._dashboard_muted.extend((cap, detail))
+            self._dashboard_primary.append(value)
+            box.addWidget(cap)
+            box.addWidget(value)
+            box.addWidget(detail)
+            detail_row.addWidget(card, 1)
+            return value, detail
+
+        self.route_status, self.route_detail = info_card("TRASA A MAPA")
+        self.safety_status, self.safety_detail = info_card("BEZPEČNOSTNÉ SYSTÉMY")
+        self.layout.addLayout(detail_row)
+
+        systems = QFrame()
+        systems.setObjectName("Card")
+        systems_lay = QHBoxLayout(systems)
+        systems_lay.setContentsMargins(18, 12, 18, 12)
+        systems_lay.setSpacing(8)
+        systems_title = QLabel("Systémy")
+        systems_title.setStyleSheet("font-size:12px;font-weight:750;color:"
+                                    + self._pal['text'] + ";")
+        self._dashboard_primary.append(systems_title)
+        systems_lay.addWidget(systems_title)
+        for text in ("Lane Assist", "ACC", "Collision", "HUD + AR"):
+            badge = QLabel(text)
+            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            badge.setStyleSheet(
+                "background:" + self._pal['card2'] + ";border:1px solid "
+                + self._pal['border'] + ";border-radius:8px;padding:5px 9px;"
+                "font-size:10px;font-weight:650;color:" + self._pal['muted'] + ";")
+            systems_lay.addWidget(badge)
+            self._dashboard_badges.append(badge)
+        systems_lay.addStretch()
+        self.layout.addWidget(systems)
+
         self.layout.addStretch()
 
     def restyle(self, theme):
@@ -447,6 +502,17 @@ class DashboardPage(Page):
             "font-size:24px;font-weight:800;color:" + self._pal['text'] + ";")
         self.subtitle.setStyleSheet(
             "font-size:12px;color:" + self._pal['muted'] + ";margin-bottom:6px;")
+        for label in getattr(self, "_dashboard_primary", []):
+            label.setStyleSheet("font-size:13px;font-weight:750;color:"
+                                + self._pal['text'] + ";")
+        for label in getattr(self, "_dashboard_muted", []):
+            label.setStyleSheet("font-size:11px;color:"
+                                + self._pal['muted'] + ";")
+        for badge in getattr(self, "_dashboard_badges", []):
+            badge.setStyleSheet(
+                "background:" + self._pal['card2'] + ";border:1px solid "
+                + self._pal['border'] + ";border-radius:8px;padding:5px 9px;"
+                "font-size:10px;font-weight:650;color:" + self._pal['muted'] + ";")
         # refresh() re-sets every card/label style from self._pal.
         self.refresh()
 
@@ -501,6 +567,22 @@ class DashboardPage(Page):
             self.metrics["nav"].setText(f"{float(dist) / 1000:.1f}km" if dist else "ON")
         else:
             self.metrics["nav"].setText("off")
+
+        map_name = (self.state.get("active_map_name")
+                    or self.state.get("active_map_key") or "žiadna")
+        revision = self.state.get("lane_trajectory_revision", 0) or 0
+        if self.state.get("nav_active"):
+            self.route_status.setText("GPS trasa aktívna")
+            self.route_detail.setText(f"Mapa: {map_name}  •  revízia {revision}")
+        else:
+            self.route_status.setText("Čakám na GPS cieľ")
+            self.route_detail.setText(f"Pripravená mapa: {map_name}")
+        if self.state.get("telemetry_valid", False):
+            self.safety_status.setText("Systémy pripravené")
+            self.safety_detail.setText("Lane Assist, ACC a ochranné brzdenie sú online")
+        else:
+            self.safety_status.setText("Čakám na hru")
+            self.safety_detail.setText("Bez telemetrie sa nevydávajú riadiace výstupy")
 
         # Connection indicator: sdkActive in the latest telemetry snapshot.
         raw = (self.state.get("telemetry", {}) or {}).get("raw", {}) or {}
@@ -592,7 +674,7 @@ class UltraPilotApp(QMainWindow):
         brand_txt.setSpacing(0)
         word = QLabel("UltraPilot")
         word.setObjectName("BrandWordmark")
-        word.setStyleSheet("font-size:21px;font-weight:850;color:#20242A;border:none;")
+        word.setStyleSheet("font-size:21px;font-weight:750;color:#20242A;border:none;")
         brand_txt.addWidget(word)
         brand_row.addLayout(brand_txt)
         brand_row.addStretch()

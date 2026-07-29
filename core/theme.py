@@ -131,10 +131,11 @@ QCheckBox::indicator {{ width: 18px; height: 18px; border: 1px solid {c['border'
     border-radius: 5px; background: {c['field']}; }}
 QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
 
+QSlider {{ min-height: 26px; }}
 QSlider::groove:horizontal {{ height: 6px; background: {c['border']}; border-radius: 3px; }}
 QSlider::sub-page:horizontal {{ background: {ACCENT}; border-radius: 3px; }}
 QSlider::handle:horizontal {{ background: #FFFFFF; border: 2px solid {ACCENT};
-    width: 16px; height: 16px; margin: -7px 0; border-radius: 9px; }}
+    width: 16px; height: 16px; margin: -6px 0; border-radius: 9px; }}
 
 /* Progress bar — gradient chunk for a richer look. */
 QProgressBar {{ background-color: {c['field']}; border: none;

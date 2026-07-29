@@ -14,7 +14,8 @@ from core.theme import palette, stylesheet
 sys.modules.setdefault("ui", importlib.import_module("UI"))
 from UI import app as app_module
 from UI.app import (MacTitleBar, UltraPilotApp, rounded_window_region,
-                    window_control_notch_path, DashboardPage, AboutPage)
+                    window_control_notch_path, DashboardPage, AboutPage,
+                    PluginsPage)
 from UI.icons import line_icon
 from UI.map_page import MapPage
 from UI.perf_overlay import PerfOverlay
@@ -112,6 +113,19 @@ class UiChromeTests(unittest.TestCase):
         self.assertTrue(any(text.startswith("└ Total:") for text in labels))
         overlay.close()
 
+    def test_performance_rows_have_enough_height_and_are_not_clipped(self):
+        plugins = [(f"Plugin {index}", 10.0 + index, 0.0)
+                   for index in range(10)]
+        with mock.patch("UI.perf_overlay._collect",
+                        return_value=(512.0, 5.0, plugins)):
+            overlay = PerfOverlay(State({"ui_theme": "light"}))
+            overlay.refresh()
+        self.assertEqual(overlay.rows_box.count(), 10)
+        self.assertEqual(overlay.height(), 338)
+        self.assertTrue(all(overlay.rows_box.itemAt(i).widget().height() == 23
+                            for i in range(10)))
+        overlay.close()
+
     def test_navigation_is_game_gps_first_and_live_map_badge_is_visible(self):
         with mock.patch.object(MapPage, "_populate_maps", autospec=True):
             page = MapPage(State({"ui_theme": "light"}))
@@ -122,6 +136,8 @@ class UiChromeTests(unittest.TestCase):
                              for text in labels + buttons))
         self.assertFalse(hasattr(page, "route_combo"))
         self.assertFalse(hasattr(page, "name_edit"))
+        self.assertEqual(set(page.nav_stats), {"gps", "map", "trajectory"})
+        self.assertTrue(page.view.empty_state.isVisibleTo(page.view))
         page.close()
 
     def test_dashboard_and_about_use_clean_non_emoji_headers(self):
@@ -132,8 +148,20 @@ class UiChromeTests(unittest.TestCase):
         self.assertNotIn("🚀", dashboard.title.text())
         self.assertEqual(about.title.text(), "O aplikácii")
         self.assertEqual(len(about.findChildren(QFrame, "AboutFeature")), 3)
+        self.assertTrue(hasattr(dashboard, "route_status"))
+        self.assertTrue(hasattr(dashboard, "safety_status"))
         dashboard.close()
         about.close()
+
+    def test_plugin_page_header_has_no_emoji_and_slider_handles_fit(self):
+        with mock.patch("core.paths.app_dir", return_value="Z:/missing"):
+            plugins = PluginsPage(State({"ui_theme": "light"}))
+        self.assertEqual(plugins.title.text(), "Pluginy")
+        self.assertNotIn("🧩", plugins.title.text())
+        css = stylesheet("light")
+        self.assertIn("QSlider { min-height: 26px; }", css)
+        self.assertIn("margin: -6px 0", css)
+        plugins.close()
 
 
 if __name__ == "__main__":

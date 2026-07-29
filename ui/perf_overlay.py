@@ -156,7 +156,7 @@ class PerfOverlay(QWidget):
 
     def refresh(self):
         app_mb, _app_cpu, plugins = _collect(self.state)
-        desired = max(105, min(540, 64 + max(1, len(plugins)) * 23))
+        desired = max(128, min(570, 88 + max(1, len(plugins)) * 25))
         if desired != self.height():
             old_bottom = self.y() + self.height()
             self.setFixedHeight(desired)
@@ -176,6 +176,7 @@ class PerfOverlay(QWidget):
         ordered = sorted(plugins, key=lambda r: -r[1])
         for index, (name, mb, cpu) in enumerate(ordered):
             row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(3)
             branch = QLabel("│")
             branch.setObjectName("PerfBranch")
@@ -194,6 +195,7 @@ class PerfOverlay(QWidget):
             row.addWidget(dash)
             row.addWidget(n, 1)
             wrap = QWidget()
+            wrap.setFixedHeight(23)
             wrap.setLayout(row)
             self.rows_box.addWidget(wrap)
 
