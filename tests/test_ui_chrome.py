@@ -1,16 +1,36 @@
 import importlib
 import sys
 import unittest
+from unittest import mock
 
-from PyQt6.QtWidgets import QApplication, QWidget
+from PyQt6.QtCore import QPoint, Qt
+from PyQt6.QtWidgets import QApplication, QWidget, QFrame, QLabel, QStatusBar
 
 from core.theme import palette, stylesheet
 
 # The installed build exposes the historical lowercase ``ui`` package name;
 # the source checkout directory is ``UI`` and may be case-sensitive in CI.
 sys.modules.setdefault("ui", importlib.import_module("UI"))
-from UI.app import MacTitleBar, window_control_notch_path
+from UI import app as app_module
+from UI.app import (MacTitleBar, UltraPilotApp, rounded_window_region,
+                    window_control_notch_path)
 from UI.icons import line_icon
+from UI.perf_overlay import PerfOverlay
+from UI.settings_menu import SettingsMenu
+
+
+class State:
+    def __init__(self, values=None):
+        self.values = dict(values or {})
+
+    def get(self, key, default=None):
+        return self.values.get(key, default)
+
+    def set(self, key, value):
+        self.values[key] = value
+
+    def update_batch(self, values):
+        self.values.update(values)
 
 
 class UiChromeTests(unittest.TestCase):
@@ -46,8 +66,45 @@ class UiChromeTests(unittest.TestCase):
                          "QPushButton#SidebarPerformance"):
             self.assertIn(selector, css)
         for name in ("dashboard", "navigation", "visualization", "plugins",
-                     "settings", "about"):
+                     "settings", "about", "performance", "autopilot"):
             self.assertFalse(line_icon(name).isNull())
+
+    def test_main_window_is_larger_rounded_and_has_no_bottom_status_bar(self):
+        state = State({"ui_theme": "light", "ui_language_code": "sk"})
+        with (mock.patch.object(app_module, "MapPage",
+                                side_effect=lambda _state: QWidget()),
+              mock.patch("UI.update_widget.UpdateCheckerWidget.check",
+                         autospec=True)):
+            window = UltraPilotApp(state)
+        self.assertEqual((window.width(), window.height()), (1220, 760))
+        self.assertGreaterEqual(window.minimumWidth(), 980)
+        self.assertFalse(window.findChildren(QStatusBar))
+        self.assertTrue(window.sidebar.isAncestorOf(window.start_btn))
+        self.assertEqual(window.centralWidget().objectName(), "WindowSurface")
+        region = rounded_window_region(1220, 760)
+        self.assertFalse(region.contains(QPoint(0, 0)))
+        self.assertTrue(region.contains(QPoint(610, 380)))
+        window.close()
+
+    def test_settings_use_responsive_cards_and_vector_header_icon(self):
+        settings = SettingsMenu(State({"ui_theme": "light"}))
+        cards = settings.findChildren(QFrame, "SettingsCard")
+        self.assertEqual(len(cards), 5)
+        labels = [label.text() for label in settings.findChildren(QLabel)]
+        self.assertIn("Nastavenia", labels)
+        self.assertFalse(any(text.startswith("⚙") for text in labels))
+        self.assertIn("QWidget#SettingsPage", settings.styleSheet())
+        settings.close()
+
+    def test_performance_popover_has_transparent_rounded_surface(self):
+        overlay = PerfOverlay(State({"ui_theme": "light"}))
+        self.assertTrue(overlay.testAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground))
+        self.assertEqual(overlay.width(), 420)
+        self.assertEqual(overlay.surface.objectName(), "PerfSurface")
+        self.assertIsNotNone(overlay.surface.graphicsEffect())
+        self.assertIn("QFrame#PerfSurface", overlay.styleSheet())
+        overlay.close()
 
 
 if __name__ == "__main__":

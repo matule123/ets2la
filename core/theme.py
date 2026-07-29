@@ -48,13 +48,16 @@ def stylesheet(mode: str = "light") -> str:
     c = palette(mode)
     accent2 = c['accent2']
     return f"""
-QMainWindow {{ background-color: {c['bg']}; }}
+QMainWindow {{ background-color: transparent; }}
 QWidget {{ background-color: {c['bg']}; color: {c['text']};
     font-family: 'Segoe UI', 'Inter', sans-serif; font-size: 14px; }}
+QFrame#WindowSurface {{ background-color: {c['bg']};
+    border: 1px solid {c['border']}; border-radius: 15px; }}
 
 /* Sidebar — compact reference-style navigation cards. */
 QFrame#Sidebar {{ background-color: #FFFFFF; border: none;
-    border-right: 1px solid #E5E7EB; }}
+    border-right: 1px solid #E5E7EB; border-top-left-radius: 15px;
+    border-bottom-left-radius: 15px; }}
 QFrame#Sidebar QLabel#BrandSubtitle {{ color: #7B818A; font-size: 10px;
     font-weight: 600; border: none; }}
 QFrame#Sidebar QLabel#NavSection {{ color: #777D86; font-size: 11px;
@@ -84,6 +87,14 @@ QFrame#Sidebar QPushButton#SidebarPerformance:hover {{ background-color:#F2F3F5;
     border-color:#C9CDD2; color:#1F242B; }}
 QFrame#Sidebar QPushButton#SidebarPerformance[active="true"] {{
     background-color:#20242A; border-color:#20242A; color:#FFFFFF; }}
+QFrame#Sidebar QPushButton#SidebarAutopilot {{ background-color:#0E9F6E;
+    border:1px solid #0B8A60; border-radius:9px; padding:8px 11px;
+    margin:0; color:#FFFFFF; font-size:11px; font-weight:750;
+    text-align:left; }}
+QFrame#Sidebar QPushButton#SidebarAutopilot:hover {{ background-color:#057A55;
+    border-color:#046C4E; color:#FFFFFF; }}
+QFrame#Sidebar QPushButton#SidebarAutopilot[active="true"] {{
+    background-color:#DC2626; border-color:#B91C1C; color:#FFFFFF; }}
 
 /* General buttons — soft, rounded, accent on hover. */
 QPushButton {{ background-color: {c['surface']}; border: 1px solid {c['border']};
@@ -124,8 +135,6 @@ QSlider::groove:horizontal {{ height: 6px; background: {c['border']}; border-rad
 QSlider::sub-page:horizontal {{ background: {ACCENT}; border-radius: 3px; }}
 QSlider::handle:horizontal {{ background: #FFFFFF; border: 2px solid {ACCENT};
     width: 16px; height: 16px; margin: -7px 0; border-radius: 9px; }}
-
-QStatusBar {{ background-color: {c['sidebar']}; border-top: 1px solid {c['border']}; }}
 
 /* Progress bar — gradient chunk for a richer look. */
 QProgressBar {{ background-color: {c['field']}; border: none;

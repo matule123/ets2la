@@ -1,17 +1,20 @@
 import logging
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QCheckBox, QFrame
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+                             QLabel, QSlider, QCheckBox, QFrame, QComboBox,
+                             QPushButton)
 from PyQt6.QtCore import Qt
 from core.theme import palette
 
 
 def _frame_qss(pal):
     """Card frame style derived from the active palette (theme-aware)."""
-    return ("background-color: " + pal['card'] + "; border: 1px solid " + pal['border'] +
-            "; border-radius: 12px;")
+    return ("QFrame#SettingsCard{background-color:" + pal['card']
+            + ";border:1px solid " + pal['border']
+            + ";border-radius:16px;}")
 
 
 def _title_qss(pal):
-    return "font-size: 18px; font-weight: bold; color: " + pal['title'] + ";"
+    return "font-size:15px;font-weight:750;color:" + pal['text'] + ";"
 
 
 def _caption_qss(pal):
@@ -31,111 +34,166 @@ class SettingsMenu(QWidget):
 
     def __init__(self, state):
         super().__init__()
+        self.setObjectName("SettingsPage")
         self.state = state
         self._pal = palette(state.get("ui_theme", "light") or "light")
         # Track widgets whose styles depend on the theme so we can recolour them
         # when the user flips dark/light without rebuilding the page.
         self._themed_frames = []
         self._themed_titles = []
+        self._themed_captions = []
         self.init_ui()
 
+    def _section_card(self, icon_name, title, subtitle):
+        from ui.icons import line_icon
+        card = QFrame()
+        card.setObjectName("SettingsCard")
+        card.setStyleSheet(_frame_qss(self._pal))
+        self._themed_frames.append(card)
+        body = QVBoxLayout(card)
+        body.setContentsMargins(18, 16, 18, 17)
+        body.setSpacing(12)
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        icon = QLabel()
+        icon.setFixedSize(34, 34)
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon.setPixmap(line_icon(icon_name, self._pal['title'], 24).pixmap(24, 24))
+        icon.setStyleSheet("background:#ECFDF5;border:1px solid #D1FAE5;"
+                           "border-radius:9px;")
+        header.addWidget(icon)
+        texts = QVBoxLayout()
+        texts.setSpacing(1)
+        heading = QLabel(title)
+        heading.setStyleSheet(_title_qss(self._pal))
+        self._themed_titles.append(heading)
+        detail = QLabel(subtitle)
+        detail.setWordWrap(True)
+        detail.setStyleSheet("font-size:11px;color:" + self._pal['muted'] + ";")
+        self._themed_captions.append(detail)
+        texts.addWidget(heading)
+        texts.addWidget(detail)
+        header.addLayout(texts, 1)
+        body.addLayout(header)
+        return card, body
+
+    def _caption(self, text):
+        label = QLabel(text)
+        label.setStyleSheet("font-size:12px;font-weight:650;color:"
+                            + self._pal['muted'] + ";")
+        self._themed_captions.append(label)
+        return label
+
     def init_ui(self):
-        self.setStyleSheet("background-color: " + self._pal['bg'] + "; color: " + self._pal['text'] + "; font-family: 'Segoe UI';")
+        self.setStyleSheet(
+            "QWidget#SettingsPage{background-color:" + self._pal['bg']
+            + ";color:" + self._pal['text'] + ";font-family:'Segoe UI';}")
 
-        layout = QVBoxLayout()
-        layout.setSpacing(20)
-        layout.setContentsMargins(30, 30, 30, 30)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(16)
+        layout.setContentsMargins(30, 26, 30, 30)
 
-        title = QLabel("⚙️ Settings")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: " + self._pal['title'] + "; margin-bottom: 10px;")
-        layout.addWidget(title)
+        hero = QFrame()
+        hero.setObjectName("SettingsHero")
+        hero.setStyleSheet(
+            "QFrame#SettingsHero{background:" + self._pal['card']
+            + ";border:1px solid " + self._pal['border']
+            + ";border-radius:16px;}")
+        self._hero = hero
+        hero_layout = QHBoxLayout(hero)
+        hero_layout.setContentsMargins(20, 16, 20, 16)
+        hero_layout.setSpacing(14)
+        from ui.icons import line_icon
+        hero_icon = QLabel()
+        hero_icon.setFixedSize(46, 46)
+        hero_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hero_icon.setPixmap(line_icon("settings", "#047857", 30).pixmap(30, 30))
+        hero_icon.setStyleSheet("background:#D1FAE5;border:1px solid #A7F3D0;"
+                                "border-radius:13px;")
+        hero_layout.addWidget(hero_icon)
+        hero_text = QVBoxLayout()
+        hero_text.setSpacing(2)
+        self._hero_title = QLabel("Nastavenia")
+        self._hero_title.setStyleSheet("font-size:22px;font-weight:800;color:"
+                                       + self._pal['text'] + ";")
+        self._hero_subtitle = QLabel(
+            "Jazda, riadenie a vzhľad aplikácie na jednom mieste")
+        self._hero_subtitle.setStyleSheet("font-size:12px;color:"
+                                          + self._pal['muted'] + ";")
+        hero_text.addWidget(self._hero_title)
+        hero_text.addWidget(self._hero_subtitle)
+        hero_layout.addLayout(hero_text, 1)
+        layout.addWidget(hero)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(16)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
 
         # --- ACC Section ---
-        acc_frame = QFrame()
-        acc_frame.setStyleSheet(_frame_qss(self._pal))
-        self._themed_frames.append(acc_frame)
-        acc_layout = QVBoxLayout(acc_frame)
-
-        acc_title = QLabel("Adaptive Cruise Control")
-        acc_title.setStyleSheet(_title_qss(self._pal))
-        self._themed_titles.append(acc_title)
-        acc_layout.addWidget(acc_title)
+        acc_frame, acc_layout = self._section_card(
+            "dashboard", "Adaptívny tempomat",
+            "Rýchlosť a bezpečný odstup od vozidla pred tebou")
 
         # Target Speed Slider
         init_speed = int(self.state.get("acc_target_speed", 80) or 80)
-        speed_layout = QHBoxLayout()
-        self.speed_label = QLabel(f"Target Speed: {init_speed} km/h")
+        self.speed_label = self._caption(f"Cieľová rýchlosť  ·  {init_speed} km/h")
         self.speed_slider = QSlider(Qt.Orientation.Horizontal)
         self.speed_slider.setRange(30, 140)
         self.speed_slider.setValue(init_speed)
         self.speed_slider.valueChanged.connect(self.update_acc_speed)
-        speed_layout.addWidget(self.speed_label)
-        speed_layout.addWidget(self.speed_slider)
-        acc_layout.addLayout(speed_layout)
+        acc_layout.addWidget(self.speed_label)
+        acc_layout.addWidget(self.speed_slider)
 
         # Follow-distance (time gap) Slider
         init_gap = int((self.state.get("acc_safe_distance", 2.0) or 2.0) * 10)
-        dist_layout = QHBoxLayout()
-        self.dist_label = QLabel(f"Safe Distance: {init_gap / 10.0:.1f}s")
+        self.dist_label = self._caption(
+            f"Bezpečný odstup  ·  {init_gap / 10.0:.1f} s")
         self.dist_slider = QSlider(Qt.Orientation.Horizontal)
         self.dist_slider.setRange(5, 40)  # 0.5 to 4.0s
         self.dist_slider.setValue(init_gap)
         self.dist_slider.valueChanged.connect(self.update_acc_dist)
-        dist_layout.addWidget(self.dist_label)
-        dist_layout.addWidget(self.dist_slider)
-        acc_layout.addLayout(dist_layout)
+        acc_layout.addWidget(self.dist_label)
+        acc_layout.addWidget(self.dist_slider)
 
         # Obey posted speed limit
-        self.limit_toggle = QCheckBox("Obey posted speed limit")
+        self.limit_toggle = QCheckBox("Dodržiavať rýchlostné obmedzenia")
         self.limit_toggle.setChecked(bool(self.state.get("acc_obey_limit", True)))
         self.limit_toggle.toggled.connect(self.update_obey_limit)
         acc_layout.addWidget(self.limit_toggle)
 
-        layout.addWidget(acc_frame)
+        grid.addWidget(acc_frame, 0, 0)
 
         # --- Steering Section ---
-        steer_frame = QFrame()
-        steer_frame.setStyleSheet(_frame_qss(self._pal))
-        self._themed_frames.append(steer_frame)
-        steer_layout = QVBoxLayout(steer_frame)
-        steer_title = QLabel("Steering")
-        steer_title.setStyleSheet(_title_qss(self._pal))
-        self._themed_titles.append(steer_title)
-        steer_layout.addWidget(steer_title)
+        steer_frame, steer_layout = self._section_card(
+            "autopilot", "Riadenie",
+            "Smer a citlivosť výstupu pre volant")
 
-        self.invert_toggle = QCheckBox("Invert steering (flip if the truck turns the wrong way)")
+        self.invert_toggle = QCheckBox("Obrátiť smer riadenia")
         self.invert_toggle.setChecked(bool(self.state.get("steering_invert", False)))
         self.invert_toggle.toggled.connect(self.update_invert)
         steer_layout.addWidget(self.invert_toggle)
 
-        sens_layout = QHBoxLayout()
         init_sens = int((self.state.get("steering_sensitivity", 1.0) or 1.0) * 100)
-        self.sens_label = QLabel(f"Sensitivity: {init_sens / 100:.2f}×")
+        self.sens_label = self._caption(
+            f"Citlivosť  ·  {init_sens / 100:.2f}×")
         self.sens_slider = QSlider(Qt.Orientation.Horizontal)
         self.sens_slider.setRange(30, 200)  # 0.3× .. 2.0×
         self.sens_slider.setValue(init_sens)
         self.sens_slider.valueChanged.connect(self.update_sensitivity)
-        sens_layout.addWidget(self.sens_label)
-        sens_layout.addWidget(self.sens_slider)
-        steer_layout.addLayout(sens_layout)
-
-        layout.addWidget(steer_frame)
+        steer_layout.addWidget(self.sens_label)
+        steer_layout.addWidget(self.sens_slider)
+        steer_layout.addStretch()
+        grid.addWidget(steer_frame, 0, 1)
 
         # --- Appearance Section (theme + language) ---
-        from PyQt6.QtWidgets import QComboBox, QPushButton
-        from core.i18n import LANGUAGES, coverage
-        app_frame = QFrame()
-        app_frame.setStyleSheet(_frame_qss(self._pal))
-        self._themed_frames.append(app_frame)
-        app_layout = QVBoxLayout(app_frame)
-        app_title = QLabel("Appearance")
-        app_title.setStyleSheet(_title_qss(self._pal))
-        self._themed_titles.append(app_title)
-        app_layout.addWidget(app_title)
+        app_frame, app_layout = self._section_card(
+            "visualization", "Vzhľad a jazyk",
+            "Farebný režim a jazyk používateľského rozhrania")
 
         theme_row = QHBoxLayout()
-        theme_lbl = QLabel("Theme:")
-        theme_lbl.setStyleSheet(_caption_qss(self._pal))
+        theme_lbl = self._caption("Téma")
         theme_row.addWidget(theme_lbl)
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(["Light", "Dark", "System"])
@@ -147,8 +205,7 @@ class SettingsMenu(QWidget):
         app_layout.addLayout(theme_row)
 
         lang_row = QHBoxLayout()
-        lang_lbl = QLabel("Language:")
-        lang_lbl.setStyleSheet(_caption_qss(self._pal))
+        lang_lbl = self._caption("Jazyk")
         lang_row.addWidget(lang_lbl)
         self.lang_combo = QComboBox()
         from core import i18n
@@ -181,26 +238,21 @@ class SettingsMenu(QWidget):
         self.cov_label.setStyleSheet("color: " + self._pal['muted'] + "; font-size: 12px;")
         app_layout.addWidget(self.cov_label)
 
-        layout.addWidget(app_frame)
+        grid.addWidget(app_frame, 1, 0)
 
         # --- AR overlay (calibration) ---
-        ar_frame = QFrame()
-        ar_frame.setStyleSheet(_frame_qss(self._pal))
-        self._themed_frames.append(ar_frame)
-        ar_lay = QVBoxLayout(ar_frame)
-        ar_title = QLabel("AR overlay (experimental)")
-        ar_title.setStyleSheet(_title_qss(self._pal))
-        self._themed_titles.append(ar_title)
-        ar_lay.addWidget(ar_title)
-        self.ar_toggle = QCheckBox("Draw the route on the road over the game")
+        ar_frame, ar_lay = self._section_card(
+            "navigation", "AR zobrazenie",
+            "Kalibrácia trasy prekreslenej priamo nad hrou")
+        self.ar_toggle = QCheckBox("Zobrazovať trasu na vozovke")
         self.ar_toggle.setChecked(bool(self.state.get("ar_enabled", True)))
         self.ar_toggle.toggled.connect(lambda v: self.state.set("ar_enabled", bool(v)))
         ar_lay.addWidget(self.ar_toggle)
 
         def ar_slider(label, key, lo, hi, default, scale=1.0):
             row = QHBoxLayout()
-            cap = QLabel(label)
-            cap.setStyleSheet(_caption_qss(self._pal))
+            cap = self._caption(label)
+            cap.setMinimumWidth(68)
             cur = self.state.get(key, default)
             cur = float(cur) if cur is not None else default
             sl = QSlider(Qt.Orientation.Horizontal)
@@ -210,40 +262,27 @@ class SettingsMenu(QWidget):
             ar_lay.addLayout(row)
 
         ar_slider("FOV", "ar_fov", 40, 100, 60.0)
-        ar_slider("Height", "ar_height", 5, 60, 2.5, scale=10.0)   # 0.5–6.0 m
-        ar_slider("Pitch", "ar_pitch", -20, 30, 8.0)
-        layout.addWidget(ar_frame)
+        ar_slider("Výška", "ar_height", 5, 60, 2.5, scale=10.0)   # 0.5–6.0 m
+        ar_slider("Náklon", "ar_pitch", -20, 30, 8.0)
+        grid.addWidget(ar_frame, 1, 1)
 
         # --- Sound (startup chime) ---
-        sound_frame = QFrame()
-        sound_frame.setStyleSheet(_frame_qss(self._pal))
-        self._themed_frames.append(sound_frame)
-        snd_lay = QVBoxLayout(sound_frame)
-        snd_title = QLabel("Zvuk")
-        snd_title.setStyleSheet(_title_qss(self._pal))
-        self._themed_titles.append(snd_title)
-        snd_lay.addWidget(snd_title)
-        self.sound_toggle = QCheckBox("Prehrať zvuk pri štarte (ak existuje assets/sounds/boot.mp3)")
+        sound_frame, snd_lay = self._section_card(
+            "about", "Zvuk aplikácie",
+            "Jemné zvukové potvrdenie pri spustení UltraPilotu")
+        self.sound_toggle = QCheckBox("Prehrať uvítací zvuk pri štarte")
         self.sound_toggle.setChecked(bool(self.state.get("startup_sound", True)))
         self.sound_toggle.toggled.connect(lambda v: self.state.set("startup_sound", bool(v)))
         snd_lay.addWidget(self.sound_toggle)
-        layout.addWidget(sound_frame)
+        performance_hint = self._caption(
+            "Podrobné využitie RAM, CPU a pluginov otvoríš tlačidlom „Výkon aplikácie“ v bočnom paneli.")
+        performance_hint.setWordWrap(True)
+        snd_lay.addWidget(performance_hint)
+        grid.addWidget(sound_frame, 2, 0, 1, 2)
 
-        # --- Performance sub-card (plugin RAM usage) ---
-        try:
-            from ui.performance import PerformancePage
-            perf_frame = QFrame()
-            perf_frame.setStyleSheet(_frame_qss(self._pal))
-            self._themed_frames.append(perf_frame)
-            pf_lay = QVBoxLayout(perf_frame)
-            self._perf_page = PerformancePage(self.state)
-            pf_lay.addWidget(self._perf_page)
-            layout.addWidget(perf_frame)
-        except Exception:
-            self._perf_page = None
-
+        self._perf_page = None
+        layout.addLayout(grid)
         layout.addStretch()
-        self.setLayout(layout)
 
         # Publish initial values so plugins pick them up immediately.
         self.update_acc_speed(init_speed)
@@ -267,11 +306,24 @@ class SettingsMenu(QWidget):
         """Re-apply colours when the theme changes (called by UltraPilotApp)."""
         self._pal = palette(theme)
         p = self._pal
-        self.setStyleSheet("background-color: " + p['bg'] + "; color: " + p['text'] + "; font-family: 'Segoe UI';")
+        self.setStyleSheet(
+            "QWidget#SettingsPage{background-color:" + p['bg']
+            + ";color:" + p['text'] + ";font-family:'Segoe UI';}")
         for fr in getattr(self, "_themed_frames", []):
             fr.setStyleSheet(_frame_qss(p))
         for ttl in getattr(self, "_themed_titles", []):
             ttl.setStyleSheet(_title_qss(p))
+        for caption in getattr(self, "_themed_captions", []):
+            caption.setStyleSheet("font-size:12px;color:" + p['muted'] + ";")
+        if hasattr(self, "_hero"):
+            self._hero.setStyleSheet(
+                "QFrame#SettingsHero{background:" + p['card']
+                + ";border:1px solid " + p['border']
+                + ";border-radius:16px;}")
+            self._hero_title.setStyleSheet(
+                "font-size:22px;font-weight:800;color:" + p['text'] + ";")
+            self._hero_subtitle.setStyleSheet(
+                "font-size:12px;color:" + p['muted'] + ";")
         if hasattr(self, "cov_label"):
             self.cov_label.setStyleSheet("color: " + p['muted'] + "; font-size: 12px;")
         if hasattr(self, "dl_lang_btn"):
@@ -362,12 +414,12 @@ class SettingsMenu(QWidget):
                 "alebo nastav GITHUB_TOKEN (repozitár môže byť súkromný).")
 
     def update_acc_speed(self, val):
-        self.speed_label.setText(f"Target Speed: {val} km/h")
+        self.speed_label.setText(f"Cieľová rýchlosť  ·  {val} km/h")
         self.state.set("acc_target_speed", float(val))
 
     def update_acc_dist(self, val):
         dist = val / 10.0
-        self.dist_label.setText(f"Safe Distance: {dist:.1f}s")
+        self.dist_label.setText(f"Bezpečný odstup  ·  {dist:.1f} s")
         self.state.set("acc_safe_distance", dist)
 
     def update_obey_limit(self, checked):
@@ -378,5 +430,5 @@ class SettingsMenu(QWidget):
 
     def update_sensitivity(self, val):
         s = val / 100.0
-        self.sens_label.setText(f"Sensitivity: {s:.2f}×")
+        self.sens_label.setText(f"Citlivosť  ·  {s:.2f}×")
         self.state.set("steering_sensitivity", s)

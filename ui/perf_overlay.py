@@ -15,6 +15,7 @@ from PyQt6.QtCore import Qt, QTimer, QPoint
 from PyQt6.QtGui import QPainter, QColor
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QProgressBar, QPushButton,
+    QGraphicsDropShadowEffect,
 )
 
 try:
@@ -81,8 +82,8 @@ class PerfOverlay(QWidget):
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
             Qt.WindowType.Tool)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
-        self.setFixedSize(390, 460)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setFixedSize(420, 430)
         self._drag = None
         # Resolve the palette BEFORE _build() so the labels can read _pal.
         from core.theme import palette
@@ -107,8 +108,21 @@ class PerfOverlay(QWidget):
     def _apply_window_style(self):
         p = self._pal
         self.setStyleSheet(
-            "PerfOverlay{background:" + p['card'] + ";border:1px solid " + p['border'] + ";border-radius:16px;}"
+            "PerfOverlay{background:transparent;}"
+            "QFrame#PerfSurface{background:" + p['card']
+            + ";border:1px solid " + p['border'] + ";border-radius:18px;}"
+            "QFrame#PerfMetric{background:" + p['card2']
+            + ";border:1px solid " + p['border'] + ";border-radius:11px;}"
             "QLabel{background:transparent;border:none;}"
+            "QLabel#PerfTitle{font-size:17px;font-weight:800;color:"
+            + p['text'] + ";}"
+            "QLabel#PerfSubtitle{font-size:11px;color:" + p['muted'] + ";}"
+            "QPushButton#PerfClose{background:" + p['card2']
+            + ";border:1px solid " + p['border']
+            + ";border-radius:13px;color:" + p['muted']
+            + ";font-size:17px;font-weight:700;padding:0;}"
+            "QPushButton#PerfClose:hover{background:#FEE2E2;"
+            "border-color:#FCA5A5;color:#B91C1C;}"
             "QWidget{font-family:'Segoe UI';}")
 
     def show_above(self, anchor):
@@ -126,58 +140,87 @@ class PerfOverlay(QWidget):
 
     def _build(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(18, 16, 18, 16)
-        root.setSpacing(10)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(0)
+        self.surface = QFrame()
+        self.surface.setObjectName("PerfSurface")
+        shadow = QGraphicsDropShadowEffect(self.surface)
+        shadow.setBlurRadius(28)
+        shadow.setOffset(0, 7)
+        shadow.setColor(QColor(0, 0, 0, 70))
+        self.surface.setGraphicsEffect(shadow)
+        root.addWidget(self.surface)
+        body = QVBoxLayout(self.surface)
+        body.setContentsMargins(18, 16, 18, 18)
+        body.setSpacing(11)
         head = QHBoxLayout()
-        head.setSpacing(6)
-        title = QLabel("Performance")
-        title.setStyleSheet("font-size:17px;font-weight:800;color:" + self._pal['title'] + ";")
-        head.addWidget(title)
+        head.setSpacing(10)
+        from ui.icons import line_icon
+        icon = QLabel()
+        icon.setFixedSize(36, 36)
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon.setPixmap(line_icon("performance", "#047857", 24).pixmap(24, 24))
+        icon.setStyleSheet("background:#D1FAE5;border:1px solid #A7F3D0;"
+                           "border-radius:10px;")
+        head.addWidget(icon)
+        title_column = QVBoxLayout()
+        title_column.setSpacing(0)
+        title = QLabel("Výkon aplikácie")
+        title.setObjectName("PerfTitle")
+        subtitle = QLabel("RAM, CPU a aktívne pluginy")
+        subtitle.setObjectName("PerfSubtitle")
+        title_column.addWidget(title)
+        title_column.addWidget(subtitle)
+        head.addLayout(title_column)
         head.addStretch()
         close = QPushButton("×")
-        close.setToolTip("Zavrieť Performance")
-        close.setFixedSize(28, 28)
+        close.setObjectName("PerfClose")
+        close.setToolTip("Zavrieť okno výkonu")
+        close.setFixedSize(27, 27)
         close.setCursor(Qt.CursorShape.PointingHandCursor)
-        close.setStyleSheet("QPushButton{background:#FEE2E2;border:1px solid #FCA5A5;"
-                            "border-radius:14px;color:#B91C1C;font-size:18px;font-weight:800;}"
-                            "QPushButton:hover{background:#EF4444;color:#FFFFFF;}")
         close.clicked.connect(self.hide)
         head.addWidget(close)
-        root.addLayout(head)
+        body.addLayout(head)
 
-        summary = QFrame()
-        summary.setStyleSheet("QFrame{background:" + self._pal['field'] + ";border:1px solid " + self._pal['border'] + ";border-radius:12px;}")
-        summary_lay = QHBoxLayout(summary)
-        summary_lay.setContentsMargins(13, 10, 13, 10)
-        self.total_lbl = QLabel("RAM\n— MB")
-        self.total_lbl.setStyleSheet("font-size:12px;font-weight:700;color:" + self._pal['text'] + ";")
-        self.cpu_lbl = QLabel("CPU\n— %")
-        self.cpu_lbl.setStyleSheet("font-size:12px;font-weight:700;color:" + self._pal['text'] + ";")
-        summary_lay.addWidget(self.total_lbl)
-        summary_lay.addStretch()
-        summary_lay.addWidget(self.cpu_lbl)
-        root.addWidget(summary)
+        summary_lay = QHBoxLayout()
+        summary_lay.setSpacing(8)
 
-        bar_wrap = QFrame()
-        bar_wrap.setStyleSheet("background: transparent; border: none;")
-        bw = QVBoxLayout(bar_wrap)
-        bw.setContentsMargins(0, 0, 0, 0)
-        bw.setSpacing(2)
+        def metric(text):
+            frame = QFrame()
+            frame.setObjectName("PerfMetric")
+            frame.setMinimumHeight(62)
+            lay = QVBoxLayout(frame)
+            lay.setContentsMargins(10, 8, 10, 8)
+            label = QLabel(text)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setStyleSheet("font-size:11px;font-weight:750;color:"
+                                + self._pal['text'] + ";")
+            lay.addWidget(label)
+            summary_lay.addWidget(frame, 1)
+            return label
+
+        self.total_lbl = metric("RAM\n— MB")
+        self.cpu_lbl = metric("CPU\n— %")
+        self.plugin_count_lbl = metric("PLUGINY\n—")
+        body.addLayout(summary_lay)
+
+        memory_label = QLabel("Pamäť aplikácie")
+        memory_label.setObjectName("PerfSubtitle")
+        body.addWidget(memory_label)
         self.total_bar = QProgressBar()
         self.total_bar.setFixedHeight(8)
         self.total_bar.setRange(0, 100)
         self.total_bar.setTextVisible(False)
         self._style_total_bar()
-        bw.addWidget(self.total_bar)
-        root.addWidget(bar_wrap)
+        body.addWidget(self.total_bar)
 
         hint = QLabel("PROCESY A PLUGINY")
         hint.setStyleSheet("font-size:10px;font-weight:700;letter-spacing:1px;color:" + self._pal['muted'] + ";")
-        root.addWidget(hint)
+        body.addWidget(hint)
         self.rows_box = QVBoxLayout()
-        self.rows_box.setSpacing(3)
-        root.addLayout(self.rows_box)
-        root.addStretch()
+        self.rows_box.setSpacing(5)
+        body.addLayout(self.rows_box)
+        body.addStretch()
 
     def _clear_rows(self):
         while self.rows_box.count():
@@ -200,7 +243,7 @@ class PerfOverlay(QWidget):
         app_mb, app_cpu, plugins = _collect(self.state)
         # Grow with the real plugin count so the final rows are not clipped.
         # Keep the bottom edge anchored above the sidebar button.
-        desired = max(390, min(650, 245 + (len(plugins) + 1) * 29))
+        desired = max(350, min(620, 270 + (len(plugins) + 1) * 34))
         if desired != self.height():
             old_bottom = self.y() + self.height()
             self.setFixedHeight(desired)
@@ -211,6 +254,7 @@ class PerfOverlay(QWidget):
             self.move(self.x(), y)
         self.total_lbl.setText(f"RAM\n{app_mb:.0f} MB")
         self.cpu_lbl.setText(f"CPU\n{app_cpu:.0f} %")
+        self.plugin_count_lbl.setText(f"PLUGINY\n{len(plugins)}")
         # The total bar is relative to a 1 GB soft cap for a quick visual feel.
         self.total_bar.setValue(min(100, int(app_mb / 1024 * 100)))
         self._clear_rows()
@@ -225,7 +269,9 @@ class PerfOverlay(QWidget):
         root_ram.setStyleSheet("font-size:11px;font-weight:700;color:" + self._pal['muted'] + ";")
         root_row.addWidget(root_icon); root_row.addWidget(root_name); root_row.addStretch(); root_row.addWidget(root_ram)
         root_wrap = QWidget(); root_wrap.setLayout(root_row)
-        root_wrap.setStyleSheet("background:transparent;border:none;")
+        root_wrap.setStyleSheet(
+            "background:" + self._pal['card2'] + ";border:1px solid "
+            + self._pal['border'] + ";border-radius:8px;")
         self.rows_box.addWidget(root_wrap)
         if not plugins:
             lbl = QLabel("žiadne pluginy")
@@ -262,7 +308,9 @@ class PerfOverlay(QWidget):
             row.addWidget(val)
             wrap = QWidget()
             wrap.setLayout(row)
-            wrap.setStyleSheet("background: transparent; border: none;")
+            wrap.setStyleSheet("background:" + self._pal['card2']
+                               + ";border:1px solid " + self._pal['border']
+                               + ";border-radius:8px;")
             self.rows_box.addWidget(wrap)
 
     # --- drag by the title area ---

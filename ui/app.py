@@ -6,10 +6,12 @@ from PyQt6.QtWidgets import (
     QWidget, QStackedWidget, QFrame, QScrollArea,
 )
 from PyQt6.QtCore import QTimer, Qt, QSize, QRectF
-from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from PyQt6.QtGui import (QColor, QFont, QPainter, QPainterPath, QPen,
+                         QRegion)
 
 from ui.settings_menu import SettingsMenu
 from ui.map_page import MapPage
+from ui.icons import line_icon
 
 # All theming comes from core.theme.stylesheet() applied in UltraPilotApp; the
 # old inline LIGHT_THEME/DARK_THEME strings here were dead code (never applied).
@@ -27,6 +29,15 @@ def window_control_notch_path(width, height):
     path.cubicTo(7.0, height, 7.0, height - 7.0, 0.0, height - 9.0)
     path.closeSubpath()
     return path
+
+
+def rounded_window_region(width, height, radius=15.0):
+    """Antialiased-looking top-level mask for the frameless window."""
+    path = QPainterPath()
+    path.addRoundedRect(QRectF(0.0, 0.0, max(1.0, float(width) - 1.0),
+                               max(1.0, float(height) - 1.0)),
+                        float(radius), float(radius))
+    return QRegion(path.toFillPolygon().toPolygon())
 
 
 class WindowControlDot(QPushButton):
@@ -433,8 +444,9 @@ class UltraPilotApp(QMainWindow):
         self.state = state
         self.setWindowTitle("UltraPilot")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
-        self.resize(1000, 640)
-        self.setMinimumSize(880, 560)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.resize(1220, 760)
+        self.setMinimumSize(980, 640)
         from core.theme import stylesheet, palette
         self._theme = (state.get("ui_theme", "light") or "light")
         self._pal = palette(self._theme)
@@ -456,7 +468,8 @@ class UltraPilotApp(QMainWindow):
             if app is not None:
                 app.setWindowIcon(icon)
 
-        central = QWidget()
+        central = QFrame()
+        central.setObjectName("WindowSurface")
         self.setCentralWidget(central)
         root_layout = QVBoxLayout(central)
         root_layout.setContentsMargins(0, 0, 0, 0)
@@ -549,7 +562,6 @@ class UltraPilotApp(QMainWindow):
                 section.setObjectName("NavSection")
                 sb.addWidget(section)
                 continue
-            from ui.icons import line_icon
             b = QPushButton(text)
             b.setIcon(line_icon(icon_text))
             b.setIconSize(QSize(20, 20))
@@ -581,6 +593,9 @@ class UltraPilotApp(QMainWindow):
         self.perf_btn.setFixedHeight(32)
         self.perf_btn.setToolTip("Performance")
         self.perf_btn.setObjectName("SidebarPerformance")
+        self.perf_btn.setIcon(line_icon("performance"))
+        self.perf_btn.setIconSize(QSize(18, 18))
+        self.perf_btn.setText("Výkon aplikácie")
         # Black/white style toggle kept minimal — colour flips with state below.
         self.perf_btn.clicked.connect(self.toggle_perf_overlay)
         footer_layout.addWidget(self.perf_btn)
@@ -615,9 +630,16 @@ class UltraPilotApp(QMainWindow):
         _add(lambda: AboutPage(state), "About")
         main_layout.addWidget(self.pages)
 
-        self.start_btn = QPushButton("▶ ZAPNÚŤ AUTOPILOT")
+        self.start_btn = QPushButton("ZAPNÚŤ AUTOPILOT")
+        self.start_btn.setObjectName("SidebarAutopilot")
+        self.start_btn.setFixedHeight(42)
+        self.start_btn.setIcon(line_icon("autopilot", "#FFFFFF"))
+        self.start_btn.setIconSize(QSize(18, 18))
         self.start_btn.clicked.connect(self.toggle_autopilot)
-        self.statusBar().addWidget(self.start_btn)
+        # The old QMainWindow status bar painted the unexplained full-width
+        # white rectangle at the bottom. Keep the action inside the sidebar.
+        sb.insertSpacing(max(0, sb.count() - 1), 8)
+        sb.insertWidget(max(0, sb.count() - 1), self.start_btn)
         self._render_start_btn()
 
         self.timer = QTimer()
@@ -639,11 +661,13 @@ class UltraPilotApp(QMainWindow):
         lang = self.state.get("ui_language_code", "sk") or "sk"
         active = self.state.get("autopilot_active", False)
         if active:
-            self.start_btn.setText("■  " + t(lang, "app", "disable_ap"))
-            self.start_btn.setStyleSheet("background-color: " + self._pal['danger'] + "; color: #FFFFFF; font-weight: bold; padding: 8px 18px; border-radius: 8px;")
+            self.start_btn.setText(t(lang, "app", "disable_ap"))
         else:
-            self.start_btn.setText("▶  " + t(lang, "app", "enable_ap"))
-            self.start_btn.setStyleSheet("background-color: " + self._pal['success'] + "; color: #FFFFFF; font-weight: bold; padding: 8px 18px; border-radius: 8px;")
+            self.start_btn.setText(t(lang, "app", "enable_ap"))
+        if self.start_btn.property("active") != bool(active):
+            self.start_btn.setProperty("active", bool(active))
+            self.start_btn.style().unpolish(self.start_btn)
+            self.start_btn.style().polish(self.start_btn)
 
     def toggle_autopilot(self):
         import time
@@ -695,6 +719,10 @@ class UltraPilotApp(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if self.isMaximized():
+            self.clearMask()
+        else:
+            self.setMask(rounded_window_region(self.width(), self.height()))
         if hasattr(self, "drag_area"):
             self.drag_area.setGeometry(0, 0, self.centralWidget().width(), 34)
             self.drag_area.raise_()
@@ -706,11 +734,27 @@ class UltraPilotApp(QMainWindow):
     def showEvent(self, event):
         """The main window is up — let the HUD process know it can appear now."""
         self._set_native_windows_icon()
+        self._apply_native_rounded_corners()
+        if not self.isMaximized():
+            self.setMask(rounded_window_region(self.width(), self.height()))
         try:
             self.state.set("ui_ready", True)
         except Exception:
             pass
         super().showEvent(event)
+
+    def _apply_native_rounded_corners(self):
+        """Ask Windows 11 DWM for the native rounded-corner treatment."""
+        if os.name != "nt":
+            return
+        try:
+            import ctypes
+            preference = ctypes.c_int(2)  # DWMWCP_ROUND
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                int(self.winId()), 33, ctypes.byref(preference),
+                ctypes.sizeof(preference))
+        except Exception:
+            pass
 
     def _set_native_windows_icon(self):
         """Set WM/class icons as well as QIcon for the Windows taskbar.

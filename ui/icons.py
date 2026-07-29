@@ -35,6 +35,18 @@ def line_icon(name: str, color="#4B5563", size=22) -> QIcon:
             p.setBrush(QColor(color))
             p.drawEllipse(QRectF(knob_x - 1.7, y - 1.7, 3.4, 3.4))
             p.setBrush(Qt.BrushStyle.NoBrush)
+    elif name == "performance":
+        p.drawLine(QPointF(4.0, 17.5), QPointF(4.0, 12.5))
+        p.drawLine(QPointF(8.5, 17.5), QPointF(8.5, 8.5))
+        p.drawLine(QPointF(13.0, 17.5), QPointF(13.0, 5.0))
+        p.drawLine(QPointF(17.5, 17.5), QPointF(17.5, 10.5))
+        p.drawLine(QPointF(3.0, 18.5), QPointF(19.0, 18.5))
+    elif name == "autopilot":
+        p.drawEllipse(QRectF(4.0, 4.0, 14.0, 14.0))
+        p.drawEllipse(QRectF(9.0, 9.0, 4.0, 4.0))
+        p.drawLine(QPointF(6.0, 8.0), QPointF(9.3, 10.1))
+        p.drawLine(QPointF(16.0, 8.0), QPointF(12.7, 10.1))
+        p.drawLine(QPointF(11.0, 13.0), QPointF(11.0, 17.0))
     elif name == "settings":
         p.drawEllipse(QRectF(5,5,12,12)); p.drawEllipse(QRectF(9,9,4,4))
         for a,b,c,d in ((11,2,11,5),(11,17,11,20),(2,11,5,11),(17,11,20,11),(4,4,6,6),(16,16,18,18),(18,4,16,6),(4,18,6,16)):
