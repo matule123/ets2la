@@ -84,6 +84,15 @@ class Plugin(BasePlugin):
         self._last_failed_route_diagnostic = None
         self._build_guard = NavigationBuildGuard()
         self._build_tokens = {}
+        if not isinstance(self.sdk.get("map_load_progress"), dict):
+            self.sdk.set("map_load_progress", {
+                "active": False,
+                "percent": 0,
+                "phase": "Čakám na mapu",
+                "message": "Čakám na načítanie mapového datasetu.",
+                "map_key": None,
+                "generation": self._map_load_generation,
+            })
         legacy_gps_evidence = bool(
             self.sdk.get("game_gps_navigation_active", False)
             or self.sdk.get("dest_city")
@@ -1427,6 +1436,14 @@ class Plugin(BasePlugin):
                 "map_road_segments_revision": self._roads_revision,
                 "lane_match": None,
                 "nav_command_result": None,
+                "map_load_progress": {
+                    "active": True,
+                    "percent": 0,
+                    "phase": "Pripravujem mapový dataset",
+                    "message": "Pripravujem mapový dataset — 0 %",
+                    "map_key": arg,
+                    "generation": self._map_load_generation,
+                },
             })
             self.sdk.set("map_status", f"Loading map dataset {arg}...")
             logging.info("Navigation: switching map dataset to %s.", arg)
@@ -1506,25 +1523,62 @@ class Plugin(BasePlugin):
                                  dataset_fingerprint(data_dir))
                     self.sdk.set("map_status",
                                  f"Loading road network ({chosen['key']})…")
+                    def _load_progress(fraction, phase):
+                        if generation != self._map_load_generation:
+                            return
+                        percent = max(0, min(100, int(round(
+                            float(fraction) * 100.0))))
+                        message = f"{phase} — {percent} %"
+                        self.sdk.shared_state.update_batch({
+                            "map_status": message,
+                            "map_load_progress": {
+                                "active": percent < 100,
+                                "percent": percent,
+                                "phase": str(phase),
+                                "message": message,
+                                "map_key": chosen["key"],
+                                "generation": generation,
+                            },
+                        })
+
+                    _load_progress(0.0, "Pripravujem mapový dataset")
                     net = RoadNetwork()
-                    if net.load(data_dir):
+                    if net.load(data_dir, progress_cb=_load_progress):
                         if generation != self._map_load_generation:
                             logging.info(
                                 "Navigation: discarded stale map load for %s.",
                                 chosen["key"])
                             return
                         self.road_net = net
-                        self.sdk.set("map_status",
-                                     f"Map ready ({len(net.segments)} segments). "
-                                     "Waiting for the in-game GPS route.")
+                        ready = (f"Mapa je pripravená ({len(net.segments)} "
+                                 "ciest). Čakám na hernú GPS trasu.")
+                        self.sdk.shared_state.update_batch({
+                            "map_status": ready,
+                            "map_load_progress": {
+                                "active": False,
+                                "percent": 100,
+                                "phase": "Mapa je pripravená",
+                                "message": ready,
+                                "map_key": chosen["key"],
+                                "generation": generation,
+                            },
+                        })
                         logging.info("Navigation: road network loaded engine-side "
                                      "(%d segments, key=%s).", len(net.segments), chosen["key"])
                     else:
                         # Allow a retry on the next run, not this one.
                         self._net_attempted = False
                         self.sdk.set("navigation_unreliable", True)
-                        self.sdk.set("map_status",
-                                     "Map data unreadable — will retry.")
+                        self.sdk.shared_state.update_batch({
+                            "map_status": "Mapové dáta sa nedajú načítať.",
+                            "map_load_progress": {
+                                "active": False, "percent": 0,
+                                "phase": "Načítanie zlyhalo",
+                                "message": "Mapové dáta sa nedajú načítať.",
+                                "map_key": chosen["key"],
+                                "generation": generation,
+                            },
+                        })
                         self._publish_invalid_lane_trajectory(
                             "Map data is unreadable", (),
                             "Map data is unreadable", log_failure=False,
@@ -1533,6 +1587,12 @@ class Plugin(BasePlugin):
                     logging.error("Navigation: engine-side road network load failed: %s", e)
                     self.sdk.set("navigation_unreliable", True)
                     self.sdk.set("map_status", f"Map load error: {e}")
+                    self.sdk.set("map_load_progress", {
+                        "active": False, "percent": 0,
+                        "phase": "Načítanie zlyhalo",
+                        "message": f"Chyba načítania mapy: {e}",
+                        "generation": generation,
+                    })
                     self._publish_invalid_lane_trajectory(
                         f"Map load error: {e}", (),
                         f"Map load error: {e}", log_failure=False,

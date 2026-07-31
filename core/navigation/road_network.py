@@ -157,21 +157,40 @@ class RoadNetwork:
         self.loaded = False
 
     # --- Loading --------------------------------------------------------------
-    def load(self, data_dir: str) -> bool:
+    def load(self, data_dir: str, progress_cb=None) -> bool:
+        """Load one dataset and optionally report coarse, read-only progress.
+
+        ``progress_cb`` receives ``(fraction, phase)`` only at phase
+        boundaries. Callback failures are observational and cannot alter the
+        loader result.
+        """
+        def report(fraction, phase):
+            if progress_cb is None:
+                return
+            try:
+                progress_cb(float(fraction), str(phase))
+            except Exception:
+                logging.debug("road_network: progress callback failed",
+                              exc_info=True)
+
         # Fast path: a pickled cache of the parsed network, keyed on the mtimes
         # of the source JSON files. Loading 1.1M nodes from JSON takes ~5-7s;
         # unpickling the ready object takes ~1s. Rebuilds automatically when the
         # dataset is updated or its version changes.
+        report(0.02, "Kontrolujem mapovú cache")
         if self._try_load_cache(data_dir):
+            report(1.0, "Mapa je pripravená")
             return True
 
         nodes_path = _find_json(data_dir, "nodes")
         roads_path = _find_json(data_dir, "roads")
         if not nodes_path or not roads_path:
             logging.error("road_network: nodes/roads json not found in %s", data_dir)
+            report(1.0, "Chýbajú mapové dáta")
             return False
 
         try:
+            report(0.10, "Načítavam uzly")
             raw_nodes = _loadf(nodes_path)
             for n in raw_nodes:
                 uid = _uid(n["uid"])
@@ -192,6 +211,7 @@ class RoadNetwork:
                 self.node_forward_item[uid] = _uid(n.get("forwardItemUid"))
                 self.node_backward_item[uid] = _uid(n.get("backwardItemUid"))
                 self._ngrid.setdefault(self._cell(x, y), []).append(uid)
+            report(0.38, "Uzly sú načítané")
         except Exception as e:
             logging.exception("road_network: failed to load nodes: %s", e)
             return False
@@ -201,6 +221,7 @@ class RoadNetwork:
         except Exception:
             pass
         try:
+            report(0.42, "Načítavam cesty")
             raw_roads = _loadf(roads_path)
             for r in raw_roads:
                 su, eu = _uid(r.get("startNodeUid")), _uid(r.get("endNodeUid"))
@@ -226,6 +247,7 @@ class RoadNetwork:
                     if tok:
                         self._road_look_token[su] = tok
                         self._road_look_token[eu] = tok
+            report(0.64, "Cesty sú načítané")
         except Exception as e:
             logging.exception("road_network: failed to load roads: %s", e)
             return False
@@ -234,17 +256,22 @@ class RoadNetwork:
         # Prefer the dense navigation graph (graph.json) when available — it's
         # the same graph ETS2LA's Map plugin pathfinds on, so it's far more
         # complete than the roads-only adjacency. Falls back silently to `adj`.
+        report(0.69, "Načítavam GPS konektivitu")
         self._load_nav_graph(data_dir)
+        report(0.77, "Načítavam prefaby a križovatky")
         self._load_prefabs(data_dir)
         # Road-look table: classifies each road segment (motorway / expressway /
         # local / dirt) + lane count, used by the autopilot to slow down on
         # narrow/local roads and cap speed in city sectors.
+        report(0.88, "Načítavam typy ciest a pruhy")
         self._load_road_looks(data_dir)
         logging.info("road_network: loaded %d nodes, %d segments, nav-graph nodes=%d",
                      len(self.nodes), len(self.segments),
                      len(self.fwd) if self.fwd else len(self.adj))
         # Persist the parsed network so the next launch is fast (~1s vs ~6s).
+        report(0.95, "Ukladám zrýchľovaciu cache")
         self._save_cache(data_dir)
+        report(1.0, "Mapa je pripravená")
         return True
 
     # --- Pickle cache ---------------------------------------------------------
@@ -1051,6 +1078,72 @@ class RoadNetwork:
                     and (not end_lanes or indices[-1] in end_lanes)]
         return sorted(set(filtered))
 
+    def _prefab_parallel_lane_options(self, instance, start_uid, end_uid):
+        """Return PPD-proven parallel lanes for one physical GPS connection.
+
+        ``navNodes.connections`` stores a representative AI path. Parallel
+        lanes are encoded by inputLanes/outputLanes and reciprocal curve
+        nextLines/prevLines. This enumerator is used only when the
+        representative path is physically offset from the confirmed incoming
+        road lane or the live truck position, never as a general alternative-
+        route search. An inferred prefab output cannot recursively authorize
+        another sibling selection.
+        """
+        token, uids, _origin = instance[:3]
+        try:
+            start_item, end_item = (uids.index(start_uid),
+                                    uids.index(end_uid))
+        except ValueError:
+            return []
+        lane_data = self._prefab_lane_data.get(token) or {}
+        desc = self._prefab_desc.get(token)
+        if not desc:
+            return []
+        nav_nodes = desc[2]
+        end_nav = next((index for index, node in enumerate(nav_nodes)
+                        if node[0] == "physical" and node[1] == end_item), None)
+        if end_nav is None:
+            return []
+        nodes = lane_data.get("nodes", ())
+        curves = tuple(lane_data.get("curves", ()))
+        if not (0 <= start_item < len(nodes) and 0 <= end_item < len(nodes)):
+            return []
+        starts = tuple(int(value) for value in nodes[start_item]["input_lanes"])
+        ends = tuple(int(value) for value in nodes[end_item]["output_lanes"])
+        all_outputs = {int(value) for node in nodes
+                       for value in node.get("output_lanes", ())}
+        options = []
+
+        def walk_lane(curve_index, chain, visited):
+            if curve_index in ends:
+                nav_index = int(curves[curve_index].get(
+                    "nav_node_index", -1))
+                if (nav_index == -1
+                        or (0 <= nav_index < len(nav_nodes)
+                            and (nav_index == end_nav
+                                 or nav_nodes[nav_index][1]
+                                    == nav_nodes[end_nav][1]))):
+                    candidate = tuple(chain)
+                    if self._curve_chain_is_valid(lane_data, candidate):
+                        options.append(candidate)
+                return
+            for next_index in curves[curve_index].get("next_lines", ()):
+                next_index = int(next_index)
+                if (next_index in visited
+                        or not (0 <= next_index < len(curves))
+                        or (next_index in all_outputs
+                            and next_index not in ends)
+                        or curve_index not in curves[next_index].get(
+                            "prev_lines", ())):
+                    continue
+                walk_lane(next_index, chain + (next_index,),
+                          visited | {next_index})
+
+        for start_curve in starts:
+            if 0 <= start_curve < len(curves):
+                walk_lane(start_curve, (start_curve,), {start_curve})
+        return sorted(set(options))
+
     def _prefab_curve_chain_3d(self, instance, indices):
         token, uids, origin_index = instance[:3]
         descriptor_order = bool(instance[3]) if len(instance) > 3 else False
@@ -1190,7 +1283,7 @@ class RoadNetwork:
         return tuple(lane_points)
 
     def _prefab_lane_segment(self, edge, lane_index, start_position=None,
-                             register=True):
+                             register=True, allow_parallel_sibling=False):
         """Resolve a GPS-selected prefab edge to one proven navCurve chain.
 
         ETS2LA does not assume that road lane index N equals prefab input N.
@@ -1216,6 +1309,46 @@ class RoadNetwork:
                 output_lanes = ()
             options = self._prefab_connector_options(
                 instance, edge.start_uid, edge.end_uid)
+            if (allow_parallel_sibling
+                    and start_position is not None and options):
+                sx = float(start_position.x if hasattr(start_position, "x")
+                           else start_position[0])
+                sy = float(start_position.y if hasattr(start_position, "y")
+                           else start_position[1])
+                sz = float(start_position.z if hasattr(start_position, "z")
+                           else start_position[2])
+                representative_gaps = []
+                for option in options:
+                    option_points = self._prefab_curve_chain_3d(
+                        instance, option)
+                    if option_points:
+                        representative_gaps.append(math.dist(
+                            (sx, sy, sz),
+                            (option_points[0].x, option_points[0].y,
+                             option_points[0].z)))
+                # The representative navNode connector can describe only one
+                # of several parallel lanes. Consult reciprocal PPD lane links
+                # only when that representative is demonstrably not the live
+                # incoming lane. This keeps roundabouts and already continuous
+                # prefabs on their former deterministic path.
+                if (representative_gaps
+                        and min(representative_gaps) > 1.0):
+                    aligned_siblings = []
+                    for sibling in self._prefab_parallel_lane_options(
+                            instance, edge.start_uid, edge.end_uid):
+                        sibling_points = self._prefab_curve_chain_3d(
+                            instance, sibling)
+                        if (sibling_points and math.dist(
+                                (sx, sy, sz),
+                                (sibling_points[0].x,
+                                 sibling_points[0].y,
+                                 sibling_points[0].z)) <= 1.0):
+                            aligned_siblings.append(sibling)
+                    # One exact lane-centre match is evidence. Zero or several
+                    # matches are not; retain the navNode representative so
+                    # an unrelated fork/loop cannot become a hidden choice.
+                    if len(aligned_siblings) == 1:
+                        options = aligned_siblings
             preferred_curve = (input_lanes[min(lane_index, len(input_lanes)-1)]
                                if input_lanes else None)
             if start_position is not None:
@@ -1428,7 +1561,8 @@ class RoadNetwork:
                     continue
             for lane_index in range(max(1, lane_count)):
                 segment, _reason = self._prefab_lane_segment(
-                    edge, lane_index, position, register=register)
+                    edge, lane_index, position, register=register,
+                    allow_parallel_sibling=True)
                 if segment is None or segment.lane_id in seen:
                     continue
                 projected = LaneLocator._project(position, segment)
@@ -1701,7 +1835,10 @@ class RoadNetwork:
                 incoming_point = (selected[-1].centerline[-1] if selected
                                   else start_match.point)
                 current, reason = self._prefab_lane_segment(
-                    edge, lane_index, incoming_point)
+                    edge, lane_index, incoming_point,
+                    allow_parallel_sibling=(
+                        not selected
+                        or selected[-1].lane_id.prefab_token is None))
                 if current is None:
                     return tuple(selected), (
                         f"{reason} for prefab {edge.start_uid} -> {edge.end_uid}")
@@ -2101,7 +2238,8 @@ class RoadNetwork:
                     if prefix_edge is not None and prefix_edge.kind == "prefab":
                         prefix, _reason = self._prefab_lane_segment(
                             prefix_edge, active.lane_index,
-                            active.centerline[-1])
+                            active.centerline[-1],
+                            allow_parallel_sibling=True)
                 if prefix is not None:
                     active = self._retarget_road_end_to_prefab(active, prefix)
                     first_connection = self._lane_connection(active, prefix)

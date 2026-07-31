@@ -50,11 +50,11 @@ class WindowControlDot(QPushButton):
         self.setAccessibleName(tooltip)
         self.setToolTip(tooltip)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedSize(11, 11)
+        self.setFixedSize(10, 10)
         self.setStyleSheet(
-            f"QPushButton{{background:{color};border:1px solid rgba(0,0,0,0.34);"
+            f"QPushButton{{background:{color};border:1px solid rgba(0,0,0,0.28);"
             "border-radius:5px;padding:0;margin:0;}"
-            "QPushButton:hover{border:1px solid rgba(0,0,0,0.62);}")
+            "QPushButton:hover{border:1px solid rgba(0,0,0,0.55);}")
         self.clicked.connect(action)
 
     def paintEvent(self, event):
@@ -82,15 +82,15 @@ class MacTitleBar(QFrame):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setStyleSheet("#MacTitleBar{background:transparent;border:none;}")
         row = QHBoxLayout(self)
-        row.setContentsMargins(14, 8, 9, 11)
-        row.setSpacing(7)
+        row.setContentsMargins(16, 8, 10, 12)
+        row.setSpacing(5)
         self.controls = {}
         for key, color, glyph, tip, action in (
-                ("maximize", "#00D647", "+", "Maximalizovať",
+                ("maximize", "#238C4F", "+", "Maximalizovať",
                  self._toggle_maximize),
-                ("minimize", "#FFB800", "−", "Minimalizovať",
+                ("minimize", "#C49308", "−", "Minimalizovať",
                  window.showMinimized),
-                ("close", "#FF3B30", "×", "Zavrieť", window.close)):
+                ("close", "#B43D35", "×", "Zavrieť", window.close)):
             dot = WindowControlDot(color, glyph, f"WindowControl-{key}",
                                    tip, action, self)
             row.addWidget(dot)
@@ -416,8 +416,15 @@ class PluginsPage(Page):
 
         def toggle():
             new_value = not bool(self.state.get(f"plugin_enabled.{name}", True))
+            try:
+                from core.settings.manager import SettingsManager
+                SettingsManager().set_plugin_enabled(name, new_value)
+            except Exception as error:
+                logging.error("Could not persist plugin '%s': %s", name, error)
+                return
             self.state.set(f"plugin_enabled.{name}", new_value)
-            logging.info("Toggled plugin '%s' -> %s", name, new_value)
+            logging.info("Toggled and saved plugin '%s' -> %s",
+                         name, new_value)
             self.refresh_plugins()
 
         action.clicked.connect(toggle)

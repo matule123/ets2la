@@ -1,5 +1,6 @@
 import math
 import unittest
+from unittest import mock
 
 from core.navigation.lane_model import LaneId, LaneLocator, LanePoint, LaneSegment
 from core.navigation.road_network import RoadNetwork
@@ -80,6 +81,26 @@ class SyntheticMap:
 
 
 class LaneRouteBuilderTests(unittest.TestCase):
+    def test_map_load_progress_is_phase_based_and_observational(self):
+        net = RoadNetwork()
+        phases = []
+        with mock.patch.object(net, "_try_load_cache", return_value=True):
+            self.assertTrue(net.load(
+                "unused",
+                progress_cb=lambda fraction, phase:
+                    phases.append((fraction, phase))))
+        self.assertEqual(phases[0][0], 0.02)
+        self.assertEqual(phases[-1][0], 1.0)
+        self.assertIn("cache", phases[0][1].lower())
+
+        def broken_observer(_fraction, _phase):
+            raise RuntimeError("UI observer failed")
+
+        isolated = RoadNetwork()
+        with mock.patch.object(isolated, "_try_load_cache", return_value=True):
+            self.assertTrue(isolated.load(
+                "unused", progress_cb=broken_observer))
+
     def test_confirmed_prefab_exit_tapers_into_following_road(self):
         prefab_id = LaneId(10, 1, 0, "junction", 3, (3,))
         road_id = LaneId(20, 1, 0)

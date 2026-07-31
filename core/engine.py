@@ -178,6 +178,13 @@ class UltraPilotEngine:
 
         # Publish current settings so plugins (other processes) can read them.
         self.shared_state.set("settings", self.settings.settings)
+        # Plugin workers and the UI consume the live flat keys.  Seed them from
+        # the persisted map before discovery so the first frame already agrees
+        # with the choices from the previous run.
+        for plugin_name, enabled in (
+                self.settings.get("plugins", {}) or {}).items():
+            self.shared_state.set(
+                f"plugin_enabled.{plugin_name}", bool(enabled))
         # Master safety switch: nothing is sent to the game until enabled.
         if self.shared_state.get("autopilot_active") is None:
             self.shared_state.set("autopilot_active", False)

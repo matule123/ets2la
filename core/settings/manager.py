@@ -1,6 +1,7 @@
 import json
 import os
 import logging
+import tempfile
 from typing import Any, Dict
 
 class SettingsManager:
@@ -30,13 +31,35 @@ class SettingsManager:
             self.save()
 
     def save(self):
-        """Save current settings to disk."""
+        """Save current settings atomically.
+
+        The UI and the map worker both update settings.  Replacing a complete
+        temporary file prevents a process interruption from leaving a partial
+        JSON document that would forget the user's enabled plugins.
+        """
+        temporary = None
         try:
-            with open(self.filename, 'w') as f:
+            directory = os.path.dirname(self.filename) or "."
+            os.makedirs(directory, exist_ok=True)
+            fd, temporary = tempfile.mkstemp(
+                prefix=".settings-", suffix=".tmp", dir=directory)
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 json.dump(self.settings, f, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary, self.filename)
+            temporary = None
             logging.info("Settings saved to disk.")
+            return True
         except Exception as e:
             logging.error(f"Error saving settings: {e}")
+            return False
+        finally:
+            if temporary:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
 
     def get(self, key: str, default: Any = None) -> Any:
         """Retrieve a setting value."""
@@ -46,6 +69,21 @@ class SettingsManager:
         """Set a setting value and save to disk."""
         self.settings[key] = value
         self.save()
+
+    def plugin_enabled(self, name: str, default: bool = True) -> bool:
+        """Return the persisted state for one plugin."""
+        plugins = self.settings.get("plugins", {}) or {}
+        return bool(plugins.get(str(name), default))
+
+    def set_plugin_enabled(self, name: str, enabled: bool):
+        """Persist one plugin without discarding the other plugin choices."""
+        previous = dict(self.settings.get("plugins", {}) or {})
+        plugins = dict(previous)
+        plugins[str(name)] = bool(enabled)
+        self.settings["plugins"] = plugins
+        if not self.save():
+            self.settings["plugins"] = previous
+            raise OSError("plugin setting could not be saved")
 
     def _get_defaults(self) -> Dict[str, Any]:
         """Default settings for the first run."""

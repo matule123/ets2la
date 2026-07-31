@@ -107,13 +107,40 @@ class MapView(QWidget):
         self._drag_at = None
         self.setMinimumHeight(300)
         self.setCursor(Qt.CursorShape.OpenHandCursor)
-        self.live_badge = QLabel("●  LIVE MAP", self)
+        self.live_badge = QLabel("●  LIVE", self)
         self.live_badge.setObjectName("LiveMapBadge")
         self.live_badge.setStyleSheet(
-            "background:rgba(19,24,28,225);color:#34D399;"
-            "border:1px solid #2F3A3E;border-radius:10px;padding:6px 10px;"
+            "background:rgba(19,24,28,232);color:#35C779;"
+            "border:1px solid #34383C;border-radius:9px;padding:5px 9px;"
             "font-size:11px;font-weight:750;")
         self.live_badge.adjustSize()
+        self.turn_banner = QLabel("", self)
+        self.turn_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.turn_banner.setStyleSheet(
+            "background:#119B5B;color:white;border:none;border-radius:12px;"
+            "padding:12px 22px;font-size:20px;font-weight:800;")
+        self.turn_banner.hide()
+        self.map_credit = QLabel("UltraPilot Maps", self)
+        self.map_credit.setStyleSheet(
+            "background:transparent;color:rgba(220,223,226,115);"
+            "border:none;font-size:9px;")
+        self.map_credit.adjustSize()
+        self.map_controls = []
+        for caption, tooltip, callback in (
+                ("+", "Priblížiť", self.zoom_in),
+                ("−", "Oddialiť", self.zoom_out),
+                ("⌖", "Vycentrovať na kamión", self.reset_view)):
+            button = QPushButton(caption, self)
+            button.setToolTip(tooltip)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setFixedSize(32, 30)
+            button.setStyleSheet(
+                "QPushButton{background:rgba(31,34,37,235);color:#E7E9EB;"
+                "border:1px solid #484C50;border-radius:7px;font-size:17px;"
+                "font-weight:700;padding:0;}"
+                "QPushButton:hover{background:#3B4045;border-color:#6A7076;}")
+            button.clicked.connect(callback)
+            self.map_controls.append(button)
         self.empty_state = QLabel(
             "<div style='font-size:17px;font-weight:700;color:#F3F4F6;'>"
             "Čakám na živú mapu</div>"
@@ -134,6 +161,16 @@ class MapView(QWidget):
         super().resizeEvent(event)
         self.live_badge.move(14, 14)
         self.live_badge.raise_()
+        for index, button in enumerate(self.map_controls):
+            button.move(max(8, self.width() - 44), 14 + index * 35)
+            button.raise_()
+        self.map_credit.move(
+            max(8, self.width() - self.map_credit.width() - 12),
+            max(8, self.height() - self.map_credit.height() - 8))
+        self.map_credit.raise_()
+        self.turn_banner.move(
+            max(54, (self.width() - self.turn_banner.width()) // 2), 14)
+        self.turn_banner.raise_()
         self.empty_state.move(max(14, (self.width() - self.empty_state.width()) // 2),
                               max(52, (self.height() - self.empty_state.height()) // 2))
         self.empty_state.raise_()
@@ -143,10 +180,18 @@ class MapView(QWidget):
         self.pan_world[:] = [0.0, 0.0]
         self.update()
 
+    def zoom_in(self):
+        self.zoom_radius = max(70.0, self.zoom_radius * 0.78)
+        self.update()
+
+    def zoom_out(self):
+        self.zoom_radius = min(650.0, self.zoom_radius * 1.28)
+        self.update()
+
     def wheelEvent(self, event):
         # Wheel up zooms in, wheel down zooms out to a broad regional view.
         factor = 0.78 if event.angleDelta().y() > 0 else 1.28
-        self.zoom_radius = max(90.0, min(500.0, self.zoom_radius * factor))
+        self.zoom_radius = max(70.0, min(650.0, self.zoom_radius * factor))
         self.update()
         event.accept()
 
@@ -181,7 +226,11 @@ class MapView(QWidget):
             "background-color:#151515;border:1px solid #303238;border-radius:10px;")
 
     def set_road_segments(self, payload):
-        """Keep only finite X/Z endpoints from the lightweight live snapshot."""
+        """Keep finite display geometry and all road-style metadata.
+
+        These fields are display-only.  Preserving them fixes the former live
+        map which reduced every motorway and prefab to the same two-pixel line.
+        """
         segments = []
         for item in (payload or [])[:1200]:
             try:
@@ -189,7 +238,19 @@ class MapView(QWidget):
                 values = float(a[0]), float(a[1]), float(b[0]), float(b[1])
                 if not all(math.isfinite(value) for value in values):
                     continue
-                segments.append((values[:2], values[2:]))
+                segments.append({
+                    "a": values[:2], "b": values[2:],
+                    "kind": str(item[2]) if len(item) > 2 else "road",
+                    "lanes": max(1, int(item[3])) if len(item) > 3 else 2,
+                    "divided": bool(item[4]) if len(item) > 4 else False,
+                    "dash_on": bool(item[5]) if len(item) > 5 else True,
+                    "half_width": max(1.5, float(item[8]))
+                    if len(item) > 8 and item[8] is not None else 4.8,
+                    "suppress_markings": bool(item[9])
+                    if len(item) > 9 else False,
+                    "path_key": str(item[10]) if len(item) > 10 else "",
+                    "path_index": int(item[11]) if len(item) > 11 else 0,
+                })
             except (TypeError, ValueError, IndexError):
                 continue
         self.road_segments = segments
@@ -204,13 +265,8 @@ class MapView(QWidget):
         qp.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
         qp.setPen(Qt.PenStyle.NoPen)
-        qp.setBrush(QColor("#151515"))
+        qp.setBrush(QColor("#171817"))
         qp.drawRoundedRect(self.rect(), 10, 10)
-        qp.setPen(QPen(QColor("#202326"), 1))
-        for x in range(0, w, 42):
-            qp.drawLine(x, 0, x, h)
-        for y in range(0, h, 42):
-            qp.drawLine(0, y, w, y)
 
         truck = self.state.get("truck_world_pos")
         heading = self.state.get("truck_heading", 0.0) or 0.0
@@ -221,6 +277,7 @@ class MapView(QWidget):
             self._paint_map(qp, w, h, truck, heading)
             return
 
+        self.turn_banner.hide()
         pts = [point for point in (
             self._to_xz(point)
             for point in live_map_navigation_points(self.state))
@@ -267,7 +324,7 @@ class MapView(QWidget):
             qp.drawPolygon(QPolygonF([tip, left, right]))
 
     def _paint_map(self, qp, w, h, truck, heading):
-        """Continuous road-network view with wheel zoom and mouse panning."""
+        """TruckSim-style layered view of our own SCS road snapshot."""
         radius = self.zoom_radius
         scale = (min(w, h) - 20) / (2 * radius)
         cx = truck[0] + self.pan_world[0]
@@ -278,11 +335,55 @@ class MapView(QWidget):
             sy = h / 2 - (cz - p[1]) * scale   # flip Z so north is up
             return QPointF(sx, sy)
 
-        # Nearby roads (grey).
-        qp.setPen(QPen(QColor("#555B63"), 2, Qt.PenStyle.SolidLine,
-                       Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        for a, b in self.road_segments:
-            qp.drawLine(to_screen(a), to_screen(b))
+        visible = []
+        for segment in self.road_segments:
+            a, b = segment["a"], segment["b"]
+            if (max(a[0], b[0]) < cx - radius * 1.35
+                    or min(a[0], b[0]) > cx + radius * 1.35
+                    or max(a[1], b[1]) < cz - radius * 1.35
+                    or min(a[1], b[1]) > cz + radius * 1.35):
+                continue
+            visible.append((segment, to_screen(a), to_screen(b)))
+
+        # Road casing, then coloured surface.  Width remains proportional to
+        # real lane geometry as the user zooms, just like a vector map.
+        for segment, a, b in visible:
+            width = max(2.4, min(44.0,
+                2.0 * float(segment["half_width"]) * scale))
+            casing = QColor("#282B2D" if segment["kind"] == "lane"
+                            else "#30312E")
+            qp.setPen(QPen(casing, width + 2.4, Qt.PenStyle.SolidLine,
+                           Qt.PenCapStyle.RoundCap,
+                           Qt.PenJoinStyle.RoundJoin))
+            qp.drawLine(a, b)
+        for segment, a, b in visible:
+            width = max(1.8, min(42.0,
+                2.0 * float(segment["half_width"]) * scale))
+            if segment["kind"] == "lane":
+                surface = QColor("#4A4E50")
+            elif segment["divided"] or segment["lanes"] >= 4:
+                surface = QColor("#3C4043")
+            else:
+                surface = QColor("#5B5E60")
+            qp.setPen(QPen(surface, width, Qt.PenStyle.SolidLine,
+                           Qt.PenCapStyle.RoundCap,
+                           Qt.PenJoinStyle.RoundJoin))
+            qp.drawLine(a, b)
+
+        # Markings are drawn from producer-provided lane metadata. Prefab
+        # navCurves suppress paint because their dataset contains connectivity,
+        # not invented road markings.
+        for segment, a, b in visible:
+            if (segment["kind"] != "road"
+                    or segment["suppress_markings"]
+                    or segment["lanes"] < 2
+                    or not segment["dash_on"]):
+                continue
+            colour = QColor("#B4B6B5")
+            qp.setPen(QPen(colour, max(0.8, min(1.6, scale * 0.8)),
+                           Qt.PenStyle.SolidLine,
+                           Qt.PenCapStyle.RoundCap))
+            qp.drawLine(a, b)
 
         # GPS uses only current-revision snapshot geometry. Recorded replay is
         # admitted only by live_map_navigation_points() in its exclusive mode.
@@ -290,9 +391,35 @@ class MapView(QWidget):
         ahead = [point for point in (self._to_xz(point) for point in ahead)
                  if point is not None]
         if len(ahead) >= 2:
-            qp.setPen(QPen(QColor("#1597F5"), 6, Qt.PenStyle.SolidLine,
+            polyline = QPolygonF([to_screen(p) for p in ahead])
+            qp.setPen(QPen(QColor("#075F9C"), 10, Qt.PenStyle.SolidLine,
+                           Qt.PenCapStyle.RoundCap,
+                           Qt.PenJoinStyle.RoundJoin))
+            qp.drawPolyline(polyline)
+            qp.setPen(QPen(QColor("#079AF0"), 6, Qt.PenStyle.SolidLine,
                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-            qp.drawPolyline(QPolygonF([to_screen(p) for p in ahead]))
+            qp.drawPolyline(polyline)
+
+        snapshot = self.state.get("lane_trajectory", {}) or {}
+        events = snapshot.get("turn_events", []) or []
+        if events and snapshot.get("valid", False):
+            event = events[0]
+            try:
+                distance = max(
+                    0.0, float(event.get("start_s_m", 0.0) or 0.0))
+            except (TypeError, ValueError, OverflowError):
+                distance = 0.0
+            arrow = "↱" if event.get("direction") == "right" else "↰"
+            shown = (f"{distance / 1000:.1f} km" if distance >= 1000
+                     else f"{int(round(distance / 10.0) * 10)} m")
+            self.turn_banner.setText(f"{arrow}   {shown}")
+            self.turn_banner.adjustSize()
+            self.turn_banner.move(
+                max(54, (self.width() - self.turn_banner.width()) // 2), 14)
+            self.turn_banner.show()
+            self.turn_banner.raise_()
+        else:
+            self.turn_banner.hide()
 
         # Truck arrow at centre.
         c = to_screen(truck)
@@ -302,11 +429,14 @@ class MapView(QWidget):
         right = QPointF(c.x() + fz * 8 + fx * -7, c.y() + fx * 8 - fz * -7)
         qp.setBrush(QColor("#1597F5"))
         qp.setPen(QPen(QColor("#E8F4FF"), 2))
+        qp.drawEllipse(c, 13, 13)
+        qp.setBrush(QColor("#F7FBFF"))
         qp.drawPolygon(QPolygonF([tip, left, right]))
 
         # Small unobtrusive interaction hint; no extra toolbar is needed.
-        qp.setPen(QColor(185, 190, 198, 155))
-        qp.drawText(14, h - 12, "koliesko: zoom  •  potiahnuť: posun  •  dvojklik: kamión")
+        qp.setPen(QColor(185, 190, 198, 145))
+        qp.drawText(14, h - 12,
+                    "koliesko: zoom  •  potiahnuť: posun  •  dvojklik: kamión")
 
     @staticmethod
     def _to_xz(point):
@@ -424,6 +554,9 @@ class MapPage(QWidget):
             "border-radius:7px;padding:9px 10px;")
         ctl.addWidget(self.active_map_lbl)
         self.dl_bar = QProgressBar()
+        self.dl_bar.setRange(0, 100)
+        self.dl_bar.setFormat("%p %")
+        self.dl_bar.setTextVisible(True)
         self.dl_bar.setVisible(False)
         ctl.addWidget(self.dl_bar)
         self.dl_status = QLabel("")
@@ -453,6 +586,7 @@ class MapPage(QWidget):
         self.timer.timeout.connect(self.refresh)
         self.timer.start(250)
         self._last_diag_export_result = None
+        self._last_map_load_generation = None
 
     def restyle(self, theme):
         """Re-apply palette colours when the theme switches (dark ↔ light)."""
@@ -666,6 +800,29 @@ class MapPage(QWidget):
         if pose_signature != self._last_pose_signature:
             self._last_pose_signature = pose_signature
             repaint = True
+
+        # Downloads report through the QThread signal above; engine-side map
+        # parsing reports an atomic shared-state record. Never let the polling
+        # UI overwrite an active download's progress.
+        load_progress = self.state.get("map_load_progress", {}) or {}
+        if self._dl_worker is None and load_progress:
+            try:
+                percent = max(0, min(100, int(
+                    load_progress.get("percent", 0) or 0)))
+            except (TypeError, ValueError):
+                percent = 0
+            active = bool(load_progress.get("active", False))
+            generation = load_progress.get("generation")
+            if active or (percent == 100
+                          and generation != self._last_map_load_generation):
+                self.dl_bar.setValue(percent)
+                self.dl_bar.setVisible(True)
+                self.dl_status.setText(str(
+                    load_progress.get("message")
+                    or load_progress.get("phase") or "Načítavam mapu…"))
+            if generation is not None:
+                self._last_map_load_generation = generation
+            self.btn_use.setEnabled(not active)
 
         command_error = rejected_navigation_command_message(self.state)
         if command_error:

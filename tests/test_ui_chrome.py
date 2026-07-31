@@ -46,7 +46,7 @@ class UiChromeTests(unittest.TestCase):
         bar = MacTitleBar(host, palette("light"))
         self.assertEqual(list(bar.controls), ["maximize", "minimize", "close"])
         controls = list(bar.controls.values())
-        self.assertTrue(all(button.width() == 11 and button.height() == 11
+        self.assertTrue(all(button.width() == 10 and button.height() == 10
                             for button in controls))
         self.assertEqual([button.accessibleName() for button in controls],
                          ["Maximalizovať", "Minimalizovať", "Zavrieť"])
@@ -136,7 +136,7 @@ class UiChromeTests(unittest.TestCase):
             page = MapPage(State({"ui_theme": "light"}))
         labels = [label.text() for label in page.findChildren(QLabel)]
         buttons = [button.text() for button in page.findChildren(QPushButton)]
-        self.assertIn("●  LIVE MAP", labels)
+        self.assertIn("●  LIVE", labels)
         self.assertFalse(any("Record" in text or "Recorded" in text
                              for text in labels + buttons))
         self.assertFalse(hasattr(page, "route_combo"))
@@ -144,6 +144,67 @@ class UiChromeTests(unittest.TestCase):
         self.assertEqual(set(page.nav_stats), {"gps", "map", "trajectory"})
         self.assertTrue(page.view.empty_state.isVisibleTo(page.view))
         page.close()
+
+    def test_live_map_preserves_road_style_metadata_and_load_progress(self):
+        state = State({
+            "ui_theme": "light",
+            "map_load_progress": {
+                "active": True, "percent": 77,
+                "phase": "Načítavam prefaby a križovatky",
+                "message": "Načítavam prefaby a križovatky — 77 %",
+                "generation": 4,
+            },
+        })
+        with mock.patch.object(MapPage, "_populate_maps", autospec=True):
+            page = MapPage(state)
+        page.view.set_road_segments([[
+            [1.0, 2.0, 3.0], [4.0, 5.0, 3.0], "road", 4, True,
+            True, False, False, 8.25, False, "r10:0", 3,
+        ]])
+        segment = page.view.road_segments[0]
+        self.assertEqual(segment["lanes"], 4)
+        self.assertTrue(segment["divided"])
+        self.assertEqual(segment["half_width"], 8.25)
+        self.assertEqual(segment["path_key"], "r10:0")
+        page.refresh()
+        self.assertTrue(page.dl_bar.isVisibleTo(page))
+        self.assertEqual(page.dl_bar.value(), 77)
+        self.assertIn("prefaby", page.dl_status.text())
+        self.assertEqual(len(page.view.map_controls), 3)
+        page.close()
+
+    def test_plugin_toggle_is_persisted_for_the_next_run(self):
+        state = State({"ui_theme": "light", "plugin_enabled.acc": True})
+        plugins = PluginsPage(state)
+        action = next(
+            button for button in plugins.findChildren(QPushButton)
+            if button.objectName() == "PluginAction"
+            and button.text() == "Vypnúť")
+        manager = mock.Mock()
+        with mock.patch("core.settings.manager.SettingsManager",
+                        return_value=manager):
+            action.click()
+        self.app.processEvents()
+        manager.set_plugin_enabled.assert_called_once_with("acc", False)
+        self.assertFalse(state.get("plugin_enabled.acc"))
+        plugins.close()
+
+    def test_plugin_toggle_does_not_change_live_state_when_save_fails(self):
+        state = State({"ui_theme": "light", "plugin_enabled.acc": True})
+        plugins = PluginsPage(state)
+        action = next(
+            button for button in plugins.findChildren(QPushButton)
+            if button.objectName() == "PluginAction"
+            and button.text() == "Vypnúť")
+        manager = mock.Mock()
+        manager.set_plugin_enabled.side_effect = OSError("disk full")
+        with (mock.patch("core.settings.manager.SettingsManager",
+                         return_value=manager),
+              mock.patch.object(app_module.logging, "error") as log_error):
+            action.click()
+        self.assertTrue(state.get("plugin_enabled.acc"))
+        log_error.assert_called_once()
+        plugins.close()
 
     def test_dashboard_and_about_use_clean_non_emoji_headers(self):
         state = State({"ui_theme": "light"})

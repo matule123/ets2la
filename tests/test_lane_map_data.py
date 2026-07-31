@@ -127,6 +127,52 @@ class RealMapLaneDataTests(unittest.TestCase):
         self.assertFalse(trajectory.valid)
         self.assertNotIn("heading jump", trajectory.failure_reason)
 
+    def test_2026_07_30_parallel_prefab_lane_uses_exact_ppd_sibling(self):
+        """route_build_id=e54cd411da724b68af363bc0ebb935a0.
+
+        dlc_blkw_94's navNode connection contains only the representative
+        curve 1, 4.50 m beside the confirmed incoming lane. The PPD lane
+        tables prove parallel curve 0 for the same physical GPS endpoints.
+        It must be selected without a chord or a validation-limit increase.
+        """
+        road_edge = self.net._classify_corridor_edge(
+            5337536181859392302, 5337536182148795575, 0)
+        self.assertEqual(road_edge.kind, "road")
+        incoming_lane = next(
+            lane for lane in self.net._build_lane_segments(
+                road_edge.segment_index)
+            if lane.start_uid == road_edge.start_uid
+            and lane.end_uid == road_edge.end_uid
+            and lane.raw_lane_index == 1)
+        prefab_edge = self.net._classify_corridor_edge(
+            5337536182148795575, 5337536182526315133, 1)
+        self.assertEqual(prefab_edge.kind, "prefab")
+        instance = prefab_edge.prefab_instance[0]
+        representative = self.net._prefab_connector_options(
+            instance, prefab_edge.start_uid, prefab_edge.end_uid)
+        self.assertEqual(representative, [(1,)])
+        representative_points = self.net._prefab_curve_chain_3d(
+            instance, representative[0])
+        self.assertAlmostEqual(math.dist(
+            (incoming_lane.centerline[-1].x,
+             incoming_lane.centerline[-1].y,
+             incoming_lane.centerline[-1].z),
+            (representative_points[0].x, representative_points[0].y,
+             representative_points[0].z)), 4.5, places=3)
+
+        selected, reason = self.net._prefab_lane_segment(
+            prefab_edge, incoming_lane.lane_index,
+            incoming_lane.centerline[-1], register=False,
+            allow_parallel_sibling=True)
+        self.assertEqual(reason, "")
+        self.assertEqual(selected.lane_id.connector_path, (0,))
+        self.assertLess(math.dist(
+            (incoming_lane.centerline[-1].x,
+             incoming_lane.centerline[-1].y,
+             incoming_lane.centerline[-1].z),
+            (selected.centerline[0].x, selected.centerline[0].y,
+             selected.centerline[0].z)), 0.01)
+
     def test_phase1_prefab_diagnostic_replay_does_not_mutate_lane_cache(self):
         gps = (
             5962819253681172399, 5962819261264473948,
