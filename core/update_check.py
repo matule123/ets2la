@@ -29,7 +29,7 @@ import re
 import json
 import tempfile
 
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 _LATEST_COMMIT_INFO = {}
 REPO = "matule123/ets2la"
 API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"

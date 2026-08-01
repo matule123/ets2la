@@ -12,6 +12,16 @@ from PyQt6.QtTest import QTest
 import installer
 
 
+def test_release_version_is_042_everywhere():
+    from core import update_check
+    assert installer.APP_VERSION == "0.4.2"
+    assert update_check.VERSION == installer.APP_VERSION
+    freeze_source = (os.path.join(os.path.dirname(installer.__file__),
+                                  "freeze_app.py"))
+    with open(freeze_source, encoding="utf-8") as stream:
+        assert 'VERSION = "0.4.2"' in stream.read()
+
+
 def test_pip_install_fails_closed_and_reports_exact_required_package(
         tmp_path, monkeypatch):
     root = tmp_path / "install"
@@ -98,6 +108,7 @@ def test_runtime_payload_allowlist_accepts_only_application_files(path):
         "settings.json",
         "ultrapilot.log",
         "UltraPilot_Installer.spec",
+        "CHANGELOG.md",
         "core/__pycache__/route.pyc",
     ],
 )

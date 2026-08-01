@@ -17,7 +17,7 @@ from cx_Freeze import setup, Executable
 # (numpy/cv2/PyQt6) — lift the limit so analysis doesn't hit RecursionError.
 sys.setrecursionlimit(10000)
 
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 
 # Preserve the source revision in frozen installations where .git is absent.
 _meta_dir = os.path.join(os.path.dirname(__file__), "build", "metadata")
