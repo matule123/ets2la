@@ -1,11 +1,13 @@
 """
 SDK plugin installation for UltraPilot.
 
-The SCS SDK ships as two DLLs that go into the game's ``bin/win_x64/plugins/``
+The UltraPilot SCS integration ships as three DLLs that go into the game's
+``bin/win_x64/plugins/``
 folder so the game exposes telemetry and accepts control input:
 
 * ``scs-telemetry.dll``    — telemetry out of the game (truck state, position…).
 * ``scs_sdk_controller.dll`` — control input back into the game (steering…).
+* ``ets2la_plugin.dll`` — surrounding traffic, camera and GPS-route buffers.
 
 The ETS2LA project keeps versioned copies of these DLLs in its repository, but
 that repo is currently private, so we can't fetch new builds from it at runtime.
@@ -177,14 +179,6 @@ def ensure_installed(game_path: str, version: str, log=None, progress_cb=None,
         return False, "failed:dll_missing"
     if progress_cb:
         progress_cb(1.0)
-
-    # Remove the legacy single-file plugin if present (ETS2LA used to ship it).
-    legacy = os.path.join(plugins_dir, "ets2la_plugin.dll")
-    if os.path.exists(legacy):
-        try:
-            os.remove(legacy)
-        except Exception:
-            pass
 
     return is_sdk_installed(game_path), "installed" if is_sdk_installed(game_path) else "failed:verify"
 

@@ -3,9 +3,26 @@ import sys
 import os
 import time
 import logging
+from collections import deque
 
 # Ensure the project root is in path before importing project modules.
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+
+class RestartGuard:
+    """Stops a broken child import from becoming an endless restart loop."""
+    def __init__(self, max_crashes=3, window_seconds=20.0):
+        self.max_crashes = int(max_crashes)
+        self.window_seconds = float(window_seconds)
+        self._crashes = {}
+
+    def allow_restart(self, name, now=None):
+        now = time.monotonic() if now is None else float(now)
+        history = self._crashes.setdefault(name, deque())
+        while history and now - history[0] > self.window_seconds:
+            history.popleft()
+        history.append(now)
+        return len(history) <= self.max_crashes
 
 
 def run_engine(shared_dict):
@@ -224,6 +241,7 @@ def main():
         return p
 
     processes = {name: spawn(name) for name in targets}
+    restart_guard = RestartGuard()
 
     def shutdown():
         logging.info("Shutting down UltraPilot…")
@@ -255,8 +273,21 @@ def main():
             for name in [n for n in ("Engine", "HUD", "AR") if n in processes]:
                 p = processes[name]
                 if not p.is_alive():
-                    logging.warning(f"Process {name} crashed (code {p.exitcode}) — restarting.")
-                    processes[name] = spawn(name)
+                    if restart_guard.allow_restart(name):
+                        logging.warning(
+                            f"Process {name} crashed (code {p.exitcode}) — restarting.")
+                        processes[name] = spawn(name)
+                    else:
+                        message = (
+                            f"Process {name} repeatedly crashed (code {p.exitcode}); "
+                            "automatic restarts stopped. Repair the installation "
+                            "and inspect ultrapilot.log.")
+                        logging.critical(message)
+                        shared_dict["process_failure"] = {
+                            "process": name, "exit_code": p.exitcode,
+                            "message": message,
+                        }
+                        processes.pop(name, None)
     except KeyboardInterrupt:
         shutdown()
 

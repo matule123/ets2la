@@ -19,7 +19,7 @@ import logging
 import os
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QPropertyAnimation, QEasingCurve
-from PyQt6.QtGui import QIcon, QPixmap
+from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QPainterPath, QPen
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QStackedWidget, QFrame, QProgressBar, QButtonGroup, QRadioButton,
@@ -139,6 +139,56 @@ class _SDKMaintenanceWorker(QThread):
 
 
 # ----------------------------------------------------------------- card widgets
+class _LanguageFlag(QWidget):
+    """Vector country flag; unlike emoji it renders consistently on Windows."""
+    def __init__(self, code, parent=None):
+        super().__init__(parent)
+        self.code = str(code).lower()
+        self.setFixedSize(42, 30)
+        self.setAccessibleName("flag-" + self.code)
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect().adjusted(1, 1, -1, -1)
+        clip = QPainterPath()
+        clip.addRoundedRect(float(rect.x()), float(rect.y()),
+                            float(rect.width()), float(rect.height()), 5.0, 5.0)
+        p.setClipPath(clip)
+        colors = {
+            "sk": ("#FFFFFF", "#0B4EA2", "#EE1C25"),
+            "cs": ("#FFFFFF", "#D7141A"),
+            "de": ("#000000", "#DD0000", "#FFCE00"),
+            "pl": ("#FFFFFF", "#DC143C"),
+            "hu": ("#CE2939", "#FFFFFF", "#477050"),
+            "en": ("#16366F",),
+        }
+        bands = colors.get(self.code, ("#E5E7EB", "#10B981"))
+        height = rect.height() / len(bands)
+        for index, color in enumerate(bands):
+            p.fillRect(rect.x(), int(rect.y() + index * height), rect.width(),
+                       int(height + 1), QColor(color))
+        if self.code == "cs":
+            triangle = QPainterPath()
+            triangle.moveTo(rect.left(), rect.top())
+            triangle.lineTo(rect.left(), rect.bottom())
+            triangle.lineTo(rect.left() + rect.width() * .48, rect.center().y())
+            triangle.closeSubpath()
+            p.fillPath(triangle, QColor("#11457E"))
+        elif self.code == "en":
+            for color, diagonal, cross in (("#FFFFFF", 6, 9),
+                                            ("#C8102E", 3, 5)):
+                p.setPen(QPen(QColor(color), diagonal))
+                p.drawLine(rect.topLeft(), rect.bottomRight())
+                p.drawLine(rect.topRight(), rect.bottomLeft())
+                p.setPen(QPen(QColor(color), cross))
+                p.drawLine(rect.center().x(), rect.top(), rect.center().x(), rect.bottom())
+                p.drawLine(rect.left(), rect.center().y(), rect.right(), rect.center().y())
+        p.setClipping(False)
+        p.setPen(QPen(QColor("#D1D5DB"), 1))
+        p.drawRoundedRect(rect, 5, 5)
+
+
 class _LangRow(QWidget):
     """One selectable language row in the language step."""
     def __init__(self, info, parent=None):
@@ -157,12 +207,7 @@ class _LangRow(QWidget):
         lay.setSpacing(9)
         top = QHBoxLayout()
         top.setSpacing(10)
-        self.code_badge = QLabel(self.code.upper())
-        self.code_badge.setFixedSize(42, 42)
-        self.code_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.code_badge.setStyleSheet(
-            "background:#ECFDF5;color:#047857;border:1px solid #A7F3D0;"
-            "border-radius:12px;font-size:12px;font-weight:800;")
+        self.code_badge = _LanguageFlag(self.code)
         top.addWidget(self.code_badge)
         identity = QVBoxLayout()
         identity.setSpacing(1)
@@ -197,7 +242,8 @@ class _LangRow(QWidget):
 
     def _refresh(self, info):
         self.info = info
-        self.code_badge.setText(str(info.get("code", self.code)).upper())
+        self.code_badge.code = str(info.get("code", self.code)).lower()
+        self.code_badge.update()
         self.name.setText(info["name"])
         english = info.get("english_name", "")
         self.english_name.setText(english if english != info["name"] else "")
@@ -863,7 +909,7 @@ class OnboardingWizard(QWidget):
     def load_maps(self):
         # Run in a worker to keep UI responsive (network + yaml parse).
         class _Load(QThread):
-            done = pyqtSignal(list, str)   # (datasets, suggested_key)
+            done = pyqtSignal(list, str, str)  # datasets, suggested, exact error
             def __init__(self, games):
                 super().__init__()
                 self.games = games
@@ -876,15 +922,15 @@ class OnboardingWizard(QWidget):
                     if self.games:
                         prefer_promods = False  # ETS2 vanilla is the safe default
                         suggested = map_data.suggest_key(self.games[0]["version"], prefer_promods=prefer_promods)
-                    self.done.emit(idx, suggested)
+                    self.done.emit(idx, suggested, map_data.last_error())
                 except Exception as e:
                     logging.error("onboarding maps: %s", e)
-                    self.done.emit([], "")
+                    self.done.emit([], "", "{}: {}".format(type(e).__name__, e))
         self._map_load_worker = _Load(self._games)
         self._map_load_worker.done.connect(self._on_maps_loaded)
         self._map_load_worker.start()
 
-    def _on_maps_loaded(self, datasets, suggested):
+    def _on_maps_loaded(self, datasets, suggested, exact_error=""):
         # Clear old entries.
         for i in reversed(range(self.map_list_wrap.count())):
             w = self.map_list_wrap.itemAt(i).widget()
@@ -892,9 +938,14 @@ class OnboardingWizard(QWidget):
                 w.setParent(None)
                 w.deleteLater()
         if not datasets:
-            self.map_status_label.setText(_("map_none"))
+            self.map_status_label.setText(
+                "Mapové balíky sa nepodarilo načítať: " +
+                (exact_error or "server nevrátil žiadne kompatibilné záznamy"))
             return
-        self.map_status_label.setText("")
+        self.map_status_label.setText(
+            "Online zoznam nebol dostupný: " + exact_error +
+            ". Zobrazujem bezpečné kompatibilné možnosti."
+            if exact_error else "")
         # Filter by detected game kind.
         kinds = {g["kind"] for g in self._games}
         if kinds:
@@ -905,6 +956,11 @@ class OnboardingWizard(QWidget):
                 # ETS2 default: ets2-* and promods-* (and a few common mods).
                 return k.startswith("ets2-") or k.startswith("promods-") or k.startswith("tmp-")
             datasets = [d for d in datasets if matches(d["key"])]
+        if not datasets:
+            detail = exact_error or (
+                "server neobsahuje balík kompatibilný so zistenou hrou")
+            self.map_status_label.setText("Nie je dostupný kompatibilný mapový balík: " + detail)
+            return
         # Sort: suggested first, then version desc.
         datasets.sort(key=lambda d: (d["key"] != suggested, _ver_tuple(d["version"]), d["key"]), reverse=False)
         datasets.sort(key=lambda d: (d["key"] != suggested))  # stable: suggested on top

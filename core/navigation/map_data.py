@@ -175,9 +175,18 @@ def get_index(force: bool = False) -> dict:
     global _index_cache
     if _index_cache is not None and not force:
         return _index_cache
+    _set_error("")
     if requests is None or yaml is None:
-        logging.error("map_data: requests/pyyaml not available.")
-        return {}
+        missing = []
+        if requests is None:
+            missing.append("requests")
+        if yaml is None:
+            missing.append("PyYAML")
+        _set_error("Missing Python package: " + ", ".join(missing))
+        _index_cache = {
+            key: dict(entry) for key, entry in COMPATIBILITY_DATASETS.items()
+        }
+        return _index_cache
     try:
         r = requests.get(INDEX_URL, timeout=20)
         if r.status_code == 200:
@@ -185,8 +194,11 @@ def get_index(force: bool = False) -> dict:
             for key, entry in COMPATIBILITY_DATASETS.items():
                 _index_cache.setdefault(key, dict(entry))
             return _index_cache
+        _set_error("Map package server returned HTTP {} for {}".format(
+            r.status_code, INDEX_URL))
     except Exception as e:
-        logging.error("map_data: failed to fetch index: %s", e)
+        _set_error("Could not load {}: {}: {}".format(
+            INDEX_URL, type(e).__name__, e))
     # Keep the known compatibility choices visible while offline. Downloading
     # still performs a real HTTP check, so these entries cannot masquerade as
     # locally available data.

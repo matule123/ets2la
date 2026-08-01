@@ -30,11 +30,17 @@ _TECHNICAL_LOG_MARKERS = (
     "autopilot: active=", "lane_off=", "nav_steer=", "steer_out=",
     "lane_revision=", "confidence=", "reject=",
 )
+_PROCESS_STARTED_RE = re.compile(r"^Process \w+ started \(PID: \d+\)$", re.I)
 
 
 def _friendly_activity_message(message):
     """Return concise user-facing activity text, or ``None`` for diagnostics."""
     low = message.lower()
+    # Child-process lifecycle remains in ultrapilot.log, not in the user-facing
+    # island. A crash loop previously repeated "Process Engine started" here.
+    if (_PROCESS_STARTED_RE.match(message.strip())
+            or low.startswith("launching engine process")):
+        return None
     if any(marker in low for marker in _TECHNICAL_LOG_MARKERS):
         return None
     # Reject coordinate dumps even when their exact prefix changes.

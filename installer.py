@@ -21,11 +21,13 @@ import os
 import sys
 import json
 import math
+import re
 import shutil
 import logging
 import subprocess
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QPropertyAnimation, QEasingCurve, QByteArray, pyqtProperty, QPointF
+from PyQt6.QtCore import (Qt, QThread, pyqtSignal, QTimer, QPropertyAnimation,
+                          QEasingCurve, QByteArray, pyqtProperty, QPointF, QRectF)
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QStackedWidget, QProgressBar, QTextEdit, QFileDialog, QComboBox, QCheckBox,
@@ -36,6 +38,7 @@ from PyQt6.QtWidgets import QGraphicsOpacityEffect
 
 APP_NAME = "UltraPilot"
 APP_VERSION = "0.4.1"
+INSTALLER_VERSION = "1.3"
 
 # On Windows, hide the black CMD consoles that subprocess.run would otherwise
 # flash up (git, pip, powershell). 0x08000000 = CREATE_NO_WINDOW.
@@ -48,6 +51,7 @@ ARCHIVE_URL = "https://github.com/" + REPO + "/archive/refs/heads/main.zip"
 CODELOAD_URL = "https://codeload.github.com/" + REPO + "/zip/refs/heads/main"
 CONTENTS_API = "https://api.github.com/repos/" + REPO + "/git/trees/main?recursive=1"
 RAW_BASE = "https://raw.githubusercontent.com/" + REPO + "/main/"
+COMMIT_API = "https://api.github.com/repos/" + REPO + "/commits/main"
 
 # Python auto-install (see Task 1). 3.12 is stable and ships working pip;
 # 3.14 embeddable has no pip, so we use the official installer.
@@ -309,12 +313,184 @@ def tr_get(lang, key):
     return tbl.get(key, _load_lang("sk").get(key, key))
 
 
-# Paths/entries that must never be copied from the GitHub tree.
-_FETCH_BLACKLIST_DIRS = ("__pycache__", ".git", ".github", ".claude", ".vscode",
-                         ".idea", "build", "dist", "map-cache", "model-cache",
-                         "routes", "UltraPilot.egg-info", "node_modules")
-_FETCH_BLACKLIST_SUFFIX = (".pyc", ".pyo", ".log", ".msi", ".exe", ".spec", ".egg-info")
-_FETCH_BLACKLIST_FILES = {"settings.json", ".gitignore", ".ds_store", "thumbs.db"}
+# The installed application is a runtime payload, not a source checkout.  Keep
+# this as an allow-list so a newly added developer directory can never silently
+# start shipping to users.  Matching is case-insensitive because the archive
+# says ``ui`` while an existing Windows checkout may expose it as ``UI``.
+_RUNTIME_ROOT_DIRS = frozenset({"assets", "core", "languages", "plugins", "sdk", "ui"})
+_RUNTIME_ROOT_FILES = frozenset({
+    "main.py", "bootloader.py", "requirements.txt", "readme.md", "license",
+    "license.md", "copying",
+})
+_RUNTIME_BLOCKED_PARTS = frozenset({
+    "__pycache__", ".git", ".github", ".agents", ".claude", ".codex",
+    ".idea", ".pytest_cache", ".vscode", ".zcode", "build", "dist",
+    "docs", "node_modules", "tests", "tools", "ultrapilot.egg-info",
+})
+_RUNTIME_BLOCKED_SUFFIXES = (".pyc", ".pyo", ".log", ".msi", ".exe", ".spec", ".egg-info")
+_SDK_DLL_NAMES = ("scs-telemetry.dll", "scs_sdk_controller.dll", "ets2la_plugin.dll")
+
+
+def _normalise_repo_path(path):
+    """Return a safe repository-relative POSIX path, or ``""`` if unsafe."""
+    value = str(path or "").replace("\\", "/").strip("/")
+    parts = [part for part in value.split("/") if part not in ("", ".")]
+    if not parts or any(part == ".." for part in parts):
+        return ""
+    return "/".join(parts)
+
+
+def _is_runtime_payload_path(path):
+    """Whether a GitHub tree entry belongs in an installed UltraPilot copy."""
+    rel = _normalise_repo_path(path)
+    if not rel:
+        return False
+    parts = rel.lower().split("/")
+    if any(part in _RUNTIME_BLOCKED_PARTS for part in parts):
+        return False
+    if rel.lower().endswith(_RUNTIME_BLOCKED_SUFFIXES):
+        return False
+    if len(parts) == 1:
+        return parts[0] in _RUNTIME_ROOT_FILES or parts[0] in _RUNTIME_ROOT_DIRS
+    return parts[0] in _RUNTIME_ROOT_DIRS
+
+
+def _copy_runtime_tree(src_root, dst_root, on_file=None):
+    """Copy only the allow-listed runtime payload from a repository checkout."""
+    copied = 0
+    for root, dirs, files in os.walk(src_root):
+        rel_root = os.path.relpath(root, src_root)
+        rel_root = "" if rel_root == "." else rel_root.replace("\\", "/")
+        # Prune known non-runtime subtrees before os.walk descends into them.
+        dirs[:] = [d for d in dirs if _is_runtime_payload_path(
+            (rel_root + "/" + d).strip("/"))]
+        for name in files:
+            rel = (rel_root + "/" + name).strip("/")
+            if not _is_runtime_payload_path(rel):
+                continue
+            src = os.path.join(root, name)
+            dest = os.path.join(dst_root, *rel.split("/"))
+            os.makedirs(os.path.dirname(_long_path(dest)), exist_ok=True)
+            shutil.copy2(_long_path(src), _long_path(dest))
+            copied += 1
+            if on_file is not None:
+                on_file(copied, rel)
+    return copied
+
+
+def _remove_legacy_development_payload(install_path):
+    """Remove developer-only entries left by installers older than this filter."""
+    root = os.path.abspath(str(install_path or ""))
+    source_root = os.path.abspath(os.path.dirname(__file__))
+    if (not root or root == os.path.abspath(os.path.sep)
+            or os.path.normcase(root) == os.path.normcase(source_root)
+            or not os.path.isfile(os.path.join(root, "main.py"))):
+        return []
+    names = (
+        ".agents", ".claude", ".codex", ".git", ".github", ".idea",
+        ".pytest_cache", ".vscode", ".zcode", "build", "dist", "docs",
+        "tests", "tools", "UltraPilot.egg-info", "__pycache__",
+        "installer.py", "build_installer.py", "freeze_app.py",
+        "UltraPilot_Installer.spec", ".gitignore", "instbuild.log", "msi.log",
+    )
+    removed = []
+    for name in names:
+        target = os.path.abspath(os.path.join(root, name))
+        if os.path.dirname(target) != root:
+            continue
+        try:
+            if os.path.isdir(target):
+                shutil.rmtree(target)
+                removed.append(name)
+            elif os.path.isfile(target):
+                os.remove(target)
+                removed.append(name)
+        except OSError:
+            # A locked developer artifact is harmless; repair will report what
+            # it could clean without failing the usable runtime installation.
+            continue
+    return removed
+
+
+def _sdk_plugins_dir(target):
+    """Resolve current and legacy SDK target formats to a plugins directory.
+
+    New records contain the game root. Older 0.4.1 records accidentally stored
+    ``<game>/bin`` and a few development builds stored the plugins directory
+    itself. Supporting all three formats makes repair/uninstall deterministic.
+    """
+    value = os.path.normpath(str(target or "").strip())
+    if not value or value == ".":
+        return ""
+    name = os.path.basename(value).lower()
+    parent = os.path.dirname(value)
+    if name == "plugins" and os.path.basename(parent).lower() == "win_x64":
+        return value
+    if name == "win_x64" and os.path.basename(parent).lower() == "bin":
+        return os.path.join(value, "plugins")
+    if name == "bin":  # legacy installer record
+        return os.path.join(value, "win_x64", "plugins")
+    return os.path.join(value, "bin", "win_x64", "plugins")
+
+
+def _sdk_game_root(target):
+    """Return a canonical game root for any supported SDK target format."""
+    plugins = _sdk_plugins_dir(target)
+    if not plugins:
+        return ""
+    return os.path.dirname(os.path.dirname(os.path.dirname(plugins)))
+
+
+def _sdk_plugin_dirs(rec=None, include_detected=True):
+    """Collect de-duplicated SDK plugin directories from record and detection."""
+    candidates = list((rec or {}).get("sdk_targets") or [])
+    if include_detected:
+        try:
+            from core.sdk.game_utils import find_scs_games
+            candidates.extend(find_scs_games())
+        except Exception:
+            pass
+    result = []
+    seen = set()
+    for target in candidates:
+        plugins = _sdk_plugins_dir(target)
+        key = os.path.normcase(os.path.abspath(plugins)) if plugins else ""
+        if key and key not in seen:
+            seen.add(key)
+            result.append(plugins)
+    return result
+
+
+def _write_install_record(rec, path=None):
+    """Persist an install record atomically so repair cannot leave partial JSON."""
+    target = path or RECORD_PATH
+    parent = os.path.dirname(target)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    tmp = target + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(rec, handle, indent=2)
+        handle.flush()
+        try:
+            os.fsync(handle.fileno())
+        except OSError:
+            pass
+    os.replace(tmp, target)
+
+
+def _update_sdk_targets(rec, installed_plugin_dirs, path=None):
+    """Store canonical game roots returned by ``install_game_dlls``."""
+    roots = []
+    seen = set()
+    for target in installed_plugin_dirs or []:
+        root = _sdk_game_root(target)
+        key = os.path.normcase(os.path.abspath(root)) if root else ""
+        if key and key not in seen:
+            seen.add(key)
+            roots.append(root)
+    rec["sdk_targets"] = roots
+    _write_install_record(rec, path=path)
+    return roots
 
 
 def _long_path(path):
@@ -533,24 +709,13 @@ class InstallWorker(QThread):
             if not os.path.exists(os.path.join(tmp, "main.py")):
                 self.log.emit(self.t["src_err"].format(err="clone succeeded but main.py missing"))
                 return False
-            # Copy the cloned tree into the install folder, logging each file so
-            # the user sees a rich, scrolling install log (120+ lines).
-            nfiles = 0
-
-            def _copy_tree(src_root, dst_root, prefix=""):
-                nonlocal nfiles
-                for entry in os.listdir(src_root):
-                    s = os.path.join(src_root, entry)
-                    d = os.path.join(dst_root, entry)
-                    rel = (prefix + "/" + entry) if prefix else entry
-                    if os.path.isdir(s):
-                        os.makedirs(d, exist_ok=True)
-                        _copy_tree(s, d, rel)
-                    else:
-                        shutil.copy2(s, d)
-                        nfiles += 1
-                        self.log.emit("    [{:>4}] {}".format(nfiles, rel.replace("\\", "/")))
-            _copy_tree(tmp, self.install_path)
+            # A clone contains repository metadata, tests and developer tools.
+            # Copy only the explicit runtime allow-list into the application.
+            nfiles = _copy_runtime_tree(
+                tmp, self.install_path,
+                on_file=lambda count, rel: self.log.emit(
+                    "    [{:>4}] {}".format(count, rel)),
+            )
             self.log.emit("    ✓ nakopírovaných {} súborov".format(nfiles))
             shutil.rmtree(tmp, ignore_errors=True)
             mb = _dir_size_mb(self.install_path)
@@ -575,30 +740,47 @@ class InstallWorker(QThread):
             # by a redirect/proxy while codeload works directly (and vice versa).
             for url in (CODELOAD_URL, ARCHIVE_URL):
                 self.log.emit("  [INF] Zdroj: " + url)
-                chunks = bytearray()
                 try:
+                    chunks = bytearray()
                     try:
                         import requests
                         resp = requests.get(url, headers=_github_headers(), timeout=180,
                                             stream=True, allow_redirects=True)
-                        if resp.status_code != 200:
-                            raise RuntimeError("HTTP " + str(resp.status_code))
-                        total = int(resp.headers.get("Content-Length") or 0)
-                        for chunk in resp.iter_content(chunk_size=65536):
-                            if chunk:
-                                chunks.extend(chunk)
-                                pct = len(chunks) * 100 // total if total else 0
-                                self.status.emit("Sťahujem z GitHubu… {}% ({:.1f} MB)".format(
-                                    pct, len(chunks) / (1024 * 1024)))
+                        try:
+                            if resp.status_code != 200:
+                                raise RuntimeError("HTTP " + str(resp.status_code))
+                            total = int(resp.headers.get("Content-Length") or 0)
+                            for chunk in resp.iter_content(chunk_size=65536):
+                                if chunk:
+                                    chunks.extend(chunk)
+                                    pct = len(chunks) * 100 // total if total else 0
+                                    self.status.emit(
+                                        "Sťahujem z GitHubu… {}% ({:.1f} MB)".format(
+                                            pct, len(chunks) / (1024 * 1024)))
+                            if total and len(chunks) != total:
+                                raise RuntimeError(
+                                    "neúplný prenos: {} z {} bajtov".format(
+                                        len(chunks), total))
+                        finally:
+                            close = getattr(resp, "close", None)
+                            if callable(close):
+                                close()
                     except Exception as request_error:
                         # Standard-library fallback is bundled with every Python
                         # and therefore also works in the one-file installer.
                         self.log.emit("  [WRN] requests transport zlyhal, skúšam urllib: "
                                       + str(request_error))
+                        # Discard every byte from the failed transport. Appending
+                        # a fresh ZIP to a partial ZIP creates an archive that can
+                        # download to 100% but can never be opened.
+                        chunks = bytearray()
                         from urllib.request import Request, urlopen
                         req = Request(url, headers={**_github_headers(),
                                       "User-Agent": "UltraPilot-Installer/" + APP_VERSION})
                         with urlopen(req, timeout=180) as resp:
+                            status_code = getattr(resp, "status", None)
+                            if status_code not in (None, 200):
+                                raise RuntimeError("HTTP " + str(status_code))
                             total = int(resp.headers.get("Content-Length") or 0)
                             while True:
                                 chunk = resp.read(65536)
@@ -608,9 +790,30 @@ class InstallWorker(QThread):
                                 pct = len(chunks) * 100 // total if total else 0
                                 self.status.emit("Sťahujem z GitHubu… {}% ({:.1f} MB)".format(
                                     pct, len(chunks) / (1024 * 1024)))
+                            if total and len(chunks) != total:
+                                raise RuntimeError(
+                                    "neúplný prenos: {} z {} bajtov".format(
+                                        len(chunks), total))
                     if len(chunks) < 1024:
                         raise RuntimeError("GitHub vrátil prázdny alebo neúplný archív")
-                    data = bytes(chunks)
+                    candidate = bytes(chunks)
+                    if not candidate.startswith(b"PK"):
+                        raise RuntimeError("odpoveď nie je ZIP archív")
+                    # Validate each endpoint before accepting it. A corrupt
+                    # codeload response must fall through to the regular GitHub
+                    # archive endpoint instead of aborting the whole ZIP method.
+                    with zipfile.ZipFile(io.BytesIO(candidate)) as candidate_zip:
+                        bad = candidate_zip.testzip()
+                        if bad is not None:
+                            raise RuntimeError("poškodený zip pri " + str(bad))
+                        candidate_files = [
+                            name for name in candidate_zip.namelist()
+                            if not name.endswith("/")]
+                        if not any(name.replace("\\", "/").endswith("/main.py")
+                                   or name == "main.py"
+                                   for name in candidate_files):
+                            raise RuntimeError("ZIP neobsahuje main.py")
+                    data = candidate
                     break
                 except Exception as de:
                     errors.append(url + ": " + str(de))
@@ -634,15 +837,22 @@ class InstallWorker(QThread):
             # isolation: one locked/colliding file must not abort the whole
             # install. Track failures and report them at the end.
             prefix = ""
-            names = [n for n in zf.namelist() if not n.endswith("/")]
-            if names:
-                prefix = names[0].split("/")[0] if "/" in names[0] else ""
+            archive_names = [n for n in zf.namelist() if not n.endswith("/")]
+            if archive_names:
+                prefix = archive_names[0].split("/")[0] if "/" in archive_names[0] else ""
+            names = []
+            for archive_name in archive_names:
+                rel = (archive_name[len(prefix) + 1:]
+                       if prefix and archive_name.startswith(prefix + "/")
+                       else archive_name)
+                rel = _normalise_repo_path(rel)
+                if rel and _is_runtime_payload_path(rel):
+                    names.append((archive_name, rel))
+            self.log.emit("  ▸ Runtime balík: {} súborov (vývojové súbory sa neinštalujú).".format(
+                len(names)))
             failed = []
             extracted = 0
-            for n in names:
-                rel = n[len(prefix) + 1:] if prefix and n.startswith(prefix + "/") else n
-                if not rel:
-                    continue
+            for n, rel in names:
                 dest = os.path.join(self.install_path, rel)
                 # \\?\ opts out of the 260-char MAX_PATH limit on Windows so
                 # deeply nested files don't fail with „cannot unpack file“.
@@ -675,8 +885,17 @@ class InstallWorker(QThread):
                 if len(failed) > 10:
                     self.log.emit("     … a ďalších {}".format(len(failed) - 10))
             self.log.emit("  ✓ Rozbalených {} súborov.".format(extracted))
+            required = ("main.py", "bootloader.py", "requirements.txt")
+            missing_required = [name for name in required if not os.path.isfile(
+                os.path.join(self.install_path, name))]
+            if failed or extracted != len(names) or missing_required:
+                details = "neúplný runtime ZIP"
+                if missing_required:
+                    details += "; chýba " + ", ".join(missing_required)
+                self.log.emit(self.t["src_err"].format(err=details))
+                return False
             self.log.emit(self.t["src_zip_ok"])
-            return os.path.exists(os.path.join(self.install_path, "main.py"))
+            return True
         except Exception as e:
             # Full traceback in debug so „cannot unpack file“/WinError has a
             # clear root cause in the log instead of a bare message.
@@ -696,21 +915,11 @@ class InstallWorker(QThread):
             tree = r.json().get("tree", [])
             blobs = [e for e in tree if e.get("type") == "blob"]
 
-            def allowed(path):
-                lower = path.lower().replace("/", os.sep)
-                parts = lower.split(os.sep)
-                if any(p in _FETCH_BLACKLIST_DIRS for p in parts):
-                    return False
-                if os.path.basename(lower) in _FETCH_BLACKLIST_FILES:
-                    return False
-                if any(lower.endswith(suf) for suf in _FETCH_BLACKLIST_SUFFIX):
-                    return False
-                return True
-
-            todo = [e for e in blobs if allowed(e["path"])]
+            todo = [e for e in blobs if _is_runtime_payload_path(e["path"])]
             total = len(todo)
             self.log.emit("  ▸ Stahujem {} súborov jeden po druhom…".format(total))
             count = 0
+            failed = []
             total_bytes = 0
             t0 = time.time()
             for i, entry in enumerate(todo, 1):
@@ -725,6 +934,8 @@ class InstallWorker(QThread):
                     total_bytes += len(rr.content)
                     count += 1
                     self.log.emit("    [{:>4}/{:>4}] {}".format(count, total, path))
+                else:
+                    failed.append("{} (HTTP {})".format(path, rr.status_code))
                 if i % 25 == 0 or i == total:
                     self.status.emit("Sťahujem súbory… {}/{} ({:.1f} MB)".format(
                         i, total, total_bytes / (1024 * 1024)))
@@ -733,35 +944,65 @@ class InstallWorker(QThread):
             speed = (mb / dt) if dt > 0 else 0.0
             self.log.emit("  ✓ Stiahnutých {} súborov, {:.1f} MB ({:.1f} MB/s)".format(
                 count, mb, speed))
-            if count > 0:
+            if count == total and total > 0:
                 self.log.emit(self.t["src_raw_ok"].format(n=count))
                 return os.path.exists(os.path.join(self.install_path, "main.py"))
+            if failed:
+                self.log.emit("  ⚠ Neúplný runtime prenos: {} z {} súborov zlyhalo.".format(
+                    len(failed), total))
+                for item in failed[:5]:
+                    self.log.emit("     – " + item)
         except Exception as e:
             self.log.emit(self.t["src_err"].format(err=str(e)))
         return False
 
+    def _finalise_runtime_payload(self):
+        removed = _remove_legacy_development_payload(self.install_path)
+        if removed:
+            self.log.emit("  ✓ Odstránené staré vývojové položky: " + ", ".join(removed))
+        # Installed copies have no .git directory. Persist the exact source
+        # revision so the application never has to display a bare "build".
+        commit = ""
+        try:
+            import requests
+            response = requests.get(COMMIT_API, headers=_github_headers(), timeout=20)
+            if response.status_code == 200:
+                match = re.match(r"(?i)^[0-9a-f]{7,40}$",
+                                 str(response.json().get("sha", "")).strip())
+                commit = match.group(0)[:7].lower() if match else ""
+            else:
+                self.log.emit("  [WRN] Commit API HTTP {}.".format(response.status_code))
+        except Exception as exc:
+            self.log.emit("  [WRN] Nepodarilo sa zistiť commit: " + str(exc))
+        if commit:
+            marker = os.path.join(self.install_path, "commit.txt")
+            temporary = marker + ".tmp"
+            with open(temporary, "w", encoding="utf-8") as stream:
+                stream.write(commit)
+            os.replace(temporary, marker)
+            self.log.emit("  ✓ Revízia aplikácie: " + commit)
+        self.log.emit("  ✓ Runtime balík pripravený: {} súborov, {:.1f} MB.".format(
+            _count_files(self.install_path), _dir_size_mb(self.install_path)))
+
     def _fetch_repo(self):
-        """Always fetch the latest sources from GitHub. Three fallback strategies."""
-        # Git is optional. Most end-user PCs do not have it installed, so skip
-        # straight to GitHub's ZIP endpoint instead of displaying a scary
-        # "git unavailable" error for a perfectly normal configuration.
+        """Fetch the runtime subset, falling back to clone/archive transports."""
+        # The tree + raw transport is intentionally first: unlike a repository
+        # archive it downloads only allow-listed runtime blobs. Git and ZIP stay
+        # as resilient fallbacks for API limits or restrictive proxies.
+        self.status.emit(self.t["src_try_raw"])
+        if self._try_raw_file_by_file():
+            self._finalise_runtime_payload()
+            return True
         if shutil.which("git"):
             self.status.emit(self.t["src_try_git"])
             if self._try_git_clone():
-                self.log.emit("  ✓ Zdrojové súbory pripravené ({:.1f} MB).".format(
-                    _dir_size_mb(self.install_path)))
+                self._finalise_runtime_payload()
                 return True
         else:
-            self.log.emit("  [INF] Git nie je potrebný — používam priamy GitHub archív.")
+            self.log.emit("  [INF] Git nie je potrebný — používam priamy GitHub prenos.")
         self.status.emit(self.t["src_try_zip"])
         if self._try_zip_archive():
-            self.log.emit("  ✓ Zdrojové súbory pripravené ({:.1f} MB).".format(
-                _dir_size_mb(self.install_path)))
-            return True
-        self.status.emit(self.t["src_try_raw"])
-        if self._try_raw_file_by_file():
-            self.log.emit("  ✓ Zdrojové súbory pripravené ({:.1f} MB).".format(
-                _dir_size_mb(self.install_path)))
+            self._finalise_runtime_payload()
             return True
         self.log.emit(self.t["src_fail"])
         return False
@@ -772,7 +1013,7 @@ class InstallWorker(QThread):
         py = self._real_python()
         if not py:
             self.log.emit("  Python nebol nájdený — závislosti preskočené.")
-            return
+            return False
         try:
             self.log.emit("  ▸ Používam Python: " + py[0])
             # Parse requirements.txt and install each package individually so
@@ -793,17 +1034,33 @@ class InstallWorker(QThread):
                 if extra.lower() not in " ".join(pkgs).lower():
                     pkgs.append(extra)
             self.log.emit("  ▸ Nainštalujem {} balíkov…".format(len(pkgs)))
+            failed = []
             for i, pkg in enumerate(pkgs, 1):
                 self.status.emit("pip install {}/{}: {}".format(i, len(pkgs), pkg.split(">")[0].split("=")[0]))
                 self.log.emit("    [{:>2}/{:>2}] {} …".format(i, len(pkgs), pkg))
                 try:
-                    subprocess.run([*py, "-m", "pip", "install", pkg],
-                                   capture_output=True, timeout=900, creationflags=_NO_WIN)
+                    result = subprocess.run(
+                        [*py, "-m", "pip", "install", pkg],
+                        capture_output=True, text=True, timeout=900,
+                        creationflags=_NO_WIN)
+                    if result.returncode != 0:
+                        detail = (result.stderr or result.stdout or
+                                  "pip exit code {}".format(result.returncode))
+                        detail = " ".join(detail.strip().split())[-700:]
+                        failed.append((pkg, detail))
+                        self.log.emit("      [CHYBA] {}: {}".format(pkg, detail))
                 except Exception as pe:
+                    failed.append((pkg, str(pe)))
                     self.log.emit("      ⚠ {}".format(pe))
+            if failed:
+                self.log.emit("  [CHYBA] Nenainštalované povinné balíky: " +
+                              ", ".join(pkg for pkg, _ in failed))
+                return False
             self.log.emit("  ✓ Závislosti nainštalované ({} balíkov).".format(len(pkgs)))
+            return True
         except Exception as e:
             self.log.emit("  problém s pip (" + str(e) + ") — nainštaluj manuálne.")
+            return False
 
     # ---------------------------------------------------------------- Shortcuts
     def _make_shortcuts(self, exe_path, mode):
@@ -870,7 +1127,10 @@ class InstallWorker(QThread):
 
             # 3) Python dependencies.
             self.status.emit(self.t["s_deps"])
-            self._pip_install()
+            if not self._pip_install():
+                raise RuntimeError(
+                    "Inštalácia povinných Python balíkov zlyhala. "
+                    "Presný balík a odpoveď pipu sú uvedené vyššie.")
             exe_path = os.path.join(self.install_path, "main.py")
             self.progress.emit(75)
 
@@ -885,7 +1145,7 @@ class InstallWorker(QThread):
                     # Remember the game roots so the uninstaller can offer to
                     # remove the SDK DLLs later. folders are .../plugins dirs.
                     for plugins_dir in folders:
-                        game_root = os.path.dirname(os.path.dirname(plugins_dir))
+                        game_root = _sdk_game_root(plugins_dir)
                         if game_root and game_root not in self.sdk_targets:
                             self.sdk_targets.append(game_root)
                 else:
@@ -916,9 +1176,7 @@ class InstallWorker(QThread):
                     "python_installed_by_installer": self.python_installed_by_installer,
                     "sdk_targets": self.sdk_targets,
                 }
-                os.makedirs(os.path.dirname(RECORD_PATH), exist_ok=True)
-                with open(RECORD_PATH, "w", encoding="utf-8") as f:
-                    json.dump(rec, f, indent=2)
+                _write_install_record(rec)
             except Exception:
                 pass
 
@@ -994,7 +1252,18 @@ class ThemeToggle(QWidget):
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             self.set_dark(not self._dark)
+            e.accept()
+            return
         super().mouseReleaseEvent(e)
+
+    def mousePressEvent(self, e):
+        # Accept the press as well as the release.  The old draggable custom
+        # header treated an ignored press as a window move and swallowed the
+        # matching release before the theme could change.
+        if e.button() == Qt.MouseButton.LeftButton:
+            e.accept()
+            return
+        super().mousePressEvent(e)
 
     def paintEvent(self, _e):
         # Always pair QPainter creation with end() in a finally block — an open
@@ -1075,6 +1344,107 @@ class ThemeToggle(QWidget):
             p.drawEllipse(QPointF(cx + mr * 0.55, cy - mr * 0.20), mr * 0.95, mr * 0.95)
 
 
+class InstallerLanguageIcon(QWidget):
+    """Crisp custom language mark used on the installer welcome page."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(38, 38)
+        self.setAccessibleName("Language")
+        self.setToolTip("Jazyk / Language")
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#10B981"))
+            painter.drawEllipse(QRectF(1, 1, 36, 36))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor("#FFFFFF"), 1.55,
+                                Qt.PenStyle.SolidLine,
+                                Qt.PenCapStyle.RoundCap))
+
+            # Globe: outer meridian, latitude lines and the narrow longitude.
+            globe = QRectF(8.5, 8.5, 18, 18)
+            painter.drawEllipse(globe)
+            painter.drawEllipse(QRectF(14, 8.5, 7, 18))
+            painter.drawArc(QRectF(8.5, 12, 18, 7), 0, 180 * 16)
+            painter.drawArc(QRectF(8.5, 16, 18, 7), 180 * 16, 180 * 16)
+
+            # Small overlapping conversation tile makes the symbol explicitly
+            # about languages rather than a generic world/map icon.
+            bubble = QRectF(20, 20, 12, 9)
+            painter.setPen(QPen(QColor("#D9FFF2"), 1.0))
+            painter.setBrush(QColor("#087D60"))
+            painter.drawRoundedRect(bubble, 3, 3)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#FFFFFF"))
+            painter.drawEllipse(QPointF(24, 24.5), 1.0, 1.0)
+            painter.drawEllipse(QPointF(28, 24.5), 1.0, 1.0)
+        finally:
+            painter.end()
+
+
+class InstallerStepBadge(QWidget):
+    """Painted badge whose circle cannot be clipped by stylesheet metrics."""
+
+    def __init__(self, text, parent=None):
+        super().__init__(parent)
+        self._text = str(text)
+        self._state = "pending"
+        self._theme = "light"
+        self.setFixedSize(32, 32)
+
+    def set_state(self, state, theme, text=None):
+        self._state = str(state)
+        self._theme = str(theme)
+        if text is not None:
+            self._text = str(text)
+        self.update()
+
+    def text(self):
+        return self._text
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            if self._state == "active":
+                background, foreground, border = ACCENT, "#FFFFFF", ACCENT
+            elif self._state == "done":
+                background, foreground, border = SUCCESS_DARK, "#FFFFFF", SUCCESS_DARK
+            else:
+                pal = DARK if self._theme == "dark" else LIGHT
+                background, foreground, border = pal["card2"], pal["muted"], pal["border"]
+            painter.setPen(QPen(QColor(border), 1.2))
+            painter.setBrush(QColor(background))
+            painter.drawEllipse(QRectF(1.5, 1.5, 29.0, 29.0))
+            painter.setPen(QColor(foreground))
+            painter.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._text)
+        finally:
+            painter.end()
+
+
+class InstallerStepCell(QWidget):
+    """Clickable step-rail cell used to revisit installation status safely."""
+
+    clicked = pyqtSignal(int)
+
+    def __init__(self, index, parent=None):
+        super().__init__(parent)
+        self.index = int(index)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self.index)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 def _esc(text: str) -> str:
     """HTML-escape a string so log output can't inject markup."""
     return (str(text)
@@ -1126,7 +1496,17 @@ class InstallerWindow(QWidget):
         self._worker = None
         self._cur = 0
         self.setWindowTitle(TR[self.lang]["win"])
-        self.setFixedSize(820, 640)
+        # Use the real Windows title bar and its native minimise, maximise and
+        # close controls.  The former frameless window lost all three when the
+        # decorative coloured dots were removed.
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowSystemMenuHint
+            | Qt.WindowType.WindowMinMaxButtonsHint
+            | Qt.WindowType.WindowCloseButtonHint)
+        self.resize(920, 700)
+        self.setMinimumSize(820, 640)
         try:
             import ctypes
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("UltraPilot.Installer")
@@ -1152,7 +1532,7 @@ class InstallerWindow(QWidget):
 
     # ----------------------------------------------------------------- chrome
     def _build_hero(self):
-        hero = QFrame()
+        hero = QFrame(self)
         hero.setObjectName("Hero")
         hero.setFixedHeight(80)
         h = QHBoxLayout(hero)
@@ -1182,31 +1562,24 @@ class InstallerWindow(QWidget):
 
     def _build_step_rail_widget(self, parent_layout):
         rail = QWidget()
-        rail.setFixedHeight(82)
+        rail.setFixedHeight(64)
         h = QHBoxLayout(rail)
-        h.setContentsMargins(28, 17, 28, 17)
+        h.setContentsMargins(28, 12, 28, 12)
         h.setSpacing(8)
         self._step_labels = []
         steps = TR[self.lang]["steps"]
         for i, name in enumerate(steps):
-            badge = QLabel(str(i + 1))
-            badge.setObjectName("StepBadge")
-            # 34×34 badge with ample rail room (64px rail, 14+14 margins) so the
-            # circle never clips vertically — the old 28px badge in a 50px rail
-            # with 10+10 margins left only ~1px of breathing room.
-            badge.setFixedSize(42, 42)
-            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            badge.setMargin(0)
-            badge.setContentsMargins(0, 0, 0, 0)
+            badge = InstallerStepBadge(str(i + 1))
             lbl = QLabel(name)
             lbl.setObjectName("StepLabel")
             cell = QHBoxLayout()
             cell.setSpacing(8)
             cell.addWidget(badge)
             cell.addWidget(lbl)
-            wrap = QWidget()
+            wrap = InstallerStepCell(i)
             wrap.setLayout(cell)
             wrap.setStyleSheet("border:none;")
+            wrap.clicked.connect(self._on_step_clicked)
             h.addWidget(wrap)
             self._step_labels.append((badge, lbl, wrap))
             if i < len(steps) - 1:
@@ -1237,130 +1610,144 @@ class InstallerWindow(QWidget):
     # ----------------------------------------------------------------- pages
     def _build_welcome(self):
         scroll, lay = self._page_frame()
-        # Hero card: logo + title + description, framed for a strong first
-        # impression (instead of bare text at the top of the page).
+        lay.setContentsMargins(30, 22, 30, 20)
+        lay.setSpacing(12)
+
+        # A calm, centred introduction keeps the first page focused and avoids
+        # decorative motion while the user decides whether to continue.
         hero = QFrame()
         hero.setObjectName("Card")
-        hl = QHBoxLayout(hero)
-        hl.setContentsMargins(24, 20, 24, 20)
-        hl.setSpacing(18)
-        # Logo on the left.
-        logo_lbl = QLabel()
-        pm = QIcon(ICON_PATH).pixmap(64, 64)
-        if pm.isNull():
-            pm = QPixmap(LOGO_PATH).scaledToWidth(64, Qt.TransformationMode.SmoothTransformation)
-        logo_lbl.setPixmap(pm)
-        logo_lbl.setStyleSheet("border:none;")
-        hl.addWidget(logo_lbl)
-        # Title + description on the right.
-        hcol = QVBoxLayout()
-        hcol.setSpacing(4)
-        title = QLabel(TR[self.lang]["welcome_t"])
-        title.setObjectName("Title")
-        title.setStyleSheet("font-size:28px; font-weight:800; color:#2EA043; border:none;")
-        hcol.addWidget(title)
-        desc = QLabel(TR[self.lang]["welcome_d"])
-        desc.setObjectName("Desc")
-        desc.setWordWrap(True)
-        desc.setStyleSheet("font-size:13px; color:#8B949E; border:none;")
-        hcol.addWidget(desc)
-        hl.addLayout(hcol, stretch=1)
+        hero.setMinimumHeight(220)
+        hcol = QVBoxLayout(hero)
+        hcol.setContentsMargins(54, 28, 54, 28)
+        hcol.setSpacing(9)
+        hcol.addStretch()
+        eyebrow = QLabel("ULTRAPILOT  ·  SETUP")
+        eyebrow.setObjectName("SectionTitle")
+        eyebrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hcol.addWidget(eyebrow)
+        self.welcome_title = QLabel(TR[self.lang]["welcome_t"])
+        self.welcome_title.setObjectName("Title")
+        self.welcome_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.welcome_title.setWordWrap(True)
+        hcol.addWidget(self.welcome_title)
+        self.welcome_description = QLabel(TR[self.lang]["welcome_d"])
+        self.welcome_description.setObjectName("Desc")
+        self.welcome_description.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.welcome_description.setWordWrap(True)
+        hcol.addWidget(self.welcome_description)
+        hcol.addSpacing(5)
+        chips = QHBoxLayout()
+        chips.setSpacing(7)
+        chips.addStretch()
+        for text_value in (("Windows 10/11"), ("ETS2 / ATS"), ("x64")):
+            chip = QLabel(text_value)
+            chip.setObjectName("VerBadge")
+            chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            chips.addWidget(chip)
+        chips.addStretch()
+        hcol.addLayout(chips)
+        hcol.addStretch()
         lay.addWidget(hero)
-        lay.addSpacing(10)
 
-        # Feature grid (2 columns).
+        middle = QHBoxLayout()
+        middle.setSpacing(12)
+
+        feature_wrap = QFrame()
+        feature_wrap.setObjectName("Card")
+        feature_layout = QVBoxLayout(feature_wrap)
+        feature_layout.setContentsMargins(16, 14, 16, 14)
+        feature_layout.setSpacing(8)
         feat_title = QLabel(TR[self.lang]["feat_t"])
         feat_title.setObjectName("SectionTitle")
-        lay.addWidget(feat_title)
-        grid = QVBoxLayout()
-        grid.setSpacing(8)
-        row = None
+        feature_layout.addWidget(feat_title)
         feats = TR[self.lang]["feats"]
-        for i, (icon, name, fd) in enumerate(feats):
-            if i % 2 == 0:
-                row = QHBoxLayout()
-                row.setSpacing(8)
-                grid.addLayout(row)
-            card = QFrame()
-            card.setObjectName("FeatCard")
-            cl = QHBoxLayout(card)
-            cl.setContentsMargins(14, 12, 14, 12)
-            cl.setSpacing(12)
-            ic = QLabel(icon)
-            ic.setObjectName("FeatIcon")
-            col = QVBoxLayout()
-            col.setSpacing(2)
+        for icon, name, fd in feats[:3]:
+            row = QHBoxLayout()
+            row.setSpacing(10)
+            ic = QLabel(icon if icon else "•")
+            ic.setFixedWidth(28)
+            ic.setAlignment(Qt.AlignmentFlag.AlignCenter)
             nm = QLabel(name)
             nm.setObjectName("FeatName")
-            ds = QLabel(fd)
-            ds.setObjectName("FeatDesc")
-            ds.setWordWrap(True)
-            col.addWidget(nm)
-            col.addWidget(ds)
-            cl.addWidget(ic)
-            cl.addLayout(col, stretch=1)
-            row.addWidget(card)
-        if row is not None:
-            row.addStretch()
-        lay.addLayout(grid)
+            row.addWidget(ic)
+            row.addWidget(nm, stretch=1)
+            ok = QLabel("✓")
+            ok.setStyleSheet("color:" + SUCCESS + ";font-weight:800;")
+            row.addWidget(ok)
+            feature_layout.addLayout(row)
+        feature_layout.addStretch()
+        middle.addWidget(feature_wrap, stretch=1)
 
-        # Requirements box.
-        req_title = QLabel(TR[self.lang]["req_t"])
-        req_title.setObjectName("SectionTitle")
-        lay.addWidget(req_title)
-        req_card = QFrame()
-        req_card.setObjectName("Card")
-        rl = QVBoxLayout(req_card)
-        rl.setContentsMargins(14, 12, 14, 12)
-        rl.setSpacing(6)
-        for it in TR[self.lang]["req_items"]:
-            lab = QLabel("•  " + it)
-            lab.setStyleSheet("font-size:13px;")
-            rl.addWidget(lab)
-        lay.addWidget(req_card)
-
-        # Language row. The installer ships only sk + en (others are downloadable
-        # from the in-app onboarding); each entry shows the display name and the
-        # translation coverage percentage.
-        row = QHBoxLayout()
-        row.setSpacing(10)
+        language_card = QFrame()
+        language_card.setObjectName("Card")
+        language_layout = QVBoxLayout(language_card)
+        language_layout.setContentsMargins(18, 14, 18, 14)
+        language_layout.setSpacing(7)
+        language_head = QHBoxLayout()
+        self.language_mark = InstallerLanguageIcon(language_card)
+        language_head.addWidget(self.language_mark)
+        language_text = QVBoxLayout()
+        language_text.setSpacing(0)
         cap = QLabel(TR[self.lang].get("language", TR[self.lang].get("lang", "Language")))
-        cap.setObjectName("Caption")
+        cap.setObjectName("FeatName")
+        language_text.addWidget(cap)
+        lang_hint = QLabel("Jazyk tohto inštalátora" if self.lang == "sk"
+                           else "Installer display language")
+        lang_hint.setObjectName("Caption")
+        lang_hint.setWordWrap(True)
+        lang_hint.setMaximumWidth(280)
+        language_text.addWidget(lang_hint)
+        language_head.addLayout(language_text, stretch=1)
+        language_layout.addLayout(language_head)
         self.lang_combo = QComboBox()
-        # The installer ships only Slovak + English (others are downloadable
-        # later from the in-app onboarding). Each entry shows the display name
-        # and the translation coverage percentage.
+        self.lang_combo.setMinimumWidth(245)
         for code in ("sk", "en"):
             _ensure_lang_loaded(code)
-            name = _lang_name(code)
-            cov = _lang_coverage(code)
-            self.lang_combo.addItem(f"{name}  ·  {cov}%", code)
-        # Select the current code by data.
+            self.lang_combo.addItem(
+                "{}  ·  {}%".format(_lang_name(code), _lang_coverage(code)), code)
         for i in range(self.lang_combo.count()):
             if self.lang_combo.itemData(i) == self.lang:
                 self.lang_combo.setCurrentIndex(i)
                 break
         self.lang_combo.currentIndexChanged.connect(self._on_lang_idx)
-        row.addWidget(cap)
-        row.addWidget(self.lang_combo)
-        row.addStretch()
-        lay.addLayout(row)
+        language_layout.addWidget(self.lang_combo)
+        language_layout.addStretch()
+        middle.addWidget(language_card, stretch=1)
+        lay.addLayout(middle)
+
+        req_card = QFrame()
+        req_card.setObjectName("Card")
+        req_layout = QVBoxLayout(req_card)
+        req_layout.setContentsMargins(16, 11, 16, 11)
+        req_layout.setSpacing(7)
+        req_title = QLabel(TR[self.lang]["req_t"])
+        req_title.setObjectName("SectionTitle")
+        req_layout.addWidget(req_title)
+        req_grid = QGridLayout()
+        req_grid.setHorizontalSpacing(18)
+        req_grid.setVerticalSpacing(5)
+        for index, item in enumerate(TR[self.lang]["req_items"]):
+            lab = QLabel("✓  " + item)
+            lab.setObjectName("Caption")
+            lab.setWordWrap(True)
+            lab.setMaximumWidth(370)
+            req_grid.addWidget(lab, index // 2, index % 2)
+        req_layout.addLayout(req_grid)
+        lay.addWidget(req_card)
+
         lay.addStretch()
-        # Version + commit badge pinned to the bottom of the welcome page.
-        # Styled from the active palette so it adapts to dark/light (the old
-        # hardcoded dark style read as a black box in light mode).
-        commit = _installer_commit()
-        if commit:
-            ver_text = TR[self.lang].get(
-                "welcome_version", "Verzia {ver} · commit {commit}").format(
-                ver=APP_VERSION, commit=commit)
-        else:
-            ver_text = TR[self.lang].get(
-                "welcome_version_no_commit", "Verzia {ver}").format(ver=APP_VERSION)
+        installer_label = "Inštalátor" if self.lang == "sk" else "Installer"
+        ver_text = "UltraPilot {}  ·  {} {}".format(
+            APP_VERSION, installer_label, INSTALLER_VERSION)
         self.ver_lbl = QLabel(ver_text)
         self.ver_lbl.setObjectName("VerBadge")
         self.ver_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(self.ver_lbl)
+        version_row = QHBoxLayout()
+        version_row.addStretch()
+        version_row.addWidget(self.ver_lbl)
+        version_row.addStretch()
+        lay.addLayout(version_row)
         self.stack.addWidget(scroll)
 
     def _build_license(self):
@@ -1522,21 +1909,13 @@ class InstallerWindow(QWidget):
             for i, (badge, lbl, wrap) in enumerate(self._step_labels):
                 active = (i == idx)
                 done = (i < idx)
-                # Always show the number — swapping to „✓“ changed the glyph
-                # metrics and made badges visually jump. Colour encodes state.
                 if active:
-                    bg, fg, bd = ACCENT, "#FFFFFF", ACCENT
+                    state = "active"
                 elif done:
-                    bg, fg, bd = SUCCESS_DARK, "#FFFFFF", SUCCESS_DARK
+                    state = "done"
                 else:
-                    bg, fg, bd = c['card2'], c['muted'], c['border']
-                badge.setText(str(i + 1))
-                # Explicit font-size + padding + margin + radius keep the glyph
-                # fully inside the 34×34 badge (radius = half width = round).
-                badge.setStyleSheet(
-                    "color:" + fg + "; background:" + bg + "; border:1px solid " + bd + ";"
-                    " border-radius:21px; font-size:15px; font-weight:700;"
-                    " padding:0; margin:0;")
+                    state = "pending"
+                badge.set_state(state, self.theme, "✓" if done else str(i + 1))
                 lbl.setStyleSheet("color:" + (c['title'] if active else c['muted']) +
                                   "; font-size:13px; font-weight:" + ("700" if active else "600") +
                                   "; padding:0; margin:0;")
@@ -1545,6 +1924,22 @@ class InstallerWindow(QWidget):
             ok = self.path_status.objectName() == "DiskOk"
             col = SUCCESS if ok else WARN
             self.path_status.setStyleSheet("color:" + col + "; font-size:12px; font-weight:600;")
+
+    def _on_step_clicked(self, index):
+        """Allow safe review of the install log and completed summary.
+
+        Forward steps remain locked until their work has happened. Once an
+        installation worker exists, step 4 is always the authoritative log;
+        after success, step 5 can be selected again without starting work.
+        """
+        index = int(index)
+        if index == 3 and self._worker is not None:
+            self._go_step(3)
+        elif (index == 4 and self.exe_path
+              and self._worker is not None and not self._worker.isRunning()):
+            self._go_step(4)
+        elif 0 <= index < self._cur and self._cur < 3:
+            self._go_step(index)
 
     def _on_lang_idx(self, idx):
         """Language combo changed — ``idx`` is the row; data holds the code."""
@@ -1864,29 +2259,37 @@ def _do_uninstall_app(rec, log=None):
 
 def _do_uninstall_sdk(rec, log=None):
     """Remove the SDK DLLs from each recorded game's plugins folder."""
-    targets = list(rec.get("sdk_targets") or [])
-    if not targets:
-        try:
-            from core.sdk.game_utils import find_scs_games
-            targets = find_scs_games()
-        except Exception:
-            targets = []
-    if not targets:
+    plugin_dirs = _sdk_plugin_dirs(rec, include_detected=True)
+    if not plugin_dirs:
         if log:
-            log("Žiadne cieľové hry v zázname — SDK nemožno nájsť.")
-        return
-    for game_root in targets:
-        plugins_dir = os.path.join(game_root, "bin", "win_x64", "plugins")
-        for name in ("scs-telemetry.dll", "scs_sdk_controller.dll", "ets2la_plugin.dll"):
+            log("Žiadna hra ani SDK priečinok nebol nájdený.")
+        return {"removed": 0, "failed": 0, "found": 0}
+    removed = 0
+    failed = 0
+    found = 0
+    for plugins_dir in plugin_dirs:
+        for name in _SDK_DLL_NAMES:
             p = os.path.join(plugins_dir, name)
             try:
                 if os.path.exists(p):
+                    found += 1
                     if log:
                         log("Odstraňujem " + name + " z " + plugins_dir)
                     os.remove(p)
+                    removed += 1
             except Exception as e:
+                failed += 1
                 if log:
                     log("⚠ " + name + ": " + str(e))
+    if log:
+        if failed:
+            log("⚠ SDK: odstránené {}, zlyhalo {} (hra môže používať DLL).".format(
+                removed, failed))
+        elif removed:
+            log("✓ SDK pluginy odstránené: {} súborov.".format(removed))
+        else:
+            log("SDK pluginy už v nájdených priečinkoch nie sú.")
+    return {"removed": removed, "failed": failed, "found": found}
 
 
 def _do_uninstall_python(rec, log=None):
@@ -2010,20 +2413,11 @@ class _UninstallDialog(QDialog):
         self.chk_sdk = QCheckBox("SDK pluginy (DLL z hry)")
         # Do not rely only on the install record: older versions did not always
         # save sdk_targets. Detect the actual DLLs in every installed game.
-        sdk_targets = list(rec.get("sdk_targets") or [])
-        try:
-            from core.sdk.game_utils import find_scs_games
-            for game in find_scs_games():
-                plugins = os.path.join(game, "bin", "win_x64", "plugins")
-                if any(os.path.exists(os.path.join(plugins, dll)) for dll in
-                       ("scs-telemetry.dll", "scs_sdk_controller.dll", "ets2la_plugin.dll")):
-                    if game not in sdk_targets:
-                        sdk_targets.append(game)
-        except Exception:
-            pass
-        if sdk_targets:
-            self.rec["sdk_targets"] = sdk_targets
-        has_sdk = bool(sdk_targets)
+        sdk_plugin_dirs = _sdk_plugin_dirs(rec, include_detected=True)
+        has_sdk = any(os.path.exists(os.path.join(folder, dll))
+                      for folder in sdk_plugin_dirs for dll in _SDK_DLL_NAMES)
+        if sdk_plugin_dirs:
+            self.rec["sdk_targets"] = [_sdk_game_root(folder) for folder in sdk_plugin_dirs]
         self.chk_sdk.setChecked(has_sdk)
         self.chk_sdk.setEnabled(has_sdk)
         self.chk_sdk.setStyleSheet(_chk_qss)
@@ -2194,18 +2588,19 @@ class _RepairDialog(QDialog):
         self._worker = _RepairWorker(self.rec)
         self._worker.log.connect(self._log)
         self._worker.progress.connect(self.progress.setValue)
-        self._worker.done.connect(lambda: self._on_done())
+        self._worker.done.connect(self._on_done)
         self._worker.start()
 
-    def _on_done(self):
-        self.run_btn.setText("Hotovo")
-        self._log("✔ Oprava dokončená.")
+    def _on_done(self, ok):
+        self.run_btn.setText("Hotovo" if ok else "Oprava zlyhala")
+        self._log("✔ Oprava dokončená." if ok else
+                  "✗ Oprava nebola dokončená; pozri presnú chybu vyššie.")
 
 
 class _RepairWorker(QThread):
     log = pyqtSignal(str)
     progress = pyqtSignal(int)
-    done = pyqtSignal()
+    done = pyqtSignal(bool)
 
     def __init__(self, rec):
         super().__init__()
@@ -2226,12 +2621,18 @@ class _RepairWorker(QThread):
             if ok_repo:
                 self.log.emit("✓ Súbory synchronizované.")
             else:
-                self.log.emit("⚠ Nepodarilo sa stiahnuť súbory — skontroluj pripojenie.")
+                self.log.emit("✗ Zdrojové súbory sa nepodarilo stiahnuť; "
+                              "presné chyby jednotlivých prenosov sú vyššie.")
+                self.done.emit(False)
+                return
 
             # 2) Re-install Python deps.
             self.progress.emit(45)
             self.log.emit("─── Python knižnice ───")
-            worker._pip_install()
+            if not worker._pip_install():
+                self.log.emit("✗ Povinné Python knižnice sa nepodarilo nainštalovať.")
+                self.done.emit(False)
+                return
             self.log.emit("✓ Knižnice nastavené.")
 
             # 3) Re-apply SDK DLLs into the game.
@@ -2243,15 +2644,18 @@ class _RepairWorker(QThread):
                 if folders:
                     for fld in folders:
                         self.log.emit("✓ SDK → " + fld)
+                    roots = _update_sdk_targets(self.rec, folders)
+                    self.log.emit("✓ SDK ciele uložené: {}".format(len(roots)))
                 else:
                     self.log.emit("Hra zatiaľ nenájdená — DLL sa nainštalujú pri prvom spustení.")
             except Exception as e:
                 self.log.emit("⚠ SDK: " + str(e))
 
             self.progress.emit(100)
+            self.done.emit(True)
         except Exception as e:
             self.log.emit("✗ Chyba: " + str(e))
-        self.done.emit()
+            self.done.emit(False)
 
 
 def _maintenance_dialog(rec):

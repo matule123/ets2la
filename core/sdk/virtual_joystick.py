@@ -1,5 +1,9 @@
-import vgamepad as vg
 import logging
+
+try:
+    import vgamepad as vg
+except ImportError:
+    vg = None
 
 
 class VirtualJoystick:
@@ -13,6 +17,12 @@ class VirtualJoystick:
     """
 
     def __init__(self):
+        self.gamepad = None
+        if vg is None:
+            logging.error(
+                "Virtual joystick is unavailable: Python package 'vgamepad' "
+                "is not installed. Repair the UltraPilot installation.")
+            return
         try:
             self.gamepad = vg.VX360Gamepad()
             self._steer = 0.0

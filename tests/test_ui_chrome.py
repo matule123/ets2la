@@ -18,10 +18,10 @@ from UI.app import (MacTitleBar, UltraPilotApp, rounded_window_region,
                     PluginsPage)
 from UI.icons import line_icon
 from UI.map_page import MapPage
-from UI.dynamic_island import DynamicIsland
+from UI.dynamic_island import DynamicIsland, _friendly_activity_message
 from UI.perf_overlay import PerfOverlay
 from UI.settings_menu import SettingsMenu
-from UI.onboarding import OnboardingWizard, _LangRow
+from UI.onboarding import OnboardingWizard, _LangRow, _LanguageFlag
 
 
 class State:
@@ -134,10 +134,19 @@ class UiChromeTests(unittest.TestCase):
             for index, row in enumerate(wizard.lang_rows):
                 self.assertEqual(
                     wizard.lang_rows_grid.getItemPosition(index)[1], index % 2)
-                self.assertEqual(row.code_badge.text(), row.code.upper())
+                self.assertIsInstance(row.code_badge, _LanguageFlag)
+                self.assertEqual(row.code_badge.code, row.code)
+                self.assertEqual(row.code_badge.accessibleName(), "flag-" + row.code)
                 self.assertGreaterEqual(row.minimumHeight(), 116)
         finally:
             wizard.close()
+
+    def test_dynamic_island_hides_repeated_process_lifecycle_noise(self):
+        self.assertIsNone(_friendly_activity_message(
+            "Process Engine started (PID: 16144)"))
+        self.assertIsNone(_friendly_activity_message("Launching Engine Process..."))
+        self.assertEqual(_friendly_activity_message("Loading road network"),
+                         "Načítavam mapu ciest")
 
     def test_performance_popover_has_transparent_rounded_surface(self):
         overlay = PerfOverlay(State({"ui_theme": "light"}))

@@ -453,7 +453,7 @@ class UpdateCheckerWidget(QWidget):
             # line numbers or other metadata from an older commit file.
             from core.update_check import _display_commit
             commit = _display_commit(self._commit)
-            t += "  ·  " + (commit or "build")
+            t += "  ·  " + (commit or "neznáma revízia")
         return t
 
     def check(self):
