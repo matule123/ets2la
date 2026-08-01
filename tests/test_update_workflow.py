@@ -164,9 +164,15 @@ class UpdateUiStateTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def test_dialog_has_explicit_download_progress_and_install_states(self):
-        dialog = UpdateConfirmDialog("abcdef0")
+        dialog = UpdateConfirmDialog(
+            "abcdef0", title="Opravené riadenie",
+            description="Podrobný zoznam zmien patrí iba do hover karty.")
         self.assertEqual(dialog.primary_btn.text(), "Stiahnuť")
         self.assertFalse(dialog.progress.isVisible())
+        self.assertIsNotNone(dialog.brand_logo.pixmap())
+        self.assertFalse(dialog.brand_logo.pixmap().isNull())
+        self.assertNotIn("Opravené riadenie", dialog.note.text())
+        self.assertNotIn("Podrobný zoznam zmien", dialog.note.text())
 
         dialog.set_downloading()
         self.assertEqual(
@@ -199,6 +205,38 @@ class UpdateUiStateTests(unittest.TestCase):
             widget = UpdateCheckerWidget(object())
             widget._on_checked(True, "abcdef0")
             self.assertEqual(widget.btn.text(), "Aktualizovať")
+            widget.close()
+
+    def test_release_changes_appear_only_in_hover_card_below_button(self):
+        with (mock.patch.object(update_check, "git_commit",
+                                return_value="1234567"),
+              mock.patch.object(update_check, "latest_commit_info",
+                                return_value={
+                                    "title": "Stabilnejšie riadenie",
+                                    "description": "Plynulejšie zákruty a opravy SDK.",
+                                })):
+            widget = UpdateCheckerWidget(object())
+            widget.resize(240, 140)
+            widget.show()
+            self.app.processEvents()
+            widget._on_checked(True, "abcdef0")
+
+            self.assertEqual(widget.status_lbl.text(), "Dostupná nová verzia")
+            self.assertNotIn("Stabilnejšie riadenie", widget.status_lbl.text())
+            widget.btn.hovered.emit(True)
+            self.app.processEvents()
+            self.assertTrue(widget.changes_popover.isVisible())
+            self.assertEqual(widget.changes_popover.release_title.text(),
+                             "Stabilnejšie riadenie")
+            self.assertEqual(widget.changes_popover.release_description.text(),
+                             "Plynulejšie zákruty a opravy SDK.")
+            button_bottom = widget.btn.mapToGlobal(
+                widget.btn.rect().bottomLeft()).y()
+            self.assertGreater(widget.changes_popover.y(), button_bottom)
+
+            widget.btn.hovered.emit(False)
+            self.app.processEvents()
+            self.assertFalse(widget.changes_popover.isVisible())
             widget.close()
 
     def test_startup_shows_installation_before_initializing(self):

@@ -17,7 +17,7 @@ import os
 import sys
 
 from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF, QPoint, QElapsedTimer
-from PyQt6.QtGui import QPainter, QPen, QColor
+from PyQt6.QtGui import QPainter, QPen, QColor, QIcon
 from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel,
                              QPushButton, QProgressBar, QDialog, QFrame)
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -236,11 +236,20 @@ class UpdateConfirmDialog(QDialog):
 
         head = QHBoxLayout()
         head.setSpacing(14)
-        icon = QLabel("↓")
-        icon.setFixedSize(48, 48)
-        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon.setStyleSheet("font-size:28px;font-weight:800;color:#047857;background:#ECFDF5;border:1px solid #A7F3D0;border-radius:14px;")
-        head.addWidget(icon)
+        self.brand_logo = QLabel()
+        self.brand_logo.setFixedSize(52, 52)
+        self.brand_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.brand_logo.setStyleSheet(
+            "background:#F9FAFB;border:1px solid #E5E7EB;border-radius:14px;")
+        try:
+            from core.paths import resource
+            logo_path = resource("assets", "favicon.ico")
+            pixmap = QIcon(logo_path).pixmap(40, 40)
+            if not pixmap.isNull():
+                self.brand_logo.setPixmap(pixmap)
+        except Exception:
+            pass
+        head.addWidget(self.brand_logo)
         col = QVBoxLayout()
         col.setSpacing(2)
         self.title_lbl = QLabel("Dostupná aktualizácia")

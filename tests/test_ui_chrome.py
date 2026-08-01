@@ -21,6 +21,7 @@ from UI.map_page import MapPage
 from UI.dynamic_island import DynamicIsland
 from UI.perf_overlay import PerfOverlay
 from UI.settings_menu import SettingsMenu
+from UI.onboarding import OnboardingWizard, _LangRow
 
 
 class State:
@@ -118,6 +119,25 @@ class UiChromeTests(unittest.TestCase):
         self.assertFalse(any(text.startswith("⚙") for text in labels))
         self.assertIn("QWidget#SettingsPage", settings.styleSheet())
         settings.close()
+
+    def test_onboarding_language_page_uses_two_column_status_cards(self):
+        state = State({"ui_language_code": "sk"})
+        wizard = OnboardingWizard(state)
+        try:
+            wizard._go_step(1)
+            self.app.processEvents()
+            self.assertGreaterEqual(len(wizard.lang_rows), 2)
+            self.assertTrue(all(isinstance(row, _LangRow)
+                                for row in wizard.lang_rows))
+            self.assertEqual(wizard.lang_rows_grid.columnCount(), 2)
+            self.assertEqual(wizard.lang_section.text(), "DOSTUPNÉ JAZYKY")
+            for index, row in enumerate(wizard.lang_rows):
+                self.assertEqual(
+                    wizard.lang_rows_grid.getItemPosition(index)[1], index % 2)
+                self.assertEqual(row.code_badge.text(), row.code.upper())
+                self.assertGreaterEqual(row.minimumHeight(), 116)
+        finally:
+            wizard.close()
 
     def test_performance_popover_has_transparent_rounded_surface(self):
         overlay = PerfOverlay(State({"ui_theme": "light"}))

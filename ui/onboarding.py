@@ -23,7 +23,7 @@ from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QStackedWidget, QFrame, QProgressBar, QButtonGroup, QRadioButton,
-    QScrollArea, QMessageBox, QGraphicsOpacityEffect,
+    QScrollArea, QMessageBox, QGraphicsOpacityEffect, QGridLayout,
 )
 
 from core import i18n
@@ -149,39 +149,65 @@ class _LangRow(QWidget):
         self._refresh(info)
 
     def _build(self):
-        self.setObjectName("Card")
+        self.setObjectName("LanguageCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(14, 10, 14, 10)
-        lay.setSpacing(10)
-        left = QVBoxLayout()
-        left.setSpacing(2)
+        self.setMinimumHeight(116)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(15, 13, 15, 12)
+        lay.setSpacing(9)
+        top = QHBoxLayout()
+        top.setSpacing(10)
+        self.code_badge = QLabel(self.code.upper())
+        self.code_badge.setFixedSize(42, 42)
+        self.code_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.code_badge.setStyleSheet(
+            "background:#ECFDF5;color:#047857;border:1px solid #A7F3D0;"
+            "border-radius:12px;font-size:12px;font-weight:800;")
+        top.addWidget(self.code_badge)
+        identity = QVBoxLayout()
+        identity.setSpacing(1)
         self.name = QLabel()
         self.name.setStyleSheet("font-size:14px; font-weight:700; color:#111827;")
-        self.sub = QLabel()
-        self.sub.setStyleSheet("font-size:12px; color:#6B7280;")
-        left.addWidget(self.name)
-        left.addWidget(self.sub)
-        lay.addLayout(left)
-        lay.addStretch()
+        self.english_name = QLabel()
+        self.english_name.setStyleSheet("font-size:11px;color:#6B7280;")
+        identity.addWidget(self.name)
+        identity.addWidget(self.english_name)
+        top.addLayout(identity, stretch=1)
         self.cov = QLabel()
-        self.cov.setStyleSheet("font-size:12px; color:#6B7280;")
-        lay.addWidget(self.cov)
+        self.cov.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.cov.setMinimumWidth(50)
+        top.addWidget(self.cov)
+        lay.addLayout(top)
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(8)
+        self.sub = QLabel()
+        self.sub.setStyleSheet("font-size:11px;color:#6B7280;")
+        bottom.addWidget(self.sub, stretch=1)
         self.action = QPushButton()
         self.action.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.action.setMinimumWidth(96)
         self.action.setStyleSheet(
             "QPushButton{background:#F3F4F6; color:#111827; border:1px solid #E5E7EB;"
-            "border-radius:8px; padding:6px 14px; font-size:12px; font-weight:600;}"
+            "border-radius:8px; padding:6px 12px; font-size:11px; font-weight:700;}"
             "QPushButton:hover{border-color:" + ACCENT + "; color:" + ACCENT + ";}")
         self.action.clicked.connect(self._on_action)
-        lay.addWidget(self.action)
+        bottom.addWidget(self.action)
+        lay.addLayout(bottom)
 
     def _refresh(self, info):
         self.info = info
-        self.name.setText(info["name"] + ("  ·  " + info["english_name"] if info["english_name"] != info["name"] else ""))
+        self.code_badge.setText(str(info.get("code", self.code)).upper())
+        self.name.setText(info["name"])
+        english = info.get("english_name", "")
+        self.english_name.setText(english if english != info["name"] else "")
         cov = info.get("coverage", 0)
         self.cov.setText(str(cov) + "%")
-        self.cov.setStyleSheet("font-size:12px; font-weight:600; color:" + (SUCCESS if cov >= 80 else (WARN if cov >= 40 else DANGER)))
+        cov_color = SUCCESS if cov >= 80 else (WARN if cov >= 40 else DANGER)
+        self.cov.setStyleSheet(
+            "font-size:11px;font-weight:800;color:" + cov_color + ";"
+            "background:#F9FAFB;border:1px solid #E5E7EB;border-radius:9px;"
+            "padding:3px 6px;")
         if info.get("bundled"):
             self.sub.setText(_("lang_bundled"))
             self.action.setText(_("lang_select"))
@@ -191,16 +217,28 @@ class _LangRow(QWidget):
             self.action.setText(_("lang_select"))
             self.action.setEnabled(True)
         else:
+            self.sub.setText("Dostupné online" if _lang_code == "sk"
+                             else "Available online")
             self.action.setText(_("lang_download"))
             self.action.setEnabled(True)
 
     def mark_selected(self, selected):
         if selected:
-            self.setStyleSheet("#Card{background:#ECFDF5; border:2px solid " + ACCENT + "; border-radius:12px;}")
+            self.setStyleSheet(
+                "#LanguageCard{background:#ECFDF5;border:2px solid " + ACCENT + ";"
+                "border-radius:14px;}")
+            self.code_badge.setStyleSheet(
+                "background:" + ACCENT + ";color:#FFFFFF;border:none;"
+                "border-radius:12px;font-size:12px;font-weight:800;")
             self.action.setText(_("lang_selected"))
             self.action.setStyleSheet("QPushButton{background:#10B981;color:#FFFFFF;border:none;border-radius:8px;padding:6px 14px;font-size:12px;font-weight:700;}")
         else:
-            self.setStyleSheet("#Card{background:#FFFFFF; border:1px solid #E5E7EB; border-radius:12px;}")
+            self.setStyleSheet(
+                "#LanguageCard{background:#FFFFFF;border:1px solid #E5E7EB;"
+                "border-radius:14px;}#LanguageCard:hover{border-color:#6EE7B7;} ")
+            self.code_badge.setStyleSheet(
+                "background:#ECFDF5;color:#047857;border:1px solid #A7F3D0;"
+                "border-radius:12px;font-size:12px;font-weight:800;")
             if self.info.get("downloaded") or self.info.get("bundled"):
                 self.action.setText(_("lang_select"))
             self.action.setStyleSheet(
@@ -392,17 +430,47 @@ class OnboardingWizard(QWidget):
 
     def _build_language(self):
         scroll, lay = self._page()
+        lay.setContentsMargins(30, 20, 30, 20)
+        intro = QFrame()
+        intro.setObjectName("LanguageIntro")
+        intro.setStyleSheet(
+            "#LanguageIntro{background:qlineargradient(x1:0,y1:0,x2:1,y2:1,"
+            "stop:0 #ECFDF5,stop:1 #F8FFFC);border:1px solid #A7F3D0;"
+            "border-radius:16px;}#LanguageIntro QLabel{background:transparent;border:none;}")
+        intro_lay = QHBoxLayout(intro)
+        intro_lay.setContentsMargins(20, 16, 20, 16)
+        intro_lay.setSpacing(14)
+        mark = QLabel("A")
+        mark.setFixedSize(48, 48)
+        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mark.setStyleSheet(
+            "background:#10B981;color:#FFFFFF;border:none;border-radius:15px;"
+            "font-size:21px;font-weight:800;")
+        intro_lay.addWidget(mark)
+        text_col = QVBoxLayout()
+        text_col.setSpacing(3)
         self.lang_title = QLabel(_("lang_t"))
-        self.lang_title.setStyleSheet("font-size:30px; font-weight:800; color:#111827; letter-spacing:-0.5px;")
-        lay.addWidget(self.lang_title)
+        self.lang_title.setStyleSheet(
+            "font-size:25px;font-weight:800;color:#111827;letter-spacing:-0.4px;")
+        text_col.addWidget(self.lang_title)
         self.lang_desc = QLabel(_("lang_d"))
         self.lang_desc.setWordWrap(True)
-        self.lang_desc.setStyleSheet("font-size:14px; color:#374151;")
-        lay.addWidget(self.lang_desc)
-        lay.addSpacing(6)
-        self.lang_rows_wrap = QVBoxLayout()
-        self.lang_rows_wrap.setSpacing(8)
-        lay.addLayout(self.lang_rows_wrap)
+        self.lang_desc.setStyleSheet("font-size:12px;color:#4B5563;")
+        text_col.addWidget(self.lang_desc)
+        intro_lay.addLayout(text_col, stretch=1)
+        lay.addWidget(intro)
+        self.lang_section = QLabel("DOSTUPNÉ JAZYKY" if _lang_code == "sk"
+                                   else "AVAILABLE LANGUAGES")
+        self.lang_section.setObjectName("LanguageSection")
+        self.lang_section.setStyleSheet(
+            "font-size:10px;font-weight:800;color:#6B7280;letter-spacing:1px;")
+        lay.addWidget(self.lang_section)
+        self.lang_rows_grid = QGridLayout()
+        self.lang_rows_grid.setHorizontalSpacing(10)
+        self.lang_rows_grid.setVerticalSpacing(10)
+        self.lang_rows_grid.setColumnStretch(0, 1)
+        self.lang_rows_grid.setColumnStretch(1, 1)
+        lay.addLayout(self.lang_rows_grid)
         self.lang_rows = []
         self._populate_languages()
         lay.addStretch()
@@ -417,10 +485,10 @@ class OnboardingWizard(QWidget):
         langs = i18n.available()
         # Bundled first, then by coverage desc.
         langs.sort(key=lambda l: (not l["bundled"], -l["coverage"]))
-        for info in langs:
+        for index, info in enumerate(langs):
             row = _LangRow(info)
             row.mark_selected(info["code"] == self.selected_lang_code)
-            self.lang_rows_wrap.addWidget(row)
+            self.lang_rows_grid.addWidget(row, index // 2, index % 2)
             self.lang_rows.append(row)
 
     def _build_sdk(self):
@@ -573,6 +641,8 @@ class OnboardingWizard(QWidget):
         # Language page.
         self.lang_title.setText(_("lang_t"))
         self.lang_desc.setText(_("lang_d"))
+        self.lang_section.setText("DOSTUPNÉ JAZYKY" if _lang_code == "sk"
+                                  else "AVAILABLE LANGUAGES")
         self._populate_languages()
         # SDK page.
         self.sdk_title.setText(_("sdk_t"))
