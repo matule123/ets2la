@@ -33,11 +33,13 @@ class NavigationPagePerformanceTests(unittest.TestCase):
         view = MapView(_State())
         valid = [[0.0, 1.0, 20.0], [2.0, 3.0, 21.0], "road"]
         invalid = [[math.nan, 1.0, 20.0], [2.0, 3.0, 21.0], "road"]
-        view.set_road_segments([valid] * 1300 + [invalid])
-        self.assertEqual(1200, len(view.road_segments))
+        view.set_road_segments([valid] * 7000)
+        self.assertEqual(6500, len(view.road_segments))
         self.assertEqual((0.0, 1.0), view.road_segments[0]["a"])
         self.assertEqual((2.0, 3.0), view.road_segments[0]["b"])
         self.assertEqual("road", view.road_segments[0]["kind"])
+        view.set_road_segments([valid, invalid])
+        self.assertEqual(1, len(view.road_segments))
 
     def test_navigation_view_has_no_full_road_network(self):
         view = MapView(_State())

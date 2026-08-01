@@ -69,6 +69,8 @@ class DynamicIsland(QWidget):
         self._log_file = None
         self._log_pos = 0
         self._navigation_was_active = False
+        self._map_load_was_active = False
+        self._map_load_generation = None
         self._build()
         self.hide()
 
@@ -130,6 +132,11 @@ class DynamicIsland(QWidget):
 
     def _poll_log(self):
         """Read new records written by the engine, UI, HUD and all plugins."""
+        # Dataset loading owns the map and invalidates navigation while it is
+        # in progress. Show its concrete roads/prefabs phases first; otherwise
+        # the expected transient GPS rebuild masks the map status as NAV 0%.
+        if self._poll_map_load():
+            return
         if self._poll_navigation():
             return
         if not self._log_file:
@@ -199,6 +206,67 @@ class DynamicIsland(QWidget):
             # Keep the outcome readable. Previously the calculation vanished
             # before the user could see whether it succeeded or failed.
             self._hide_timer.start(6000 if succeeded else 10000)
+            return True
+        return False
+
+    def _poll_map_load(self):
+        """Show engine-side dataset loading in the Dynamic Island.
+
+        The navigation page used to own a second progress bar. A cached map
+        can remain at its initial 2% phase for several seconds while the large
+        pickle is read, which made that page look frozen. Shared state remains
+        the single progress source; this method only presents it.
+        """
+        parent = self.parentWidget()
+        state = getattr(parent, "state", None)
+        if state is None:
+            return False
+        record = state.get("map_load_progress", {}) or {}
+        if not isinstance(record, dict) or not record:
+            return False
+        try:
+            percent = max(0, min(100, int(record.get("percent", 0) or 0)))
+        except (TypeError, ValueError, OverflowError):
+            percent = 0
+        phase = str(record.get("phase") or "Načítavam mapu")
+        message = str(record.get("message") or f"{phase} — {percent} %")
+        low = f"{phase} {message}".lower()
+        succeeded = percent >= 100 or "pripraven" in low or "ready" in low
+        failed = any(marker in low for marker in (
+            "zlyhal", "chyba", "nedajú", "unreadable", "failed", "error"))
+        active = bool(record.get("active", False)) and not succeeded and not failed
+        generation = record.get("generation")
+
+        if active:
+            self._map_load_was_active = True
+            self._map_load_generation = generation
+            self.time_lbl.setText("MAPA")
+            self.msg_lbl.setText(phase)
+            self.msg_lbl.setStyleSheet(
+                "color:#047857;font-size:12px;font-weight:700;border:none;")
+            self.src_lbl.setText(f"{percent}%")
+            self.progress.setValue(percent)
+            self.progress.show()
+            self._hide_timer.stop()
+            self._slide_in()
+            return True
+
+        if (self._map_load_was_active
+                and (generation == self._map_load_generation
+                     or generation is None)):
+            self._map_load_was_active = False
+            self.time_lbl.setText("MAPA")
+            self.msg_lbl.setText(
+                "Mapa je pripravená" if succeeded else
+                message if failed else "Načítanie mapy bolo ukončené")
+            self.src_lbl.setText("100%" if succeeded else "CHYBA" if failed else "")
+            self.progress.setValue(100 if succeeded else percent)
+            self.progress.show()
+            self.msg_lbl.setStyleSheet(
+                ("color:#047857;" if succeeded else "color:#B42318;")
+                + "font-size:12px;font-weight:700;border:none;")
+            self._slide_in()
+            self._hide_timer.start(3500 if succeeded else 9000)
             return True
         return False
 

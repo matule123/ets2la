@@ -47,6 +47,19 @@ def _app_icon():
     return QIcon(p) if p and os.path.exists(p) else QIcon()
 
 
+def _ensure_ui_package_name():
+    """Alias a case-mismatched source checkout without affecting frozen UI."""
+    try:
+        __import__("ui")
+    except ModuleNotFoundError:
+        # Git records the package as ``ui``. A historical Windows checkout can
+        # retain ``UI`` on disk, and Python 3.14 now rejects that case mismatch.
+        # Keep one canonical import identity so app.py's internal imports do
+        # not load a second copy of the package.
+        import UI as ui_package
+        sys.modules.setdefault("ui", ui_package)
+
+
 def run_splash(shared_dict):
     """Animate startup independently while the main UI builds its pages."""
     from core.logger import setup as _log_setup
@@ -54,6 +67,7 @@ def run_splash(shared_dict):
     _set_app_id()
     from PyQt6.QtWidgets import QApplication
     from PyQt6.QtCore import QTimer
+    _ensure_ui_package_name()
     try:
         from ui.splash import BootSplash
     except ModuleNotFoundError:
@@ -94,6 +108,7 @@ def run_ui(shared_dict):
     _log_setup()
     logging.info("Launching UI Process...")
     _set_app_id()
+    _ensure_ui_package_name()
     from PyQt6.QtWidgets import QApplication
     from ui.app import UltraPilotApp
     from core.ipc.shared_state import SharedState

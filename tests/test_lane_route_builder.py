@@ -1,9 +1,11 @@
+import io
 import math
+import pickle
 import unittest
 from unittest import mock
 
 from core.navigation.lane_model import LaneId, LaneLocator, LanePoint, LaneSegment
-from core.navigation.road_network import RoadNetwork
+from core.navigation.road_network import CACHE_VERSION, RoadNetwork
 
 
 class SyntheticMap:
@@ -100,6 +102,27 @@ class LaneRouteBuilderTests(unittest.TestCase):
         with mock.patch.object(isolated, "_try_load_cache", return_value=True):
             self.assertTrue(isolated.load(
                 "unused", progress_cb=broken_observer))
+
+    def test_cache_unpickle_reports_byte_progress_instead_of_staying_at_two(self):
+        payload = pickle.dumps({
+            "version": CACHE_VERSION,
+            "sig": [],
+            "data": {"nodes": {1: (0.0, 0.0)}, "loaded": True},
+        }, protocol=pickle.HIGHEST_PROTOCOL)
+        phases = []
+        network = RoadNetwork()
+        with (mock.patch("os.path.exists", return_value=True),
+              mock.patch("os.path.getsize", return_value=len(payload)),
+              mock.patch("builtins.open",
+                         side_effect=lambda *_args, **_kwargs:
+                             io.BytesIO(payload)),
+              mock.patch.object(network, "_source_signature", return_value=[])):
+            self.assertTrue(network._try_load_cache(
+                "unused", progress_cb=lambda fraction, phase:
+                    phases.append((fraction, phase))))
+        self.assertTrue(phases)
+        self.assertGreaterEqual(phases[-1][0], 0.88)
+        self.assertIn("prefaby", phases[-1][1].lower())
 
     def test_confirmed_prefab_exit_tapers_into_following_road(self):
         prefab_id = LaneId(10, 1, 0, "junction", 3, (3,))

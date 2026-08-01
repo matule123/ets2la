@@ -173,6 +173,90 @@ class RealMapLaneDataTests(unittest.TestCase):
             (selected.centerline[0].x, selected.centerline[0].y,
              selected.centerline[0].z)), 0.01)
 
+    def test_2026_07_31_parallel_lane_continues_across_two_prefabs(self):
+        """route_build_id=0cc3209ceb5245418158a5f76eae2410.
+
+        The live log proves a valid outer lane entering dlc_blkw_94 curve 0.
+        Its next GPS edge immediately enters dlc_blkw_105, whose navNode
+        representative starts 4.50 m away.  PPD input/output lane topology
+        proves sibling (6, 1, 7) at the exact same endpoint and heading.
+        """
+        gps = (
+            5337536179598665046, 5337536179854516426,
+            5337536180630458241, 5337536180324276875,
+            5337536233533273874,
+        )
+        corridor = self.net.resolve_gps_corridor(gps)
+        self.assertTrue(corridor.valid)
+        match = self.incoming_match(gps[1], gps, lane_index=1)
+        segments, reason = self.net.select_lane_sequence(corridor, match)
+        self.assertEqual(reason, "")
+        self.assertGreaterEqual(len(segments), 3)
+        self.assertEqual(segments[1].lane_id.prefab_token, "dlc_blkw_94")
+        self.assertEqual(segments[1].lane_id.connector_path, (0,))
+        self.assertEqual(segments[2].lane_id.prefab_token, "dlc_blkw_105")
+        self.assertEqual(segments[2].lane_id.connector_path, (6, 1, 7))
+        gap = math.dist(
+            (segments[1].centerline[-1].x, segments[1].centerline[-1].y,
+             segments[1].centerline[-1].z),
+            (segments[2].centerline[0].x, segments[2].centerline[0].y,
+             segments[2].centerline[0].z),
+        )
+        heading_jump = abs((segments[2].centerline[0].heading
+                            - segments[1].centerline[-1].heading + math.pi)
+                           % (2 * math.pi) - math.pi)
+        self.assertLess(gap, 0.01)
+        self.assertLess(math.degrees(heading_jump), 1.0)
+        path = self.net.connect_lane_sequence(segments, gps)
+        trajectory = build_lane_trajectory(path)
+        self.assertTrue(path.valid, path.failure_reason)
+        self.assertTrue(trajectory.valid, trajectory.failure_reason)
+
+    def test_2026_07_31_required_lane_is_selected_before_short_prefab_chain(self):
+        """Replay the real 4.50 m/49.8 degree failure without a chord.
+
+        The required lane cannot be reached on the final 5.35 m road.  The
+        GPS/PPD topology proves the same adjacent lane through the preceding
+        prefabs, so the transition must begin on the earlier 108.8 m road.
+        """
+        gps = (
+            5337536181112822720, 5337536178877240122,
+            5337536181687423927, 5337536180630458150,
+            5337536182782138148, 5337536182522091770,
+            5337536179686741705, 5337536182727615511,
+            5337536180336860780, 5337536182220102206,
+            5337536182589199430, 5337536178910797982,
+            5337536179598665046, 5337536179854516426,
+            5337536180630458241, 5337536180324276875,
+            5337536233533273874, 5337536179405721942,
+        )
+        corridor = self.net.resolve_gps_corridor(gps)
+        self.assertTrue(corridor.valid, corridor.failure_reason)
+        match = self.incoming_match(gps[0], gps, lane_index=1)
+        segments, reason = self.net.select_lane_sequence(corridor, match)
+        self.assertEqual(reason, "")
+        self.assertEqual(len(segments), len(corridor.edges))
+
+        transition = segments[2]
+        self.assertEqual(transition.raw_lane_index, 1)
+        self.assertGreater(transition.centerline[-1].s, 100.0)
+        self.assertTrue(self.net._lane_boundary_is_continuous(
+            segments[1], transition))
+        self.assertEqual(segments[3].lane_id.connector_path,
+                         (30, 4, 13, 24))
+        self.assertEqual(segments[9].lane_id.connector_path, (5, 9, 4))
+        self.assertEqual(segments[11].lane_id.connector_path, (4, 6, 2, 5))
+        self.assertEqual(segments[13].lane_id.connector_path, (0,))
+        self.assertEqual(segments[14].lane_id.connector_path, (6, 1, 7))
+
+        for first, second in zip(segments, segments[1:]):
+            self.assertTrue(self.net._lane_boundary_is_continuous(
+                first, second), (first.lane_id, second.lane_id))
+        path = self.net.connect_lane_sequence(segments, gps)
+        trajectory = build_lane_trajectory(path)
+        self.assertTrue(path.valid, path.failure_reason)
+        self.assertTrue(trajectory.valid, trajectory.failure_reason)
+
     def test_phase1_prefab_diagnostic_replay_does_not_mutate_lane_cache(self):
         gps = (
             5962819253681172399, 5962819261264473948,

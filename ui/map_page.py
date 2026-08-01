@@ -101,8 +101,10 @@ class MapView(QWidget):
         # Bounded display-only snapshot from the map plugin. Loading another
         # complete RoadNetwork here doubles memory and can terminate the UI.
         self.road_segments = []
+        self.scene_polygons = []
+        self.scene_features = []
         self._pal = None         # set by the page (or a default below)
-        self.zoom_radius = 280.0
+        self.zoom_radius = 520.0
         self.pan_world = [0.0, 0.0]
         self._drag_at = None
         self.setMinimumHeight(300)
@@ -176,7 +178,7 @@ class MapView(QWidget):
         self.empty_state.raise_()
 
     def reset_view(self):
-        self.zoom_radius = 280.0
+        self.zoom_radius = 520.0
         self.pan_world[:] = [0.0, 0.0]
         self.update()
 
@@ -185,13 +187,13 @@ class MapView(QWidget):
         self.update()
 
     def zoom_out(self):
-        self.zoom_radius = min(650.0, self.zoom_radius * 1.28)
+        self.zoom_radius = min(1100.0, self.zoom_radius * 1.28)
         self.update()
 
     def wheelEvent(self, event):
         # Wheel up zooms in, wheel down zooms out to a broad regional view.
         factor = 0.78 if event.angleDelta().y() > 0 else 1.28
-        self.zoom_radius = max(70.0, min(650.0, self.zoom_radius * factor))
+        self.zoom_radius = max(70.0, min(1100.0, self.zoom_radius * factor))
         self.update()
         event.accept()
 
@@ -232,7 +234,7 @@ class MapView(QWidget):
         map which reduced every motorway and prefab to the same two-pixel line.
         """
         segments = []
-        for item in (payload or [])[:1200]:
+        for item in (payload or [])[:6500]:
             try:
                 a, b = item[0], item[1]
                 values = float(a[0]), float(a[1]), float(b[0]), float(b[1])
@@ -250,10 +252,49 @@ class MapView(QWidget):
                     if len(item) > 9 else False,
                     "path_key": str(item[10]) if len(item) > 10 else "",
                     "path_index": int(item[11]) if len(item) > 11 else 0,
+                    "road_type": str(item[12]) if len(item) > 12 else (
+                        "divided" if len(item) > 4 and bool(item[4])
+                        else "local"),
                 })
             except (TypeError, ValueError, IndexError):
                 continue
         self.road_segments = segments
+
+    def set_scene_polygons(self, payload):
+        polygons = []
+        for item in (payload or [])[:1400]:
+            try:
+                points = []
+                for point in item[0]:
+                    x, z = float(point[0]), float(point[1])
+                    if not math.isfinite(x) or not math.isfinite(z):
+                        raise ValueError("non-finite polygon point")
+                    points.append((x, z))
+                if len(points) >= 3:
+                    polygons.append({
+                        "points": tuple(points),
+                        "colour": max(0, min(8, int(item[1]))),
+                        "z_index": int(item[2]),
+                    })
+            except (TypeError, ValueError, IndexError, OverflowError):
+                continue
+        self.scene_polygons = sorted(
+            polygons, key=lambda polygon: polygon["z_index"])
+
+    def set_scene_features(self, payload):
+        features = []
+        for item in (payload or [])[:800]:
+            try:
+                x, z = float(item[0]), float(item[1])
+                if not math.isfinite(x) or not math.isfinite(z):
+                    continue
+                features.append({
+                    "pos": (x, z), "kind": str(item[2]),
+                    "icon": str(item[3]), "label": str(item[4]),
+                })
+            except (TypeError, ValueError, IndexError, OverflowError):
+                continue
+        self.scene_features = features
 
     def _bounds(self, pts):
         xs = [p[0] for p in pts]
@@ -265,7 +306,7 @@ class MapView(QWidget):
         qp.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
         qp.setPen(Qt.PenStyle.NoPen)
-        qp.setBrush(QColor("#171817"))
+        qp.setBrush(QColor("#1A1A1A"))
         qp.drawRoundedRect(self.rect(), 10, 10)
 
         truck = self.state.get("truck_world_pos")
@@ -324,7 +365,11 @@ class MapView(QWidget):
             qp.drawPolygon(QPolygonF([tip, left, right]))
 
     def _paint_map(self, qp, w, h, truck, heading):
-        """TruckSim-style layered view of our own SCS road snapshot."""
+        """Layered live map ported from truckermudgeon/maps.
+
+        The palette and ordering mirror ``GameMapStyle.tsx``: prefab map-area
+        polygons, road casing, road fill, route and finally POI symbols.
+        """
         radius = self.zoom_radius
         scale = (min(w, h) - 20) / (2 * radius)
         cx = truck[0] + self.pan_world[0]
@@ -334,6 +379,30 @@ class MapView(QWidget):
             sx = w / 2 + (p[0] - cx) * scale
             sy = h / 2 - (cz - p[1]) * scale   # flip Z so north is up
             return QPointF(sx, sy)
+
+        # Exact dark MapArea palette from the downloaded maps renderer.  The
+        # geometry is made of real placed-prefab neighbour loops.
+        map_area_colours = {
+            0: QColor.fromHsl(200, 5, 92),
+            1: QColor.fromHsl(38, 64, 89),
+            2: QColor.fromHsl(38, 64, 64),
+            3: QColor.fromHsl(143, 51, 64),
+            4: QColor.fromHsl(0, 255, 64),
+            5: QColor.fromHsl(107, 130, 64),
+            6: QColor.fromHsl(201, 135, 64),
+            7: QColor.fromHsl(53, 214, 64),
+            8: QColor.fromHsl(267, 117, 64),
+        }
+        qp.setPen(Qt.PenStyle.NoPen)
+        for polygon in self.scene_polygons:
+            points = polygon["points"]
+            if not any(cx-radius*1.45 <= point[0] <= cx+radius*1.45
+                       and cz-radius*1.45 <= point[1] <= cz+radius*1.45
+                       for point in points):
+                continue
+            qp.setBrush(map_area_colours.get(
+                polygon["colour"], QColor("#30302F")))
+            qp.drawPolygon(QPolygonF([to_screen(point) for point in points]))
 
         visible = []
         for segment in self.road_segments:
@@ -345,13 +414,18 @@ class MapView(QWidget):
                 continue
             visible.append((segment, to_screen(a), to_screen(b)))
 
-        # Road casing, then coloured surface.  Width remains proportional to
-        # real lane geometry as the user zooms, just like a vector map.
+        # Exact dark road palette from GameMapStyle.tsx: [fill, casing].
+        road_colours = {
+            "freeway": (QColor("#95813E"), QColor("#372F21")),
+            "divided": (QColor("#3C4043"), QColor("#4C5043")),
+            "no_vehicles": (QColor("#606166"), QColor("#888888")),
+            "local": (QColor("#606166"), QColor("#333333")),
+        }
         for segment, a, b in visible:
             width = max(2.4, min(44.0,
                 2.0 * float(segment["half_width"]) * scale))
-            casing = QColor("#282B2D" if segment["kind"] == "lane"
-                            else "#30312E")
+            _surface, casing = road_colours.get(
+                segment["road_type"], road_colours["local"])
             qp.setPen(QPen(casing, width + 2.4, Qt.PenStyle.SolidLine,
                            Qt.PenCapStyle.RoundCap,
                            Qt.PenJoinStyle.RoundJoin))
@@ -359,30 +433,11 @@ class MapView(QWidget):
         for segment, a, b in visible:
             width = max(1.8, min(42.0,
                 2.0 * float(segment["half_width"]) * scale))
-            if segment["kind"] == "lane":
-                surface = QColor("#4A4E50")
-            elif segment["divided"] or segment["lanes"] >= 4:
-                surface = QColor("#3C4043")
-            else:
-                surface = QColor("#5B5E60")
+            surface, _casing = road_colours.get(
+                segment["road_type"], road_colours["local"])
             qp.setPen(QPen(surface, width, Qt.PenStyle.SolidLine,
                            Qt.PenCapStyle.RoundCap,
                            Qt.PenJoinStyle.RoundJoin))
-            qp.drawLine(a, b)
-
-        # Markings are drawn from producer-provided lane metadata. Prefab
-        # navCurves suppress paint because their dataset contains connectivity,
-        # not invented road markings.
-        for segment, a, b in visible:
-            if (segment["kind"] != "road"
-                    or segment["suppress_markings"]
-                    or segment["lanes"] < 2
-                    or not segment["dash_on"]):
-                continue
-            colour = QColor("#B4B6B5")
-            qp.setPen(QPen(colour, max(0.8, min(1.6, scale * 0.8)),
-                           Qt.PenStyle.SolidLine,
-                           Qt.PenCapStyle.RoundCap))
             qp.drawLine(a, b)
 
         # GPS uses only current-revision snapshot geometry. Recorded replay is
@@ -399,6 +454,8 @@ class MapView(QWidget):
             qp.setPen(QPen(QColor("#079AF0"), 6, Qt.PenStyle.SolidLine,
                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
             qp.drawPolyline(polyline)
+
+        self._paint_scene_features(qp, to_screen, cx, cz, radius, scale)
 
         snapshot = self.state.get("lane_trajectory", {}) or {}
         events = snapshot.get("turn_events", []) or []
@@ -437,6 +494,67 @@ class MapView(QWidget):
         qp.setPen(QColor(185, 190, 198, 145))
         qp.drawText(14, h - 12,
                     "koliesko: zoom  •  potiahnuť: posun  •  dvojklik: kamión")
+
+    def _paint_scene_features(self, qp, to_screen, cx, cz, radius, scale):
+        """Paint maps-style POI symbols and labels from exported SCS data."""
+        icon_colours = {
+            "gas": QColor("#00A84F"), "fuel": QColor("#00A84F"),
+            "parking": QColor("#1675C1"), "service": QColor("#D29B13"),
+            "dealer": QColor("#D29B13"), "garage": QColor("#1675C1"),
+            "train": QColor("#1675C1"), "ferry": QColor("#1675C1"),
+            "toll": QColor("#00A84F"), "weigh": QColor("#7D8B95"),
+        }
+        occupied = []
+        for feature in self.scene_features:
+            x, z = feature["pos"]
+            if abs(x-cx) > radius*1.35 or abs(z-cz) > radius*1.35:
+                continue
+            point = to_screen((x, z))
+            kind = feature["kind"].lower()
+            icon = feature["icon"].lower()
+            label = feature["label"]
+            if kind == "city":
+                if label and radius >= 320:
+                    qp.setPen(QColor("#DCD9D2"))
+                    font = qp.font()
+                    font.setBold(True)
+                    font.setPointSize(9)
+                    qp.setFont(font)
+                    qp.drawText(QPointF(point.x()+7, point.y()-5), label)
+                continue
+
+            if kind == "company":
+                colour = QColor("#B99A43")
+                glyph = (label or icon or "C")[:2].upper()
+            else:
+                key = next((name for name in icon_colours if name in icon), "")
+                colour = icon_colours.get(key, QColor("#65717B"))
+                glyph = ("P" if "parking" in icon else
+                         "S" if any(value in icon for value in
+                                    ("service", "garage", "dealer")) else
+                         "F" if any(value in icon for value in
+                                    ("gas", "fuel")) else "i")
+            if any(abs(point.x()-other.x()) < 17 and
+                   abs(point.y()-other.y()) < 17 for other in occupied):
+                continue
+            occupied.append(point)
+            size = 13 if scale < .55 else 16
+            rect_x, rect_y = point.x()-size/2, point.y()-size/2
+            qp.setPen(QPen(QColor("#F3F5F7"), 1.0))
+            qp.setBrush(colour)
+            qp.drawRoundedRect(int(rect_x), int(rect_y), size, size, 2, 2)
+            qp.setPen(QColor("#FFFFFF"))
+            font = qp.font()
+            font.setBold(True)
+            font.setPointSize(6 if size == 13 else 7)
+            qp.setFont(font)
+            qp.drawText(int(rect_x), int(rect_y), size, size,
+                        Qt.AlignmentFlag.AlignCenter, glyph)
+            if kind == "company" and label and radius <= 650:
+                qp.setPen(QColor("#DCD9D2"))
+                font.setPointSize(7)
+                qp.setFont(font)
+                qp.drawText(QPointF(point.x()+size/2+3, point.y()+3), label)
 
     @staticmethod
     def _to_xz(point):
@@ -580,6 +698,7 @@ class MapPage(QWidget):
         self._dl_worker = None
         self._last_active_map_key = None
         self._last_road_segments_revision = None
+        self._last_live_map_scene_revision = None
         self._last_pose_signature = None
         self._populate_maps()
         self.timer = QTimer()
@@ -707,9 +826,12 @@ class MapPage(QWidget):
             return
         self._on_map_selected(self.map_combo.currentIndex())
         self.view.set_road_segments([])
+        self.view.set_scene_polygons([])
+        self.view.set_scene_features([])
         self.state.set("nav_arg", key)
         self.state.set("nav_cmd", "switch_map")
-        self.dl_status.setText(f"Loading roads, prefabs and cities from {key}...")
+        self.dl_status.clear()
+        self.dl_bar.hide()
         self.btn_use.setEnabled(False)
 
     def _update_active_map_label(self):
@@ -779,16 +901,30 @@ class MapPage(QWidget):
                 self.map_combo.setCurrentIndex(index)
                 self.map_combo.blockSignals(False)
             self.view.set_road_segments([])
+            self.view.set_scene_polygons([])
+            self.view.set_scene_features([])
             repaint = True
 
-        # Fetch the relatively large segment list only when the producer
-        # publishes a new atomic revision, rather than on every UI refresh.
-        road_revision = self.state.get("map_road_segments_revision", 0)
-        if road_revision != self._last_road_segments_revision:
-            self._last_road_segments_revision = road_revision
-            self.view.set_road_segments(
-                self.state.get("map_road_segments", []) or [])
-            repaint = True
+        # Roads, true prefab map polygons and POIs are one atomic display
+        # scene.  Older shared state falls back to the historical HUD roads.
+        scene_revision = self.state.get("live_map_scene_revision")
+        if scene_revision is not None:
+            if scene_revision != self._last_live_map_scene_revision:
+                self._last_live_map_scene_revision = scene_revision
+                self.view.set_road_segments(
+                    self.state.get("live_map_road_segments", []) or [])
+                self.view.set_scene_polygons(
+                    self.state.get("live_map_scene_polygons", []) or [])
+                self.view.set_scene_features(
+                    self.state.get("live_map_scene_features", []) or [])
+                repaint = True
+        else:
+            road_revision = self.state.get("map_road_segments_revision", 0)
+            if road_revision != self._last_road_segments_revision:
+                self._last_road_segments_revision = road_revision
+                self.view.set_road_segments(
+                    self.state.get("map_road_segments", []) or [])
+                repaint = True
 
         truck = self.state.get("truck_world_pos")
         heading = float(self.state.get("truck_heading", 0.0) or 0.0)
@@ -801,25 +937,15 @@ class MapPage(QWidget):
             self._last_pose_signature = pose_signature
             repaint = True
 
-        # Downloads report through the QThread signal above; engine-side map
-        # parsing reports an atomic shared-state record. Never let the polling
-        # UI overwrite an active download's progress.
+        # Downloads keep their local progress here. Engine-side parsing is
+        # shown exclusively by Dynamic Island so the navigation card cannot
+        # retain a stale 2% bar after a cache load or plugin restart.
         load_progress = self.state.get("map_load_progress", {}) or {}
         if self._dl_worker is None and load_progress:
-            try:
-                percent = max(0, min(100, int(
-                    load_progress.get("percent", 0) or 0)))
-            except (TypeError, ValueError):
-                percent = 0
             active = bool(load_progress.get("active", False))
             generation = load_progress.get("generation")
-            if active or (percent == 100
-                          and generation != self._last_map_load_generation):
-                self.dl_bar.setValue(percent)
-                self.dl_bar.setVisible(True)
-                self.dl_status.setText(str(
-                    load_progress.get("message")
-                    or load_progress.get("phase") or "Načítavam mapu…"))
+            self.dl_bar.hide()
+            self.dl_status.clear()
             if generation is not None:
                 self._last_map_load_generation = generation
             self.btn_use.setEnabled(not active)

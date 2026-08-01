@@ -18,6 +18,7 @@ from UI.app import (MacTitleBar, UltraPilotApp, rounded_window_region,
                     PluginsPage)
 from UI.icons import line_icon
 from UI.map_page import MapPage
+from UI.dynamic_island import DynamicIsland
 from UI.perf_overlay import PerfOverlay
 from UI.settings_menu import SettingsMenu
 
@@ -46,8 +47,19 @@ class UiChromeTests(unittest.TestCase):
         bar = MacTitleBar(host, palette("light"))
         self.assertEqual(list(bar.controls), ["maximize", "minimize", "close"])
         controls = list(bar.controls.values())
-        self.assertTrue(all(button.width() == 10 and button.height() == 10
+        self.assertTrue(all(button.width() == 11 and button.height() == 11
                             for button in controls))
+        self.assertEqual(
+            [button.styleSheet().split("background:", 1)[1].split(";", 1)[0]
+             for button in controls],
+            ["#00D647", "#FFB800", "#FF3B30"])
+        host.show()
+        bar.show()
+        self.app.processEvents()
+        centres = [button.geometry().center().x() for button in controls]
+        self.assertEqual([b-a for a, b in zip(centres, centres[1:])], [21, 21])
+        bar.close()
+        host.close()
         self.assertEqual([button.accessibleName() for button in controls],
                          ["Maximalizovať", "Minimalizovať", "Zavrieť"])
 
@@ -58,7 +70,7 @@ class UiChromeTests(unittest.TestCase):
         # The lower-left cutout is outside while all three control centres are
         # inside the painted surface.
         self.assertFalse(path.contains(bounds.bottomLeft()))
-        for x in (18.5, 37.5, 56.5):
+        for x in (21.5, 42.5, 63.5):
             self.assertTrue(path.contains(type(bounds.center())(x, 13.5)))
 
     def test_sidebar_uses_card_navigation_styles_and_original_line_icons(self):
@@ -167,10 +179,62 @@ class UiChromeTests(unittest.TestCase):
         self.assertEqual(segment["half_width"], 8.25)
         self.assertEqual(segment["path_key"], "r10:0")
         page.refresh()
-        self.assertTrue(page.dl_bar.isVisibleTo(page))
-        self.assertEqual(page.dl_bar.value(), 77)
-        self.assertIn("prefaby", page.dl_status.text())
+        self.assertFalse(page.dl_bar.isVisibleTo(page))
+        self.assertEqual(page.dl_status.text(), "")
         self.assertEqual(len(page.view.map_controls), 3)
+        page.close()
+
+    def test_engine_map_loading_is_presented_by_dynamic_island_only(self):
+        host = QWidget()
+        host.state = State({
+            "navigation_recalculating": True,
+            "navigation_progress": 0.0,
+            "navigation_status": "NaÄŤĂ­tavam GPS trasu",
+            "map_load_progress": {
+                "active": True, "percent": 77,
+                "phase": "Načítavam prefaby a križovatky",
+                "message": "Načítavam prefaby a križovatky — 77 %",
+                "generation": 4,
+            },
+        })
+        island = DynamicIsland(host)
+        island._poll_log()
+        self.assertEqual(island.time_lbl.text(), "MAPA")
+        self.assertEqual(island.src_lbl.text(), "77%")
+        self.assertIn("prefaby", island.msg_lbl.text())
+        self.assertEqual(island.progress.value(), 77)
+        host.state.set("map_load_progress", {
+            "active": True, "percent": 100,
+            "phase": "Mapa je pripravená", "generation": 4,
+        })
+        self.assertTrue(island._poll_map_load())
+        self.assertEqual(island.src_lbl.text(), "100%")
+        island.close()
+        host.close()
+
+    def test_live_map_scene_is_one_atomic_revision_with_maps_layers(self):
+        state = State({
+            "ui_theme": "light", "active_map_key": "promods-1.59",
+            "truck_world_pos": (10.0, 20.0),
+            "live_map_scene_revision": 9,
+            "live_map_road_segments": [[
+                [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], "road", 4,
+                True, True, False, False, 8.0, False, "r1:0", 0,
+                "freeway",
+            ]],
+            "live_map_scene_polygons": [[
+                [[0.0, 0.0], [20.0, 0.0], [20.0, 12.0], [0.0, 12.0]],
+                2, 2,
+            ]],
+            "live_map_scene_features": [[12.0, 4.0, "facility", "gas_ico", ""]],
+        })
+        with mock.patch.object(MapPage, "_populate_maps", autospec=True):
+            page = MapPage(state)
+        page.refresh()
+        self.assertEqual(page.view.road_segments[0]["road_type"], "freeway")
+        self.assertEqual(page.view.scene_polygons[0]["colour"], 2)
+        self.assertEqual(page.view.scene_features[0]["icon"], "gas_ico")
+        self.assertEqual(page._last_live_map_scene_revision, 9)
         page.close()
 
     def test_plugin_toggle_is_persisted_for_the_next_run(self):

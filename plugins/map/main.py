@@ -65,6 +65,10 @@ class Plugin(BasePlugin):
         self._roads_pos = None
         self._roads_revision = int(self.sdk.get(
             "map_road_segments_revision", 0) or 0)
+        self._live_map_t = 0.0
+        self._live_map_pos = None
+        self._live_map_revision = int(self.sdk.get(
+            "live_map_scene_revision", 0) or 0)
         self._lane_signature = None
         self._rolling_route_refresh_needed = False
         self._lane_path = None
@@ -1411,6 +1415,7 @@ class Plugin(BasePlugin):
             self._build_guard = NavigationBuildGuard()
             self._build_tokens = {}
             self._roads_pos = None
+            self._live_map_pos = None
             # Invalidate control geometry before publishing any map metadata;
             # another process must never observe a switched dataset alongside
             # steering from the previous one.
@@ -1434,6 +1439,10 @@ class Plugin(BasePlugin):
                 "map_path": [],
                 "map_road_segments": [],
                 "map_road_segments_revision": self._roads_revision,
+                "live_map_road_segments": [],
+                "live_map_scene_polygons": [],
+                "live_map_scene_features": [],
+                "live_map_scene_revision": self._live_map_revision + 1,
                 "lane_match": None,
                 "nav_command_result": None,
                 "map_load_progress": {
@@ -1445,6 +1454,7 @@ class Plugin(BasePlugin):
                     "generation": self._map_load_generation,
                 },
             })
+            self._live_map_revision += 1
             self.sdk.set("map_status", f"Loading map dataset {arg}...")
             logging.info("Navigation: switching map dataset to %s.", arg)
 
@@ -1756,6 +1766,51 @@ class Plugin(BasePlugin):
                 self._roads_pos = (float(pos[0]), float(pos[1]))
             except Exception as e:
                 logging.debug("HUD road geometry error: %s", e)
+
+        # The top-down map needs a wider scene than the perspective HUD.  Keep
+        # this presentation snapshot separate so nearby parallel streets and
+        # POIs can be shown without entering HUD, LaneLocator or route inputs.
+        self._live_map_t += delta_time
+        live_map_moved = (self._live_map_pos is None or math.hypot(
+            float(pos[0]) - self._live_map_pos[0],
+            float(pos[1]) - self._live_map_pos[1]) >= 18.0)
+        if (self._live_map_t >= 1.0 and live_map_moved
+                and self.road_net is not None and self.road_net.loaded):
+            self._live_map_t = 0.0
+            try:
+                altitude = float(self.sdk.get("truck_altitude", 0.0) or 0.0)
+                roads = self.road_net.live_map_segments_3d_near(
+                    pos, radius=900.0, limit=6000, altitude=altitude)
+                road_payload = []
+                for (a, b, kind, lanes, divided, dash_on, pillar,
+                     rail_post, half_width, suppress_markings, path_key,
+                     path_index) in roads:
+                    road_payload.append([
+                        list(a), list(b), kind, lanes, divided, dash_on,
+                        pillar, rail_post, half_width, suppress_markings,
+                        path_key, path_index,
+                        self.road_net.live_map_road_type(
+                            path_key, lanes=lanes, divided=divided),
+                    ])
+                polygon_payload = [
+                    [[list(point) for point in points], colour, z_index]
+                    for points, colour, z_index in
+                    self.road_net.live_map_polygons_near(
+                        pos, radius=900.0, limit=1200)
+                ]
+                feature_payload = [list(feature) for feature in
+                                   self.road_net.map_features_near(
+                                       pos, radius=900.0, limit=700)]
+                self._live_map_revision += 1
+                self.sdk.shared_state.update_batch({
+                    "live_map_road_segments": road_payload,
+                    "live_map_scene_polygons": polygon_payload,
+                    "live_map_scene_features": feature_payload,
+                    "live_map_scene_revision": self._live_map_revision,
+                })
+                self._live_map_pos = (float(pos[0]), float(pos[1]))
+            except Exception as e:
+                logging.debug("Live-map scene error: %s", e)
 
         # Localization diagnostics: every ~2 s, log where the truck is and where
         # the map thinks the nearest road is. If the distance is huge (hundreds
