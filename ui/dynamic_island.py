@@ -99,6 +99,7 @@ class DynamicIsland(QWidget):
         self.time_lbl.setStyleSheet("color:#9CA3AF;font-size:10px;font-weight:600;border:none;")
         self.msg_lbl = QLabel()
         self.msg_lbl.setWordWrap(True)
+        self.msg_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.msg_lbl.setMinimumWidth(310)
         self.msg_lbl.setStyleSheet("color:#2EA043;font-size:12px;font-weight:700;border:none;")
         self.src_lbl = QLabel()
@@ -106,6 +107,10 @@ class DynamicIsland(QWidget):
         row.addWidget(self.time_lbl)
         row.addWidget(self.msg_lbl, 1)
         row.addWidget(self.src_lbl, 0, Qt.AlignmentFlag.AlignRight)
+        self.time_lbl.setFixedWidth(48)
+        self.src_lbl.setFixedWidth(48)
+        self.src_lbl.setAlignment(Qt.AlignmentFlag.AlignRight
+                                  | Qt.AlignmentFlag.AlignVCenter)
         content.addLayout(row)
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
@@ -185,9 +190,13 @@ class DynamicIsland(QWidget):
             self.time_lbl.setText("NAV")
             self.msg_lbl.setText(status)
             self.msg_lbl.setStyleSheet("color:#047857;font-size:12px;font-weight:700;border:none;")
-            self.src_lbl.setText(f"{int(progress * 100)}%")
+            failed_status = any(marker in status.lower() for marker in (
+                "nepodarilo", "nie je na", "nenašiel", "mimo gps",
+                "no candidate", "invalid", "failed"))
+            self.src_lbl.setText("" if failed_status
+                                 else f"{int(progress * 100)}%")
             self.progress.setValue(int(progress * 100))
-            self.progress.show()
+            self.progress.setVisible(not failed_status)
             self._hide_timer.stop()
             self._slide_in()
             return True
@@ -196,12 +205,12 @@ class DynamicIsland(QWidget):
             self.time_lbl.setText("NAV")
             self.msg_lbl.setText(status or "Trasa je pripravená")
             succeeded = progress >= 0.99 or "pripraven" in status.lower()
-            self.src_lbl.setText("100%" if succeeded else "NEÚSPEŠNÉ")
+            self.src_lbl.setText("100%" if succeeded else "CHYBA")
             self.progress.setValue(100 if succeeded else max(0, int(progress * 100)))
             self.msg_lbl.setStyleSheet(
                 ("color:#047857;" if succeeded else "color:#B42318;")
                 + "font-size:12px;font-weight:700;border:none;")
-            self.progress.show()
+            self.progress.setVisible(succeeded)
             self._slide_in()
             # Keep the outcome readable. Previously the calculation vanished
             # before the user could see whether it succeeded or failed.
@@ -243,7 +252,7 @@ class DynamicIsland(QWidget):
             self.time_lbl.setText("MAPA")
             self.msg_lbl.setText(phase)
             self.msg_lbl.setStyleSheet(
-                "color:#047857;font-size:12px;font-weight:700;border:none;")
+                "color:#047857;font-size:15px;font-weight:750;border:none;")
             self.src_lbl.setText(f"{percent}%")
             self.progress.setValue(percent)
             self.progress.show()
@@ -264,7 +273,7 @@ class DynamicIsland(QWidget):
             self.progress.show()
             self.msg_lbl.setStyleSheet(
                 ("color:#047857;" if succeeded else "color:#B42318;")
-                + "font-size:12px;font-weight:700;border:none;")
+                + "font-size:15px;font-weight:750;border:none;")
             self._slide_in()
             self._hide_timer.start(3500 if succeeded else 9000)
             return True

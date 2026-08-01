@@ -119,13 +119,66 @@ def _traffic_occluders(camera_snapshot, traffic, telemetry_timestamp=0.0):
 
 
 def _segment_is_occluded(first, second, depth, occluders):
-    midpoint_x = (first.x() + second.x()) * 0.5
-    midpoint_y = (first.y() + second.y()) * 0.5
+    return not _visible_segment_parts(first, second, depth, occluders)
+
+
+def _line_rect_interval(first, second, bounds):
+    """Liang-Barsky interval of a screen segment inside one rectangle."""
+    left, top, right, bottom = bounds
+    dx, dy = second.x() - first.x(), second.y() - first.y()
+    enter, leave = 0.0, 1.0
+    for p, q in ((-dx, first.x()-left), (dx, right-first.x()),
+                 (-dy, first.y()-top), (dy, bottom-first.y())):
+        if abs(p) < 1e-9:
+            if q < 0.0:
+                return None
+            continue
+        ratio = q / p
+        if p < 0.0:
+            enter = max(enter, ratio)
+        else:
+            leave = min(leave, ratio)
+        if enter >= leave:
+            return None
+    return enter, leave
+
+
+def _visible_segment_parts(first, second, depth, occluders):
+    """Clip an AR chord around nearer vehicles instead of midpoint popping.
+
+    The old midpoint test either painted a line through half a vehicle or
+    removed a complete two-metre road sample.  Exact interval subtraction
+    creates stable cut-outs at the projected cuboid edges without moving or
+    smoothing any authoritative world point.
+    """
+    visible = [(0.0, 1.0)]
     for left, top, right, bottom, vehicle_depth in occluders:
-        if (left <= midpoint_x <= right and top <= midpoint_y <= bottom
-                and depth > vehicle_depth + 0.25):
-            return True
-    return False
+        if depth <= vehicle_depth + 0.25:
+            continue
+        covered = _line_rect_interval(
+            first, second, (left, top, right, bottom))
+        if covered is None:
+            continue
+        cut_start, cut_end = covered
+        remaining = []
+        for start, end in visible:
+            if cut_end <= start or cut_start >= end:
+                remaining.append((start, end))
+                continue
+            if cut_start > start + 1e-4:
+                remaining.append((start, min(cut_start, end)))
+            if cut_end < end - 1e-4:
+                remaining.append((max(cut_end, start), end))
+        visible = remaining
+        if not visible:
+            break
+
+    dx, dy = second.x() - first.x(), second.y() - first.y()
+    return [
+        (QPointF(first.x()+dx*start, first.y()+dy*start),
+         QPointF(first.x()+dx*end, first.y()+dy*end))
+        for start, end in visible if end-start > 1e-4
+    ]
 
 
 class AROverlay(QWidget):
@@ -242,17 +295,17 @@ class AROverlay(QWidget):
         # scaling makes the trace lie visually on the road while round caps
         # keep adjacent samples continuous.
         segments = []
-        for first, second in zip(strip, strip[1:]):
-            depth = (first[1] + second[1]) * 0.5
-            segments.append((depth, first[0], second[0]))
         occluders = _traffic_occluders(
             camera_snapshot, self.state.get("traffic", []) or [],
             telemetry_timestamp)
+        for first, second in zip(strip, strip[1:]):
+            depth = (first[1] + second[1]) * 0.5
+            for visible_first, visible_second in _visible_segment_parts(
+                    first[0], second[0], depth, occluders):
+                segments.append((depth, visible_first, visible_second))
         segments.sort(key=lambda item: item[0], reverse=True)
         for halo in (True, False):
             for depth, first, second in segments:
-                if _segment_is_occluded(first, second, depth, occluders):
-                    continue
                 halo_width, core_width = _perspective_route_widths(
                     depth, camera_snapshot)
                 painter.setPen(QPen(

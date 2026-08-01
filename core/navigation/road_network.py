@@ -161,6 +161,29 @@ class RoadNetwork:
         self._lane_path_revision = 0
         self.loaded = False
 
+    @staticmethod
+    def _display_count(value):
+        return f"{int(value):,}".replace(",", " ")
+
+    def load_statistics(self):
+        """Return read-only counts for the loading UI and diagnostics."""
+        placed_prefabs = {
+            (instance[0], tuple(instance[1]))
+            for instances in self._prefab_grid.values()
+            for instance in instances
+        }
+        return {
+            "nodes": len(self.nodes),
+            "roads": len(self.segments),
+            "prefabs": len(placed_prefabs),
+        }
+
+    def _loaded_counts_text(self):
+        stats = self.load_statistics()
+        return (f"Uzly {self._display_count(stats['nodes'])}  •  "
+                f"cesty {self._display_count(stats['roads'])}  •  "
+                f"prefaby {self._display_count(stats['prefabs'])}")
+
     # --- Loading --------------------------------------------------------------
     def load(self, data_dir: str, progress_cb=None) -> bool:
         """Load one dataset and optionally report coarse, read-only progress.
@@ -184,9 +207,10 @@ class RoadNetwork:
         # dataset is updated or its version changes.
         report(0.02, "Načítavam cesty a prefaby z cache")
         if self._try_load_cache(data_dir, progress_cb=report):
+            report(0.90, self._loaded_counts_text())
             report(0.92, "Načítavam mestá, firmy a služby")
             self._load_map_features(data_dir)
-            report(1.0, "Mapa je pripravená")
+            report(1.0, f"Mapa je pripravená  •  {self._loaded_counts_text()}")
             return True
 
         nodes_path = _find_json(data_dir, "nodes")
@@ -218,7 +242,7 @@ class RoadNetwork:
                 self.node_forward_item[uid] = _uid(n.get("forwardItemUid"))
                 self.node_backward_item[uid] = _uid(n.get("backwardItemUid"))
                 self._ngrid.setdefault(self._cell(x, y), []).append(uid)
-            report(0.38, "Uzly sú načítané")
+            report(0.38, f"Uzly: {self._display_count(len(self.nodes))} načítaných")
         except Exception as e:
             logging.exception("road_network: failed to load nodes: %s", e)
             return False
@@ -254,7 +278,7 @@ class RoadNetwork:
                     if tok:
                         self._road_look_token[su] = tok
                         self._road_look_token[eu] = tok
-            report(0.64, "Cesty sú načítané")
+            report(0.64, f"Cesty: {self._display_count(len(self.segments))} načítaných")
         except Exception as e:
             logging.exception("road_network: failed to load roads: %s", e)
             return False
@@ -267,6 +291,9 @@ class RoadNetwork:
         self._load_nav_graph(data_dir)
         report(0.77, "Načítavam prefaby a križovatky")
         self._load_prefabs(data_dir)
+        report(0.84, ("Prefaby: "
+                      f"{self._display_count(self.load_statistics()['prefabs'])} "
+                      "načítaných"))
         # Road-look table: classifies each road segment (motorway / expressway /
         # local / dirt) + lane count, used by the autopilot to slow down on
         # narrow/local roads and cap speed in city sectors.
@@ -280,7 +307,7 @@ class RoadNetwork:
         # Persist the parsed network so the next launch is fast (~1s vs ~6s).
         report(0.95, "Ukladám zrýchľovaciu cache")
         self._save_cache(data_dir)
-        report(1.0, "Mapa je pripravená")
+        report(1.0, f"Mapa je pripravená  •  {self._loaded_counts_text()}")
         return True
 
     # --- Pickle cache ---------------------------------------------------------

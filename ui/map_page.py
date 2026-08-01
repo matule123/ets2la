@@ -5,8 +5,9 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
     QProgressBar, QFrame, QSizePolicy,
 )
-from PyQt6.QtGui import QPainter, QColor, QPen, QPolygonF
-from PyQt6.QtCore import Qt, QTimer, QPointF, QPoint, QThread, pyqtSignal
+from PyQt6.QtGui import QPainter, QColor, QPen, QPolygonF, QPainterPath
+from PyQt6.QtCore import (Qt, QTimer, QPointF, QPoint, QRectF, QThread,
+                          pyqtSignal)
 from core.navigation.navigation_intent import snapshot_matches_navigation_intent
 
 
@@ -104,7 +105,9 @@ class MapView(QWidget):
         self.scene_polygons = []
         self.scene_features = []
         self._pal = None         # set by the page (or a default below)
-        self.zoom_radius = 520.0
+        # A slightly wider initial field matches the navigation-map reference
+        # and uses the broad, display-only 1.2 km scene from the map process.
+        self.zoom_radius = 650.0
         self.pan_world = [0.0, 0.0]
         self._drag_at = None
         self.setMinimumHeight(300)
@@ -178,7 +181,7 @@ class MapView(QWidget):
         self.empty_state.raise_()
 
     def reset_view(self):
-        self.zoom_radius = 520.0
+        self.zoom_radius = 650.0
         self.pan_world[:] = [0.0, 0.0]
         self.update()
 
@@ -187,13 +190,13 @@ class MapView(QWidget):
         self.update()
 
     def zoom_out(self):
-        self.zoom_radius = min(1100.0, self.zoom_radius * 1.28)
+        self.zoom_radius = min(1400.0, self.zoom_radius * 1.28)
         self.update()
 
     def wheelEvent(self, event):
         # Wheel up zooms in, wheel down zooms out to a broad regional view.
         factor = 0.78 if event.angleDelta().y() > 0 else 1.28
-        self.zoom_radius = max(70.0, min(1100.0, self.zoom_radius * factor))
+        self.zoom_radius = max(70.0, min(1400.0, self.zoom_radius * factor))
         self.update()
         event.accept()
 
@@ -478,16 +481,23 @@ class MapView(QWidget):
         else:
             self.turn_banner.hide()
 
-        # Truck arrow at centre.
+        # Crisp maps-style position marker at the exact telemetry position.
         c = to_screen(truck)
         fx, fz = -math.sin(heading), -math.cos(heading)
         tip = QPointF(c.x() + fx * 16, c.y() - fz * 16)
         left = QPointF(c.x() - fz * 8 + fx * -7, c.y() - fx * 8 - fz * -7)
         right = QPointF(c.x() + fz * 8 + fx * -7, c.y() + fx * 8 - fz * -7)
+        qp.setPen(Qt.PenStyle.NoPen)
+        qp.setBrush(QColor(0, 0, 0, 75))
+        qp.drawEllipse(QPointF(c.x()+1.5, c.y()+2.0), 15, 15)
+        qp.setBrush(QColor("#FFFFFF"))
+        qp.drawEllipse(c, 14, 14)
         qp.setBrush(QColor("#1597F5"))
-        qp.setPen(QPen(QColor("#E8F4FF"), 2))
-        qp.drawEllipse(c, 13, 13)
-        qp.setBrush(QColor("#F7FBFF"))
+        qp.drawEllipse(c, 11.5, 11.5)
+        qp.setPen(QPen(QColor("#FFFFFF"), 1.2,
+                       Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                       Qt.PenJoinStyle.RoundJoin))
+        qp.setBrush(QColor("#FFFFFF"))
         qp.drawPolygon(QPolygonF([tip, left, right]))
 
         # Small unobtrusive interaction hint; no extra toolbar is needed.
@@ -525,15 +535,9 @@ class MapView(QWidget):
 
             if kind == "company":
                 colour = QColor("#B99A43")
-                glyph = (label or icon or "C")[:2].upper()
             else:
                 key = next((name for name in icon_colours if name in icon), "")
                 colour = icon_colours.get(key, QColor("#65717B"))
-                glyph = ("P" if "parking" in icon else
-                         "S" if any(value in icon for value in
-                                    ("service", "garage", "dealer")) else
-                         "F" if any(value in icon for value in
-                                    ("gas", "fuel")) else "i")
             if any(abs(point.x()-other.x()) < 17 and
                    abs(point.y()-other.y()) < 17 for other in occupied):
                 continue
@@ -543,18 +547,88 @@ class MapView(QWidget):
             qp.setPen(QPen(QColor("#F3F5F7"), 1.0))
             qp.setBrush(colour)
             qp.drawRoundedRect(int(rect_x), int(rect_y), size, size, 2, 2)
-            qp.setPen(QColor("#FFFFFF"))
-            font = qp.font()
-            font.setBold(True)
-            font.setPointSize(6 if size == 13 else 7)
-            qp.setFont(font)
-            qp.drawText(int(rect_x), int(rect_y), size, size,
-                        Qt.AlignmentFlag.AlignCenter, glyph)
+            self._paint_feature_symbol(
+                qp, QRectF(rect_x, rect_y, size, size), icon, kind)
             if kind == "company" and label and radius <= 650:
                 qp.setPen(QColor("#DCD9D2"))
+                font = qp.font()
+                font.setBold(True)
                 font.setPointSize(7)
                 qp.setFont(font)
                 qp.drawText(QPointF(point.x()+size/2+3, point.y()+3), label)
+
+    @staticmethod
+    def _paint_feature_symbol(qp, rect, icon, kind):
+        """Draw compact vector POI pictograms; never raw placeholder letters."""
+        qp.save()
+        qp.setBrush(Qt.BrushStyle.NoBrush)
+        pen = QPen(QColor("#FFFFFF"), max(1.0, rect.width() / 11.0),
+                   Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                   Qt.PenJoinStyle.RoundJoin)
+        qp.setPen(pen)
+        x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
+        key = f"{kind} {icon}".lower()
+        if any(value in key for value in ("gas", "fuel")):
+            qp.drawRoundedRect(QRectF(x+w*.25, y+h*.20, w*.38, h*.60),
+                               w*.04, w*.04)
+            qp.drawLine(QPointF(x+w*.32, y+h*.38),
+                        QPointF(x+w*.56, y+h*.38))
+            hose = QPainterPath(QPointF(x+w*.63, y+h*.31))
+            hose.cubicTo(x+w*.86, y+h*.32, x+w*.79, y+h*.72,
+                         x+w*.72, y+h*.72)
+            qp.drawPath(hose)
+        elif any(value in key for value in ("service", "garage", "dealer")):
+            qp.drawLine(QPointF(x+w*.27, y+h*.72),
+                        QPointF(x+w*.73, y+h*.26))
+            qp.drawEllipse(QPointF(x+w*.27, y+h*.72), w*.09, w*.09)
+            qp.drawLine(QPointF(x+w*.64, y+h*.22),
+                        QPointF(x+w*.79, y+h*.37))
+        elif "train" in key:
+            qp.drawRoundedRect(QRectF(x+w*.24, y+h*.18, w*.52, h*.54),
+                               w*.08, w*.08)
+            qp.drawLine(QPointF(x+w*.34, y+h*.36),
+                        QPointF(x+w*.66, y+h*.36))
+            qp.drawEllipse(QPointF(x+w*.34, y+h*.76), w*.06, w*.06)
+            qp.drawEllipse(QPointF(x+w*.66, y+h*.76), w*.06, w*.06)
+        elif "ferry" in key:
+            boat = QPainterPath(QPointF(x+w*.18, y+h*.58))
+            boat.lineTo(x+w*.82, y+h*.58)
+            boat.lineTo(x+w*.69, y+h*.76)
+            boat.lineTo(x+w*.31, y+h*.76)
+            boat.closeSubpath()
+            qp.drawPath(boat)
+            qp.drawLine(QPointF(x+w*.38, y+h*.58),
+                        QPointF(x+w*.38, y+h*.34))
+            qp.drawLine(QPointF(x+w*.38, y+h*.34),
+                        QPointF(x+w*.63, y+h*.45))
+        elif any(value in key for value in ("toll", "weigh")):
+            qp.drawLine(QPointF(x+w*.24, y+h*.72),
+                        QPointF(x+w*.24, y+h*.27))
+            qp.drawLine(QPointF(x+w*.76, y+h*.72),
+                        QPointF(x+w*.76, y+h*.27))
+            qp.drawLine(QPointF(x+w*.20, y+h*.29),
+                        QPointF(x+w*.80, y+h*.29))
+            qp.drawLine(QPointF(x+w*.36, y+h*.29),
+                        QPointF(x+w*.36, y+h*.72))
+        elif kind == "company":
+            roof = QPainterPath(QPointF(x+w*.18, y+h*.43))
+            roof.lineTo(x+w*.50, y+h*.20)
+            roof.lineTo(x+w*.82, y+h*.43)
+            qp.drawPath(roof)
+            qp.drawRect(QRectF(x+w*.24, y+h*.43, w*.52, h*.36))
+            qp.drawRect(QRectF(x+w*.43, y+h*.58, w*.16, h*.21))
+        else:
+            # Parking/rest-area symbol: a car silhouette instead of a raw P.
+            car = QPainterPath(QPointF(x+w*.20, y+h*.61))
+            car.lineTo(x+w*.30, y+h*.40)
+            car.lineTo(x+w*.68, y+h*.40)
+            car.lineTo(x+w*.80, y+h*.61)
+            qp.drawPath(car)
+            qp.drawLine(QPointF(x+w*.20, y+h*.61),
+                        QPointF(x+w*.80, y+h*.61))
+            qp.drawEllipse(QPointF(x+w*.31, y+h*.69), w*.06, w*.06)
+            qp.drawEllipse(QPointF(x+w*.69, y+h*.69), w*.06, w*.06)
+        qp.restore()
 
     @staticmethod
     def _to_xz(point):
@@ -812,13 +886,13 @@ class MapPage(QWidget):
                 pass
         self.btn_dl.setEnabled(not trucklib_required)
         self.btn_use.setText(
-            "Pouzit a nacitat vybranu mapu" if downloaded else
-            ("Pre ETS2 1.60 chyba TruckLib exporter" if trucklib_required
-             else "Najprv vytvor mapu z nainstalovanej hry" if local
+            "Použiť a načítať vybranú mapu" if downloaded else
+            ("Pre ETS2 1.60 chýba TruckLib exportér" if trucklib_required
+             else "Najprv vytvor mapu z nainštalovanej hry" if local
              else "Najprv stiahni mapu"))
         self.btn_dl.setText("Podpora 1.60 sa pripravuje" if trucklib_required
-                            else "Vytvorit z nainstalovanej hry" if local
-                            else "Stiahnut mapu")
+                            else "Vytvoriť z nainštalovanej hry" if local
+                            else "Stiahnuť mapu")
 
     def use_selected_map(self):
         key = self.map_combo.currentData()
@@ -867,7 +941,7 @@ class MapPage(QWidget):
         self.dl_bar.setVisible(False)
         self._dl_worker = None
         if ok:
-            self.dl_status.setText("Map data ready - loading road network...")
+            self.dl_status.setText("Mapové dáta sú pripravené — načítavam cesty…")
         else:
             try:
                 from core.navigation import map_data
@@ -875,18 +949,18 @@ class MapPage(QWidget):
             except Exception:
                 reason = ""
             self.dl_status.setText(
-                reason or "Map preparation failed; see the log for details.")
+                reason or "Príprava mapy zlyhala; podrobnosti sú v logu.")
         self._populate_maps()
 
     def save_route_diagnostic(self):
         result = self.state.get("route_diagnostic_last_result") or {}
         build_id = result.get("route_build_id")
         if not build_id or result.get("status") == "success":
-            self.status.setText("No failed route calculation is available.")
+            self.status.setText("Nie je dostupný žiadny neúspešný výpočet trasy.")
             return
         self.state.set("route_diagnostic_export_result", None)
         self.state.set("route_diagnostic_export_request", build_id)
-        self.status.setText("Saving anonymized route diagnostic…")
+        self.status.setText("Ukladám anonymizovanú diagnostiku trasy…")
 
     def refresh(self):
         # The engine may auto-select a compatible dataset after comparing live

@@ -1560,8 +1560,12 @@ class Plugin(BasePlugin):
                                 chosen["key"])
                             return
                         self.road_net = net
-                        ready = (f"Mapa je pripravená ({len(net.segments)} "
-                                 "ciest). Čakám na hernú GPS trasu.")
+                        stats = net.load_statistics()
+                        ready = ("Mapa je pripravená ("
+                                 f"{stats['nodes']:,} uzlov, "
+                                 f"{stats['roads']:,} ciest, "
+                                 f"{stats['prefabs']:,} prefabov). "
+                                 "Čakám na hernú GPS trasu.").replace(",", " ")
                         self.sdk.shared_state.update_batch({
                             "map_status": ready,
                             "map_load_progress": {
@@ -1780,7 +1784,7 @@ class Plugin(BasePlugin):
             try:
                 altitude = float(self.sdk.get("truck_altitude", 0.0) or 0.0)
                 roads = self.road_net.live_map_segments_3d_near(
-                    pos, radius=900.0, limit=6000, altitude=altitude)
+                    pos, radius=1200.0, limit=8500, altitude=altitude)
                 road_payload = []
                 for (a, b, kind, lanes, divided, dash_on, pillar,
                      rail_post, half_width, suppress_markings, path_key,
@@ -1796,11 +1800,11 @@ class Plugin(BasePlugin):
                     [[list(point) for point in points], colour, z_index]
                     for points, colour, z_index in
                     self.road_net.live_map_polygons_near(
-                        pos, radius=900.0, limit=1200)
+                        pos, radius=1200.0, limit=1800)
                 ]
                 feature_payload = [list(feature) for feature in
                                    self.road_net.map_features_near(
-                                       pos, radius=900.0, limit=700)]
+                                       pos, radius=1200.0, limit=1000)]
                 self._live_map_revision += 1
                 self.sdk.shared_state.update_batch({
                     "live_map_road_segments": road_payload,

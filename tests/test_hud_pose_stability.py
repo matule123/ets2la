@@ -6,6 +6,7 @@ from PyQt6.QtCore import QPointF, QRectF
 from PyQt6.QtGui import QPainterPath
 
 from core.hud import (UltraPilotHUD, _continuous_lane_chunks,
+                      _hud_segment_is_selected_context,
                       _lane_boundary_points, _ordered_display_path_runs,
                       _rounded_screen_path, _variable_lane_boundary_points)
 from core.sdk.scs_sdk import SCSTelemetry
@@ -18,6 +19,12 @@ class HudPoseStabilityTests(unittest.TestCase):
         hud._display_truck_pos = None
         hud._display_truck_heading = None
         return hud
+
+    def test_valid_navigation_hides_unselected_prefab_arms_only(self):
+        route = [[0.0, 0.0, 0.0], [0.0, 0.0, 20.0]]
+        self.assertTrue(_hud_segment_is_selected_context("road", route))
+        self.assertFalse(_hud_segment_is_selected_context("lane", route))
+        self.assertTrue(_hud_segment_is_selected_context("lane", []))
 
     def test_stationary_sdk_chatter_does_not_move_scene(self):
         hud = self.make_hud()

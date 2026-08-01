@@ -73,8 +73,8 @@ class UpdateStagingTests(unittest.TestCase):
                 self.assertEqual(info["archive_bytes"], len(data))
                 self.assertGreater(info["unpacked_bytes"], 0)
                 self.assertEqual(info["file_count"], 2)
-                self.assertIn("Stiahnuté ", progress[-1][1])
-                self.assertIn("po rozbalení", progress[-1][1])
+                self.assertIn("Pripravené na inštaláciu:", progress[-1][1])
+                self.assertIn("stiahnutý balík", progress[-1][1])
                 self.assertEqual(progress[-1][0], 1.0)
 
                 self.assertTrue(update_check.install_prepared_update())
@@ -85,6 +85,30 @@ class UpdateStagingTests(unittest.TestCase):
                 self.assertFalse(update_check.prepared_update_info())
                 self.assertTrue(update_check.take_update_startup_notice())
                 self.assertFalse(update_check.take_update_startup_notice())
+
+    def test_download_is_pinned_to_advertised_commit_and_not_cached_main(self):
+        with WorkspaceDirectory() as root:
+            response = StreamingResponse(update_archive())
+            with (mock.patch.object(update_check, "_update_cache_dir",
+                                    return_value=root),
+                  mock.patch("requests.get", return_value=response) as request):
+                self.assertTrue(update_check.prepare_update(
+                    target_commit="abcdef0"))
+            args, kwargs = request.call_args
+            self.assertEqual(
+                args[0],
+                "https://github.com/matule123/ets2la/archive/abcdef0.zip")
+            self.assertEqual(kwargs["headers"]["Cache-Control"], "no-cache")
+            self.assertEqual(kwargs["headers"]["Accept-Encoding"], "identity")
+
+    def test_download_progress_distinguishes_moving_bytes_from_total(self):
+        mib = 1024 * 1024
+        self.assertEqual(
+            update_check._format_download_progress(mib, 4 * mib),
+            "Stiahnuté 1.00 MB z 4.00 MB (25 %)")
+        self.assertEqual(
+            update_check._format_download_progress(mib, 0),
+            "Stiahnuté 1.00 MB • celkovú veľkosť zisťujem")
 
     def test_verified_size_replaces_incorrect_http_content_length(self):
         with WorkspaceDirectory() as root:
@@ -145,13 +169,16 @@ class UpdateUiStateTests(unittest.TestCase):
         self.assertFalse(dialog.progress.isVisible())
 
         dialog.set_downloading()
+        self.assertEqual(
+            dialog.progress_text.text(),
+            "Stiahnuté 0.00 MB • celkovú veľkosť zisťujem")
         dialog.set_progress(0.5, "5.0 MB / 10.0 MB")
         self.assertEqual(dialog.progress.value(), 50)
         self.assertEqual(dialog.progress_text.text(), "5.0 MB / 10.0 MB")
         self.assertFalse(dialog.primary_btn.isEnabled())
 
         dialog.set_ready(
-            "Stiahnuté 0.84 MB • po rozbalení 3.42 MB")
+            "Pripravené na inštaláciu: 3.42 MB • stiahnutý balík 0.84 MB")
         self.assertEqual(
             dialog.title_lbl.text(),
             "Aktualizácia je pripravená na inštaláciu")
@@ -159,7 +186,7 @@ class UpdateUiStateTests(unittest.TestCase):
                          "Inštalovať a reštartovať")
         self.assertEqual(
             dialog.progress_text.text(),
-            "Stiahnuté 0.84 MB • po rozbalení 3.42 MB")
+            "Pripravené na inštaláciu: 3.42 MB • stiahnutý balík 0.84 MB")
         self.assertTrue(dialog.primary_btn.isEnabled())
         dialog.close()
 

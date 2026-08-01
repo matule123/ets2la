@@ -9,6 +9,11 @@ from PyQt6.QtGui import (QPainter, QColor, QFont, QPen, QPolygonF,
 from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
 from core.navigation.navigation_intent import snapshot_matches_navigation_intent
 
+
+def _hud_segment_is_selected_context(kind, navigation_points):
+    """Hide only unselected prefab arms while a validated GPS lane is drawn."""
+    return not (kind == "lane" and len(navigation_points or ()) >= 2)
+
 # State → accent colour (left as-is; the whole HUD now lives on the left panel).
 _STATE_COLORS = {
     "EMERGENCY": "#EF4444", "AVOID_OBSTACLE": "#F59E0B", "OVERTAKING": "#F59E0B",
@@ -768,6 +773,16 @@ class UltraPilotHUD(QWidget):
                     path_index = (int(segment[11]) if len(segment) > 11
                                   else 0)
                 except (TypeError, ValueError, IndexError):
+                    continue
+                # A placed prefab can contain dozens of legal navCurves. When
+                # GPS authority is present, drawing every unselected arm turns
+                # a junction into the white-line tangle visible in the game
+                # capture. The authoritative nav_path below already paints the
+                # selected prefab lane and its two boundaries. Keep broad road
+                # approaches, but omit unrelated internal navCurves only while
+                # that validated selected corridor exists.
+                if not _hud_segment_is_selected_context(
+                        kind, d.get("nav_path", [])):
                     continue
                 clipped = clip_road(a, b)
                 if clipped is None:

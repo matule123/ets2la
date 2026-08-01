@@ -242,7 +242,8 @@ class UpdateConfirmDialog(QDialog):
         self.progress.setVisible(True)
         self.progress_text.setVisible(True)
         self.progress.setValue(0)
-        self.progress_text.setText("0.0 MB / zisťujem veľkosť…")
+        self.progress_text.setText(
+            "Stiahnuté 0.00 MB • celkovú veľkosť zisťujem")
         self.primary_btn.setEnabled(False)
         self.primary_btn.setText("Sťahujem…")
         self.cancel_btn.setEnabled(False)

@@ -51,8 +51,19 @@ def _prepared_paths():
 def _format_download_progress(downloaded: int, total: int) -> str:
     done_mb = max(0, int(downloaded)) / (1024 * 1024)
     if total > 0:
-        return f"{done_mb:.2f} MB / {total / (1024 * 1024):.2f} MB"
-    return f"{done_mb:.2f} MB / neznáma veľkosť"
+        total_mb = max(0, int(total)) / (1024 * 1024)
+        percent = min(100, int(max(0, downloaded) * 100 / max(1, total)))
+        return (f"Stiahnuté {done_mb:.2f} MB z {total_mb:.2f} MB "
+                f"({percent} %)")
+    return f"Stiahnuté {done_mb:.2f} MB • celkovú veľkosť zisťujem"
+
+
+def _archive_url_for_target(target: str | None) -> str:
+    """Pin downloads to the exact commit advertised by the update check."""
+    target = str(target or "").strip()
+    if _looks_like_sha(target):
+        return f"https://github.com/{REPO}/archive/{target}.zip"
+    return ARCHIVE_URL
 
 
 def _format_prepared_update_size(info: dict) -> str:
@@ -65,9 +76,14 @@ def _format_prepared_update_size(info: dict) -> str:
     archive_text = f"{archive_bytes / (1024 * 1024):.2f} MB"
     if unpacked_bytes > 0:
         unpacked_text = f"{unpacked_bytes / (1024 * 1024):.2f} MB"
-        return (f"Stiahnuté {archive_text} • po rozbalení "
-                f"{unpacked_text}")
-    return f"Stiahnuté {archive_text}"
+        # The ZIP for this repository is currently roughly 0.83 MB.  Showing
+        # that compressed transfer as the only prominent size made a verified
+        # multi-megabyte installation look permanently stuck at 0.83 MB.
+        # Lead with the actual prepared installation size; retain the archive
+        # size as an explicitly labelled transfer fact.
+        return (f"Pripravené na inštaláciu: {unpacked_text} "
+                f"• stiahnutý balík {archive_text}")
+    return f"Stiahnutý balík: {archive_text}"
 
 
 def _app_dir():
@@ -340,7 +356,13 @@ def prepare_update(progress_cb=None, target_commit=None) -> bool:
         import requests, zipfile
         os.makedirs(os.path.dirname(archive_path), exist_ok=True)
         target = target_commit or latest_release()
-        response = requests.get(ARCHIVE_URL, timeout=180, stream=True)
+        # Do not label one commit in the UI and then fetch a moving main.zip.
+        # Pin SHA updates and request an identity-encoded, uncached response so
+        # Content-Length describes this exact transfer rather than a stale CDN
+        # or content-encoded representation.
+        response = requests.get(
+            _archive_url_for_target(target), timeout=180, stream=True,
+            headers={"Cache-Control": "no-cache", "Accept-Encoding": "identity"})
         if response.status_code != 200:
             if progress_cb:
                 progress_cb(1.0, "Sťahovanie zlyhalo (HTTP "
@@ -497,7 +519,9 @@ def _zip_update(progress_cb=None, target_commit=None) -> bool:
         import requests
         if progress_cb:
             progress_cb(0.1, "Sťahujem balík aktualizácie…")
-        response = requests.get(ARCHIVE_URL, timeout=180, stream=True)
+        response = requests.get(
+            _archive_url_for_target(target_commit), timeout=180, stream=True,
+            headers={"Cache-Control": "no-cache", "Accept-Encoding": "identity"})
         if response.status_code != 200:
             if progress_cb:
                 progress_cb(1.0, "download HTTP " + str(response.status_code))

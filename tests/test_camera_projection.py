@@ -11,7 +11,9 @@ from unittest import mock
 
 from core.ar_overlay import (
     AR_MAX_ROAD_DEPTH_M, AROverlay, _first_visible_road_strip,
+    _visible_segment_parts,
 )
+from PyQt6.QtCore import QPointF
 from core.camera import (
     CAMERA_MAPPING, CameraSnapshotProducer, camera_snapshot_reason,
     project_world_point, quaternion_to_euler,
@@ -63,6 +65,17 @@ class CameraSnapshotTests(unittest.TestCase):
         self.assertEqual(len(strip), 2)
         self.assertEqual([point[1] for point in strip], [12.0, 30.0])
 
+    def test_ar_vehicle_occlusion_clips_at_cuboid_edges_without_popping(self):
+        parts = _visible_segment_parts(
+            QPointF(0.0, 50.0), QPointF(100.0, 50.0), 40.0,
+            [(40.0, 20.0, 60.0, 80.0, 20.0)])
+        self.assertEqual(len(parts), 2)
+        self.assertAlmostEqual(parts[0][1].x(), 40.0)
+        self.assertAlmostEqual(parts[1][0].x(), 60.0)
+        self.assertEqual(len(_visible_segment_parts(
+            QPointF(0.0, 50.0), QPointF(100.0, 50.0), 10.0,
+            [(40.0, 20.0, 60.0, 80.0, 20.0)])), 1)
+
     def test_zip_updater_transfers_new_modules_and_preserves_user_data(self):
         archive = io.BytesIO()
         with zipfile.ZipFile(archive, "w") as bundle:
@@ -90,7 +103,7 @@ class CameraSnapshotTests(unittest.TestCase):
 
         root = r"C:\UltraPilot"
         with (mock.patch.object(update_check, "_app_dir", return_value=root),
-              mock.patch("requests.get", return_value=response),
+              mock.patch("requests.get", return_value=response) as request,
               mock.patch("builtins.open",
                          side_effect=lambda path, *_args, **_kwargs: Writer(path)),
               mock.patch.object(update_check.os, "makedirs"),
@@ -99,6 +112,10 @@ class CameraSnapshotTests(unittest.TestCase):
                                 side_effect=removed.append)):
             self.assertTrue(update_check._zip_update(
                 target_commit="abcdef0"))
+
+        self.assertEqual(
+            request.call_args.args[0],
+            "https://github.com/matule123/ets2la/archive/abcdef0.zip")
 
         camera = str(Path(root, "core", "camera.py"))
         preflight = str(Path(root, "core", "navigation",

@@ -47,31 +47,33 @@ class UiChromeTests(unittest.TestCase):
         bar = MacTitleBar(host, palette("light"))
         self.assertEqual(list(bar.controls), ["maximize", "minimize", "close"])
         controls = list(bar.controls.values())
-        self.assertTrue(all(button.width() == 11 and button.height() == 11
+        self.assertTrue(all(button.width() == 9 and button.height() == 9
                             for button in controls))
-        self.assertEqual(
-            [button.styleSheet().split("background:", 1)[1].split(";", 1)[0]
-             for button in controls],
-            ["#00D647", "#FFB800", "#FF3B30"])
+        self.assertEqual([button._color.name().upper() for button in controls],
+                         ["#00CA4E", "#FFBD44", "#FF5F57"])
+        self.assertTrue(all("border:none" in button.styleSheet()
+                            for button in controls))
+        self.assertTrue(all(not hasattr(button, "_glyph")
+                            for button in controls))
         host.show()
         bar.show()
         self.app.processEvents()
         centres = [button.geometry().center().x() for button in controls]
-        self.assertEqual([b-a for a, b in zip(centres, centres[1:])], [21, 21])
+        self.assertEqual([b-a for a, b in zip(centres, centres[1:])], [15, 15])
         bar.close()
         host.close()
         self.assertEqual([button.accessibleName() for button in controls],
                          ["Maximalizovať", "Minimalizovať", "Zavrieť"])
 
     def test_window_controls_are_seated_in_a_curved_notch(self):
-        path = window_control_notch_path(82, 34)
+        path = window_control_notch_path(68, 31)
         bounds = path.boundingRect()
-        self.assertEqual((bounds.width(), bounds.height()), (82.0, 34.0))
+        self.assertEqual((bounds.width(), bounds.height()), (68.0, 31.0))
         # The lower-left cutout is outside while all three control centres are
         # inside the painted surface.
         self.assertFalse(path.contains(bounds.bottomLeft()))
-        for x in (21.5, 42.5, 63.5):
-            self.assertTrue(path.contains(type(bounds.center())(x, 13.5)))
+        for x in (21.5, 35.5, 49.5):
+            self.assertTrue(path.contains(type(bounds.center())(x, 12.5)))
 
     def test_sidebar_uses_card_navigation_styles_and_original_line_icons(self):
         css = stylesheet("light")
@@ -202,6 +204,7 @@ class UiChromeTests(unittest.TestCase):
         self.assertEqual(island.time_lbl.text(), "MAPA")
         self.assertEqual(island.src_lbl.text(), "77%")
         self.assertIn("prefaby", island.msg_lbl.text())
+        self.assertEqual(island.msg_lbl.alignment(), Qt.AlignmentFlag.AlignCenter)
         self.assertEqual(island.progress.value(), 77)
         host.state.set("map_load_progress", {
             "active": True, "percent": 100,
@@ -209,6 +212,20 @@ class UiChromeTests(unittest.TestCase):
         })
         self.assertTrue(island._poll_map_load())
         self.assertEqual(island.src_lbl.text(), "100%")
+        island.close()
+        host.close()
+
+    def test_failed_lane_localisation_has_no_misleading_percentage(self):
+        host = QWidget()
+        host.state = State({
+            "navigation_recalculating": True,
+            "navigation_progress": 0.72,
+            "navigation_status": "Kamión nie je na potvrdenom GPS pruhu",
+        })
+        island = DynamicIsland(host)
+        self.assertTrue(island._poll_navigation())
+        self.assertEqual(island.src_lbl.text(), "")
+        self.assertFalse(island.progress.isVisible())
         island.close()
         host.close()
 
@@ -235,6 +252,7 @@ class UiChromeTests(unittest.TestCase):
         self.assertEqual(page.view.scene_polygons[0]["colour"], 2)
         self.assertEqual(page.view.scene_features[0]["icon"], "gas_ico")
         self.assertEqual(page._last_live_map_scene_revision, 9)
+        self.assertEqual(page.view.zoom_radius, 650.0)
         page.close()
 
     def test_plugin_toggle_is_persisted_for_the_next_run(self):

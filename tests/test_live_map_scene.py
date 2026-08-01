@@ -1,10 +1,44 @@
 import unittest
 from unittest.mock import patch
 
+from PyQt6.QtCore import QRectF
+
 from core.navigation.road_network import RoadNetwork
+from UI.map_page import MapView
 
 
 class LiveMapSceneTests(unittest.TestCase):
+    def test_loading_statistics_deduplicate_spatial_prefab_instances(self):
+        network = RoadNetwork()
+        instance = ("junction", (1, 2, 3), 0, True)
+        network.nodes = {1: (0.0, 0.0), 2: (10.0, 0.0)}
+        network.segments = [((0.0, 0.0), (10.0, 0.0))]
+        network._prefab_grid = {(0, 0): [instance], (1, 0): [instance]}
+        self.assertEqual(network.load_statistics(), {
+            "nodes": 2, "roads": 1, "prefabs": 1,
+        })
+
+    def test_live_map_poi_symbols_are_vectors_not_placeholder_letters(self):
+        class Painter:
+            def __init__(self):
+                self.calls = []
+
+            def __getattr__(self, name):
+                def call(*_args, **_kwargs):
+                    self.calls.append(name)
+                return call
+
+        painter = Painter()
+        rect = QRectF(0.0, 0.0, 16.0, 16.0)
+        for icon, kind in (("gas_ico", "facility"),
+                           ("service_ico", "facility"),
+                           ("parking_ico", "facility"),
+                           ("", "company")):
+            MapView._paint_feature_symbol(painter, rect, icon, kind)
+        self.assertNotIn("drawText", painter.calls)
+        self.assertTrue(any(name in painter.calls for name in
+                            ("drawPath", "drawRoundedRect", "drawRect")))
+
     def test_live_map_keeps_nearby_disconnected_roads_outside_hud_only(self):
         network = RoadNetwork()
         network.loaded = True

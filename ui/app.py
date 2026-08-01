@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QWidget, QStackedWidget, QFrame, QScrollArea, QLineEdit, QGridLayout,
 )
 from PyQt6.QtCore import QTimer, Qt, QSize, QRectF
-from PyQt6.QtGui import (QColor, QFont, QPainter, QPainterPath, QPen,
+from PyQt6.QtGui import (QColor, QPainter, QPainterPath, QPen,
                          QRegion)
 
 from ui.settings_menu import SettingsMenu
@@ -41,33 +41,26 @@ def rounded_window_region(width, height, radius=15.0):
 
 
 class WindowControlDot(QPushButton):
-    """A crisp traffic-light control with a subtle hover symbol."""
+    """Small, solid traffic-light control matching the ETS2LA chrome."""
 
     def __init__(self, color, glyph, name, tooltip, action, parent=None):
         super().__init__("", parent)
-        self._glyph = glyph
+        self._color = QColor(color)
         self.setObjectName(name)
         self.setAccessibleName(tooltip)
         self.setToolTip(tooltip)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedSize(11, 11)
-        self.setStyleSheet(
-            f"QPushButton{{background:{color};border:1px solid rgba(0,0,0,0.34);"
-            "border-radius:5px;padding:0;margin:0;}"
-            "QPushButton:hover{border:1px solid rgba(0,0,0,0.62);}")
+        self.setFixedSize(9, 9)
+        self.setStyleSheet("QPushButton{background:transparent;border:none;"
+                           "padding:0;margin:0;}")
         self.clicked.connect(action)
 
     def paintEvent(self, event):
-        super().paintEvent(event)
-        if not self.underMouse():
-            return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor(30, 35, 40, 180), 1.15,
-                            Qt.PenStyle.SolidLine,
-                            Qt.PenCapStyle.RoundCap))
-        painter.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
-        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._glyph)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self._color)
+        painter.drawEllipse(QRectF(0.5, 0.5, 8.0, 8.0))
 
 
 class MacTitleBar(QFrame):
@@ -77,20 +70,20 @@ class MacTitleBar(QFrame):
         super().__init__()
         self.window = window
         self._palette = palette
-        self.setFixedSize(82, 34)
+        self.setFixedSize(68, 31)
         self.setObjectName("MacTitleBar")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setStyleSheet("#MacTitleBar{background:transparent;border:none;}")
         row = QHBoxLayout(self)
-        row.setContentsMargins(16, 8, 10, 11)
-        row.setSpacing(10)
+        row.setContentsMargins(17, 8, 10, 12)
+        row.setSpacing(5)
         self.controls = {}
         for key, color, glyph, tip, action in (
-                ("maximize", "#00D647", "+", "Maximalizovať",
+                ("maximize", "#00CA4E", "+", "Maximalizovať",
                  self._toggle_maximize),
-                ("minimize", "#FFB800", "−", "Minimalizovať",
+                ("minimize", "#FFBD44", "−", "Minimalizovať",
                  window.showMinimized),
-                ("close", "#FF3B30", "×", "Zavrieť", window.close)):
+                ("close", "#FF5F57", "×", "Zavrieť", window.close)):
             dot = WindowControlDot(color, glyph, f"WindowControl-{key}",
                                    tip, action, self)
             row.addWidget(dot)

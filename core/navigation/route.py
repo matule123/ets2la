@@ -98,7 +98,7 @@ def curve_cte_gain(radius_m: float, lateral_error_m: float = 0.0) -> float:
 
 
 def curve_speed_limit_ms(radius_m: float, distance_m: float,
-                         lateral_accel_ms2: float = 1.8,
+                         lateral_accel_ms2: float = 1.6,
                          approach_decel_ms2: float = 1.6) -> float:
     """Return a speed envelope that reaches a bend at safe apex speed."""
     try:
@@ -543,6 +543,7 @@ class Route:
         # to full-lock — that's the „truck yanks hard left the moment autopilot
         # engages" bug. Capping it keeps the steering reasonable while still
         # pulling back toward the lane.
+        has_confirmed_lane_error = cross_track_error_m is not None
         cte = (self.cross_track_error(idx, pos)
                if cross_track_error_m is None
                else float(cross_track_error_m)) + lane_offset_m
@@ -557,26 +558,59 @@ class Route:
         # the whole command down with speed (gentle inputs at 90 km/h).
         v = max(abs(speed_ms), 0.0)
         progress = self.tracking_progress(pos, heading)
+        # Feed-forward remains local. The long curve horizon belongs only to
+        # speed/braking; moving this preview farther ahead makes the truck cut
+        # the straight before a junction rather than follow the lane entry.
         preview = _clamp(v * 0.35, STEERING_PREVIEW_MIN_M,
                          STEERING_PREVIEW_MAX_M)
         local_curvature = self._curvature_at_progress(progress + preview)
         local_radius = (1e6 if abs(local_curvature) < 1e-9
                         else 1.0 / abs(local_curvature))
+        cte_gain = curve_cte_gain(local_radius, cte)
+        if (has_confirmed_lane_error
+                and abs(local_curvature) < 1.0 / 500.0):
+            # On the straight immediately after a bend the old ±0.16 guard and
+            # base Stanley gain could preserve a 1–1.7 m residual offset for
+            # tens of metres. Scale recovery by *measured* displacement while
+            # leaving sub-35 cm localisation noise and every curve untouched.
+            recovery_weight = _clamp(
+                (abs(cte) - 0.35) / 1.15, 0.0, 1.0)
+            cte_gain *= 1.0 + 1.75 * recovery_weight
         cte_steer = math.atan(
-            (curve_cte_gain(local_radius, cte) * cte)
-            / (K_SOFT + v))
+            (cte_gain * cte) / (K_SOFT + v))
         feed_forward = (math.atan(TRUCK_WHEELBASE_M * local_curvature)
                         / NORMALIZED_STEERING_ANGLE_RAD)
+        # Heading/CTE is the calibrated normalized feedback correction; only
+        # the geometric Ackermann feed-forward needs the physical
+        # radians-per-controller-unit conversion above. Keeping the local
+        # feedback calibrated avoids amplifying two-metre map sampling noise.
         steer = feed_forward + speed_gain(speed_ms) * (
             K_HEADING * heading_error + cte_steer)
-        # Bound the normalized output. Without this a large heading error plus
-        # maxed CTE can exceed controller range and look like permanent lock.
-        steer = max(-0.7, min(0.7, steer))
+        # A fixed ±0.70 limit physically cannot follow a proven 25–40 m prefab
+        # bend in the truck model (it bottoms out near a 40 m radius), which is
+        # why the real exit replay ran wide into the verge. Grant additional
+        # authority only in a validated local curve; straights and broad bends
+        # retain the old limit and all output remains inside the controller's
+        # real [-1, 1] range.
+        curvature_magnitude = abs(local_curvature)
+        curve_authority = _clamp(
+            (curvature_magnitude - 1.0 / 80.0)
+            / (1.0 / 25.0 - 1.0 / 80.0), 0.0, 1.0)
+        steering_limit = 0.70 + 0.30 * curve_authority
+        steer = _clamp(steer, -steering_limit, steering_limit)
         if v < 5.0:
             standstill_limit = 0.22 + (v / 5.0) * 0.48
             steer = _clamp(steer, -standstill_limit, standstill_limit)
         # Straight geometry retains the conservative guard. A proven curve may
         # use the physical steering required to hold its lane centre.
         if abs(local_curvature) < 1.0 / 500.0:
-            steer = _clamp(steer, -0.16, 0.16)
+            # A small centred correction retains the calm historical guard.
+            # A confirmed LaneMatch more than 0.35 m from centre may recover
+            # with bounded additional authority; otherwise ±0.16 can never
+            # unwind the residual error left by a tight S-bend.
+            straight_limit = 0.16
+            if has_confirmed_lane_error:
+                straight_limit += 0.34 * _clamp(
+                    (abs(cte) - 0.35) / 1.15, 0.0, 1.0)
+            steer = _clamp(steer, -straight_limit, straight_limit)
         return _clamp(steer, -1.0, 1.0)

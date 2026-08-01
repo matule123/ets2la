@@ -281,8 +281,10 @@ class LaneGeometryAuditTests(unittest.TestCase):
                         cross_track_error_m=0.0))
                     progresses.append(route._tracking_projection(
                         points[index], heading)[2])
-                self.assertTrue(all(math.isfinite(v) and abs(v) <= 0.7
+                self.assertTrue(all(math.isfinite(v) and abs(v) <= 1.0
                                     for v in commands))
+                if label == "roundabout":
+                    self.assertTrue(any(abs(v) > 0.70 for v in commands))
                 self.assertEqual(progresses, sorted(progresses))
     def test_route_tracking_cannot_jump_to_later_overlapping_arm(self):
         # The final arm deliberately runs almost on top of the first one in the
@@ -391,7 +393,8 @@ class LaneGeometryAuditTests(unittest.TestCase):
                     index = route.tracking_index((x, z), heading)
                     errors.append(route.cross_track_error(index, (x, z)))
                     commands.append(plugin._last_steering)
-                self.assertAlmostEqual(speed * 3.6, 32.4, places=1)
+                self.assertAlmostEqual(
+                    speed, math.sqrt(1.6 * radius), places=6)
                 self.assertLess(max(map(abs, errors)), 0.80)
                 self.assertLessEqual(max(
                     abs(current - previous)
