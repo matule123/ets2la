@@ -16,10 +16,10 @@ import logging
 import os
 import sys
 
-from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF, QElapsedTimer
+from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF, QPoint, QElapsedTimer
 from PyQt6.QtGui import QPainter, QPen, QColor
 from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel,
-                             QPushButton, QProgressBar, QDialog)
+                             QPushButton, QProgressBar, QDialog, QFrame)
 from PyQt6.QtCore import QThread, pyqtSignal
 
 
@@ -93,6 +93,75 @@ class Spinner(QWidget):
         p.drawArc(rect, int(-self._angle * 16), int(100 * 16))
 
 
+class HoverUpdateButton(QPushButton):
+    """Update button that exposes enter/leave without changing click behavior."""
+
+    hovered = pyqtSignal(bool)
+
+    def enterEvent(self, event):
+        self.hovered.emit(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.hovered.emit(False)
+        super().leaveEvent(event)
+
+
+class UpdateChangesPopover(QFrame):
+    """Non-activating release-notes card positioned below the update button."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setObjectName("UpdateChangesPopover")
+        self.setFixedWidth(310)
+        self.setStyleSheet(
+            "QFrame#UpdateChangesPopover{background:#FFFFFF;border:1px solid #D1D5DB;"
+            "border-radius:10px;}"
+            "QLabel{background:transparent;border:none;color:#374151;}")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(14, 12, 14, 12)
+        lay.setSpacing(5)
+        heading = QLabel("Čo je nové")
+        heading.setStyleSheet("font-size:11px;font-weight:800;color:#047857;")
+        lay.addWidget(heading)
+        self.release_title = QLabel("")
+        self.release_title.setTextFormat(Qt.TextFormat.PlainText)
+        self.release_title.setWordWrap(True)
+        self.release_title.setStyleSheet(
+            "font-size:13px;font-weight:800;color:#111827;")
+        lay.addWidget(self.release_title)
+        self.release_description = QLabel("")
+        self.release_description.setTextFormat(Qt.TextFormat.PlainText)
+        self.release_description.setWordWrap(True)
+        self.release_description.setStyleSheet(
+            "font-size:12px;color:#4B5563;line-height:1.25;")
+        lay.addWidget(self.release_description)
+        self.hide()
+
+    def set_changes(self, title, description):
+        title = str(title or "Nová verzia UltraPilot").strip()
+        description = str(description or "Najnovšie opravy a vylepšenia.").strip()
+        if len(description) > 800:
+            description = description[:797].rstrip() + "…"
+        self.release_title.setText(title)
+        self.release_description.setText(description)
+        self.adjustSize()
+
+    def show_below(self, button):
+        self.adjustSize()
+        anchor = button.mapToGlobal(QPoint(0, button.height() + 6))
+        screen = button.screen().availableGeometry()
+        x = min(max(anchor.x(), screen.left() + 8),
+                screen.right() - self.width() - 8)
+        y = anchor.y()
+        if y + self.height() > screen.bottom() - 8:
+            y = button.mapToGlobal(QPoint(0, -self.height() - 6)).y()
+        self.move(x, y)
+        self.show()
+        self.raise_()
+
+
 class _CheckWorker(QThread):
     """Calls check_for_update off the UI thread."""
     done = pyqtSignal(bool, object)  # (available, latest_tag_or_None)
@@ -156,7 +225,7 @@ class UpdateConfirmDialog(QDialog):
         latest_tag = _display_commit(str(latest_tag)) or str(latest_tag)
         self.setWindowTitle("Aktualizovať UltraPilot")
         self.setModal(True)
-        self.setFixedSize(500, 390)
+        self.setFixedSize(500, 340)
         # Match the application's default white ETS2LA-style surfaces.
         self.setStyleSheet(
             "UpdateConfirmDialog{background:#FFFFFF;}"
@@ -183,14 +252,11 @@ class UpdateConfirmDialog(QDialog):
         head.addLayout(col, stretch=1)
         lay.addLayout(head)
 
-        commit_title = QLabel(title or "Aktualizácia UltraPilot")
-        commit_title.setWordWrap(True)
-        commit_title.setStyleSheet("font-size:14px;font-weight:800;color:#111827;")
-        lay.addWidget(commit_title)
-        note_text = description or "Táto verzia obsahuje najnovšie opravy a vylepšenia."
+        # Release notes live in the hover card below the sidebar update button.
+        # This dialog is deliberately limited to download/install state.
         self.note = QLabel(
-            note_text + "\n\nNajprv sa bezpečne stiahne a overí. "
-            "Aplikácia sa zmení až po potvrdení inštalácie.")
+            "Najprv sa aktualizácia bezpečne stiahne a overí. Aplikácia sa "
+            "zmení až po potvrdení inštalácie.")
         self.note.setWordWrap(True)
         self.note.setStyleSheet("font-size:13px;color:#4B5563;background:#F9FAFB;border:1px solid #E5E7EB;border-radius:10px;padding:12px;")
         lay.addWidget(self.note)
@@ -314,6 +380,7 @@ class UpdateCheckerWidget(QWidget):
         self._download_worker = None
         self._install_worker = None
         self._update_dialog = None
+        self._update_available = False
         self._build()
         # Auto-check once shortly after launch (non-blocking).
         QTimer.singleShot(2500, self.check)
@@ -344,10 +411,12 @@ class UpdateCheckerWidget(QWidget):
         self.status_lbl.setWordWrap(True)
         lay.addWidget(self.status_lbl)
         # Button (full width, short label so it fits the narrow sidebar).
-        self.btn = QPushButton("Aktualizácia")
+        self.btn = HoverUpdateButton("Aktualizácia")
         self.btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._apply_btn_style()
         self.btn.clicked.connect(self.check)
+        self.changes_popover = UpdateChangesPopover(self)
+        self.btn.hovered.connect(self._on_update_hover)
         lay.addWidget(self.btn)
         # Progress bar on its own row below the button.
         self.progress = QProgressBar()
@@ -381,6 +450,8 @@ class UpdateCheckerWidget(QWidget):
     def check(self):
         if self._check_worker is not None and self._check_worker.isRunning():
             return
+        self._update_available = False
+        self.changes_popover.hide()
         self.btn.hide()
         self.spinner.show()
         self.status_lbl.setText("Kontrolujem aktualizácie…")
@@ -392,6 +463,7 @@ class UpdateCheckerWidget(QWidget):
         self.spinner.hide()
         self.btn.show()
         if latest is None:
+            self._update_available = False
             self.status_lbl.setText("Kontrola zlyhala")
             self.btn.setText("Skúsiť znova")
             self._apply_btn_style(update_available=False)
@@ -408,10 +480,12 @@ class UpdateCheckerWidget(QWidget):
             info = latest_commit_info()
             self._latest_title = info.get("title", "")
             self._latest_description = info.get("description", "")
+            self._update_available = True
+            self.changes_popover.set_changes(
+                self._latest_title, self._latest_description)
             # Remember the tag/SHA so the confirm dialog can show it.
             self._latest_tag = str(latest)
-            summary = self._latest_title or "Nová verzia UltraPilot"
-            self.status_lbl.setText("Commit " + str(latest) + "\n" + summary)
+            self.status_lbl.setText("Dostupná nová verzia")
             self.btn.setText("Aktualizovať")
             self._apply_btn_style(update_available=True)
             try:
@@ -420,6 +494,8 @@ class UpdateCheckerWidget(QWidget):
                 pass
             self.btn.clicked.connect(self._confirm_update)
         else:
+            self._update_available = False
+            self.changes_popover.hide()
             self.status_lbl.setText("aktuálna")
             self.btn.setText("Aktualizácia")
             self._apply_btn_style(update_available=False)
@@ -429,7 +505,14 @@ class UpdateCheckerWidget(QWidget):
                 pass
             self.btn.clicked.connect(self.check)
 
+    def _on_update_hover(self, entered):
+        if entered and self._update_available and self.btn.isVisible():
+            self.changes_popover.show_below(self.btn)
+        else:
+            self.changes_popover.hide()
+
     def _confirm_update(self):
+        self.changes_popover.hide()
         latest = getattr(self, "_latest_tag", None) or ""
         dlg = UpdateConfirmDialog(
             latest,
@@ -452,6 +535,10 @@ class UpdateCheckerWidget(QWidget):
             pass
         dlg.exec()
         self._update_dialog = None
+
+    def closeEvent(self, event):
+        self.changes_popover.close()
+        super().closeEvent(event)
 
     def _start_download(self):
         if (self._download_worker is not None
