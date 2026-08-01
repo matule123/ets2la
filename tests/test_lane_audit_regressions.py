@@ -130,6 +130,62 @@ class LaneGeometryAuditTests(unittest.TestCase):
                     for previous, current in zip(commands, commands[1:])),
                     0.16)
 
+    def test_real_broad_curve_lane_error_cannot_be_cancelled_until_late(self):
+        """Regression for the 16:08:21--23 drift-then-snap drive trace.
+
+        The captured truck reached 1.760 m from lane centre at 66 km/h while
+        the command remained 0.010.  Exercise both turn directions with the
+        opposing confirmed CTE on a measured 400 m-radius bend.  Recovery must
+        already point toward the lane centre before a large heading error can
+        develop; tight-prefab tuning and global limits are not involved.
+        """
+        for direction in (-1.0, 1.0):
+            route = Route(self._arc(direction, 400.0, 300.0))
+            position = route.points[50]
+            heading = self._path_heading(position, route.points[53])
+            adverse_cte = direction * 1.760
+            command = route.steering(
+                position, heading, 66.0 / 3.6,
+                cross_track_error_m=adverse_cte)
+            with self.subTest(direction=direction):
+                self.assertEqual(math.copysign(1.0, command), direction)
+                self.assertGreaterEqual(abs(command), 0.08)
+
+    def test_confirmed_lane_recovery_is_smooth_on_broad_curves_at_safe_speeds(self):
+        """Game-like 20 Hz replay starts 1.5 m off-centre in both bends."""
+        dt, wheelbase = 0.05, 5.0
+        for direction in (-1.0, 1.0):
+            for radius in (120.0, 220.0, 400.0):
+                speed = min(18.0, curve_speed_limit_ms(radius, 0.0))
+                route = Route(self._arc(direction, radius, 350.0))
+                x, z = route.points[0]
+                x += 1.50
+                heading = self._path_heading(
+                    route.points[0], route.points[2])
+                plugin = AutopilotPlugin.__new__(AutopilotPlugin)
+                plugin._last_steering = 0.0
+                errors, commands = [], []
+                for _ in range(int(250.0 / speed / dt)):
+                    index = route.tracking_index((x, z), heading)
+                    live_cte = route.cross_track_error(index, (x, z))
+                    target = route.steering(
+                        (x, z), heading, speed,
+                        cross_track_error_m=live_cte)
+                    plugin._last_steering = plugin._ramp_steering(target, dt)
+                    heading -= (speed / wheelbase
+                                * plugin._last_steering * 0.18 * dt)
+                    x += -math.sin(heading) * speed * dt
+                    z += -math.cos(heading) * speed * dt
+                    index = route.tracking_index((x, z), heading)
+                    errors.append(route.cross_track_error(index, (x, z)))
+                    commands.append(plugin._last_steering)
+                with self.subTest(direction=direction, radius=radius):
+                    self.assertLess(max(map(abs, errors)), 1.55)
+                    self.assertLess(abs(errors[-1]), 0.40)
+                    self.assertLessEqual(max(
+                        abs(current - previous) for previous, current
+                        in zip(commands, commands[1:])), 0.031)
+
     def test_live_lane_cte_replaces_not_duplicates_route_cte(self):
         route = Route([(0.0, 0.0), (0.0, 100.0), (0.0, 200.0)])
         # The geometric CTE is deliberately large and opposite to the supplied

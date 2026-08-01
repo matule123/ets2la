@@ -10,6 +10,31 @@ from core.navigation.navigation_intent import snapshot_matches_navigation_intent
 CONFIDENCE_THRESHOLD = 0.72
 
 
+def effective_lane_confidence(snapshot, live_match=None):
+    """Combine immutable path quality with current localisation quality.
+
+    ``snapshot['confidence']`` is the minimum measured when the route was
+    built.  A low initial locator score must not remain frozen for the whole
+    route after the same-revision live LaneMatch is centred again.  Geometry
+    confidence stays immutable; only the locator component may be refreshed.
+    Missing legacy metadata safely falls back to the published snapshot value.
+    """
+    snapshot = snapshot or {}
+    components = snapshot.get("confidence_components", {}) or {}
+    published = float(snapshot.get("confidence", 0.0) or 0.0)
+    trajectory = float(components.get("trajectory", published) or 0.0)
+    locator = float(components.get("locator", published) or 0.0)
+    live_match = live_match or {}
+    try:
+        same_revision = int(live_match.get("revision", -2) or -2) == int(
+            snapshot.get("revision", -1) or -1)
+    except (TypeError, ValueError, OverflowError):
+        same_revision = False
+    if same_revision and live_match.get("valid", True) is not False:
+        locator = float(live_match.get("confidence", locator) or 0.0)
+    return min(trajectory, locator)
+
+
 def _check(ok, reason=""):
     return {"ready": bool(ok), "reason": "" if ok else str(reason)}
 
@@ -30,7 +55,8 @@ def build_runtime_preflight(state, now=None):
         revision = int(snapshot.get("revision", -1) or -1)
         current_revision = int(state.get("lane_trajectory_revision", -2) or -2)
         snapshot_uids = tuple(snapshot.get("source_gps_uids", ()) or ())
-        confidence = float(snapshot.get("confidence", 0.0) or 0.0)
+        confidence = effective_lane_confidence(
+            snapshot, state.get("lane_match", {}) or {})
         points = snapshot.get("points", ()) or ()
         xyz_ok = bool(len(points) >= 2 and all(
             isinstance(point, (list, tuple)) and len(point) >= 3

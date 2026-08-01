@@ -568,11 +568,11 @@ class Route:
                         else 1.0 / abs(local_curvature))
         cte_gain = curve_cte_gain(local_radius, cte)
         if (has_confirmed_lane_error
-                and abs(local_curvature) < 1.0 / 500.0):
+                and abs(local_curvature) < 1.0 / 100.0):
             # On the straight immediately after a bend the old ±0.16 guard and
             # base Stanley gain could preserve a 1–1.7 m residual offset for
             # tens of metres. Scale recovery by *measured* displacement while
-            # leaving sub-35 cm localisation noise and every curve untouched.
+            # leaving sub-35 cm localisation noise and tight curves untouched.
             recovery_weight = _clamp(
                 (abs(cte) - 0.35) / 1.15, 0.0, 1.0)
             cte_gain *= 1.0 + 1.75 * recovery_weight
@@ -580,12 +580,12 @@ class Route:
             (cte_gain * cte) / (K_SOFT + v))
         feed_forward = (math.atan(TRUCK_WHEELBASE_M * local_curvature)
                         / NORMALIZED_STEERING_ANGLE_RAD)
-        # Heading/CTE is the calibrated normalized feedback correction; only
-        # the geometric Ackermann feed-forward needs the physical
-        # radians-per-controller-unit conversion above. Keeping the local
-        # feedback calibrated avoids amplifying two-metre map sampling noise.
-        steer = feed_forward + speed_gain(speed_ms) * (
-            K_HEADING * heading_error + cte_steer)
+        # Heading/CTE feedback stays deliberately damped: amplifying every
+        # sampled tangent or CTE through the physical Ackermann scale makes an
+        # S-bend hunt.  The confirmed-lane recovery gain above fixes the real
+        # broad-curve drift without changing tight prefab steering.
+        feedback = K_HEADING * heading_error + cte_steer
+        steer = feed_forward + speed_gain(speed_ms) * feedback
         # A fixed ±0.70 limit physically cannot follow a proven 25–40 m prefab
         # bend in the truck model (it bottoms out near a 40 m radius), which is
         # why the real exit replay ran wide into the verge. Grant additional

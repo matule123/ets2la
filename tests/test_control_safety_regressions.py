@@ -26,6 +26,7 @@ from core.navigation.route import (
     NORMALIZED_STEERING_ANGLE_RAD, TRUCK_WHEELBASE_M, Route, K_CTE,
     K_CTE_CURVE, curve_cte_gain, curve_speed_limit_ms,
 )
+from core.navigation.runtime_preflight import effective_lane_confidence
 from core.sdk.scs_controller_writer import SCSControlsWriter, _FIELDS, _SIZE
 from plugins.autopilot.main import (
     Plugin as AutopilotPlugin, _authority_reason_key,
@@ -117,6 +118,35 @@ def ready_navigation_state(**extra):
 
 
 class ControlSafetyRegressionTests(unittest.TestCase):
+    def test_live_same_revision_confidence_replaces_stale_build_locator_score(self):
+        # Real revision 10: the immutable LanePath scored 0.93, but the build
+        # happened while the rolling prefix charged the locator an off-route
+        # penalty and froze snapshot confidence at 0.676.  Once live
+        # localisation was centred, that stale number blocked N for 53 s.
+        state = ready_navigation_state(autopilot_active=False)
+        snapshot = state.values["lane_trajectory"]
+        snapshot.update({
+            "confidence": 0.676422763479866,
+            "confidence_components": {
+                "trajectory": 0.93,
+                "locator": 0.676422763479866,
+            },
+        })
+        state.set("lane_match", {
+            "revision": 7, "valid": True, "confidence": 0.94,
+            "lateral_error_m": 0.542, "heading_error_rad": 0.014,
+        })
+        self.assertAlmostEqual(
+            effective_lane_confidence(snapshot, state.get("lane_match")),
+            0.93)
+        self.assertEqual(lane_authority_rejection_reason(state, snapshot), "")
+
+        # The threshold is not weakened: a genuinely weak current match stays
+        # fail-closed even though the route geometry itself is excellent.
+        state.get("lane_match")["confidence"] = 0.70
+        self.assertIn("confidence", lane_authority_rejection_reason(
+            state, snapshot))
+
     def test_real_start_match_engages_once_and_stays_enabled(self):
         # Runtime capture 2026-07-29 09:13:06: lateral=1.1742428 m and
         # heading error=0.0127 rad. Engine said enabled, then the plugin's old

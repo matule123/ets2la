@@ -11,7 +11,19 @@ from core.navigation.navigation_intent import snapshot_matches_navigation_intent
 
 
 def _hud_segment_is_selected_context(kind, navigation_points):
-    """Hide only unselected prefab arms while a validated GPS lane is drawn."""
+    """Keep road and prefab surfaces; selected-route styling is separate.
+
+    Dropping every prefab ``lane`` whenever a GPS path existed removed the
+    actual road surface at junctions, roundabouts and road/prefab boundaries.
+    The renderer now keeps those topology-proven ribbons while suppressing
+    their individual bright outlines below, so they fill junctions without
+    recreating the former white-line tangle.
+    """
+    return kind in {"road", "lane"}
+
+
+def _hud_segment_has_bright_outline(kind, navigation_points):
+    """Only selected GPS geometry may outline prefab navCurves in white."""
     return not (kind == "lane" and len(navigation_points or ()) >= 2)
 
 # State → accent colour (left as-is; the whole HUD now lives on the left panel).
@@ -811,13 +823,10 @@ class UltraPilotHUD(QWidget):
                                   else 0)
                 except (TypeError, ValueError, IndexError):
                     continue
-                # A placed prefab can contain dozens of legal navCurves. When
-                # GPS authority is present, drawing every unselected arm turns
-                # a junction into the white-line tangle visible in the game
-                # capture. The authoritative nav_path below already paints the
-                # selected prefab lane and its two boundaries. Keep broad road
-                # approaches, but omit unrelated internal navCurves only while
-                # that validated selected corridor exists.
+                # Keep topology-proven prefab surfaces.  Their unselected
+                # outlines are suppressed later while the authoritative
+                # nav_path paints the selected lane, avoiding both junction
+                # holes and the old white-line tangle.
                 if not _hud_segment_is_selected_context(
                         kind, d.get("nav_path", [])):
                     continue
@@ -1020,6 +1029,13 @@ class UltraPilotHUD(QWidget):
                     marking_half))
 
             for (kind, _path_key), segments in display_paths.items():
+                if not _hud_segment_has_bright_outline(
+                        kind, d.get("nav_path", [])):
+                    # Prefab ribbons are useful as asphalt context, but their
+                    # many legal navCurve boundaries are not lane markings.
+                    # The selected revision is drawn immediately below with
+                    # its exact two boundaries.
+                    continue
                 edge_pen = QPen(
                     QColor(205, 211, 220, 230) if kind == "road"
                     else QColor(186, 199, 218, 215),

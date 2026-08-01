@@ -3,7 +3,9 @@ import math
 import time
 import numpy as np
 from sdk.base_plugin import BasePlugin
-from core.navigation.runtime_preflight import CONFIDENCE_THRESHOLD
+from core.navigation.runtime_preflight import (
+    CONFIDENCE_THRESHOLD, effective_lane_confidence,
+)
 from core.navigation.navigation_intent import snapshot_matches_navigation_intent
 from core.navigation.route import curve_speed_limit_ms
 
@@ -52,9 +54,6 @@ def lane_authority_rejection_reason(state, snapshot, now=None):
         confidence = float(snapshot.get("confidence", 0.0) or 0.0)
         if not math.isfinite(confidence):
             return "lane trajectory confidence is non-finite"
-        if confidence < MIN_LANE_TRAJECTORY_CONFIDENCE:
-            return (f"lane trajectory confidence {confidence:.6f} is below "
-                    f"{MIN_LANE_TRAJECTORY_CONFIDENCE:.2f}")
         snapshot_revision = int(snapshot.get("revision", -1) or -1)
         current_revision = int(state.get("lane_trajectory_revision", -2) or -2)
         if snapshot_revision != current_revision:
@@ -88,6 +87,12 @@ def lane_authority_rejection_reason(state, snapshot, now=None):
         if live_match.get("valid") is False:
             return str(live_match.get("failure_reason")
                        or "live lane localisation is temporarily unavailable")
+        confidence = effective_lane_confidence(snapshot, live_match)
+        if not math.isfinite(confidence):
+            return "lane authority confidence is non-finite"
+        if confidence < MIN_LANE_TRAJECTORY_CONFIDENCE:
+            return (f"lane authority confidence {confidence:.6f} is below "
+                    f"{MIN_LANE_TRAJECTORY_CONFIDENCE:.2f}")
         live_lane_id = live_match.get("active_lane_id")
         corridor = snapshot.get("lane_corridor", ()) or ()
         corridor_entry = next((entry for entry in corridor
