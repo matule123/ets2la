@@ -282,6 +282,22 @@ class Plugin(BasePlugin):
         self.tags.brake = round(float(self._last_brake), 2)
         self.tags.throttle = round(float(self._last_throttle), 2)
 
+    def _publish_automatic_disable(self, reason):
+        """Publish one atomic disable event for UI and main-console relay."""
+        reason = str(reason or "unknown safety reason")
+        seq = time.monotonic_ns()
+        self.sdk.shared_state.update_batch({
+            "autopilot_active": False,
+            "nav_active": False,
+            "nav_steering": 0.0,
+            "autopilot_disable_reason": reason,
+            "autopilot_log_event": {
+                "seq": seq,
+                "level": "WARNING",
+                "message": f"Autopilot automatically disabled: {reason}",
+            },
+        })
+
     def on_tick(self, delta_time: float):
         dt = max(delta_time, 1e-3)
         self.sdk.shared_state.set("autopilot_control_heartbeat", time.monotonic())
@@ -449,11 +465,7 @@ class Plugin(BasePlugin):
                 self._last_brake = 0.0
                 self._drive_engage_started = 0.0
                 self._reverse_recovery = False
-                self.sdk.shared_state.set("autopilot_active", False)
-                self.sdk.shared_state.set("nav_active", False)
-                self.sdk.shared_state.set("nav_steering", 0.0)
-                self.sdk.shared_state.set(
-                    "autopilot_disable_reason", authority_reason)
+                self._publish_automatic_disable(authority_reason)
                 logging.warning(
                     "Autopilot automatically disengaged after safety stop: %s",
                     authority_reason)
@@ -482,11 +494,7 @@ class Plugin(BasePlugin):
                 self._last_brake = 0.0
                 self._reverse_recovery = False
                 self._drive_engage_started = 0.0
-                self.sdk.shared_state.set("autopilot_active", False)
-                self.sdk.shared_state.set("nav_active", False)
-                self.sdk.shared_state.set("nav_steering", 0.0)
-                self.sdk.shared_state.set(
-                    "autopilot_disable_reason", "unexpected reverse gear")
+                self._publish_automatic_disable("unexpected reverse gear")
                 logging.warning(
                     "Autopilot automatically disengaged: unexpected reverse gear")
                 self.sdk.shared_state.set(

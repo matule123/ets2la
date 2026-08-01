@@ -8,7 +8,8 @@ from PyQt6.QtGui import QPainterPath
 from core.hud import (UltraPilotHUD, _continuous_lane_chunks,
                       _hud_segment_is_selected_context,
                       _lane_boundary_points, _ordered_display_path_runs,
-                      _rounded_screen_path, _variable_lane_boundary_points)
+                      _rounded_screen_path, _selected_lane_context,
+                      _variable_lane_boundary_points)
 from core.sdk.scs_sdk import SCSTelemetry
 from tests.test_lane_route_builder import SyntheticMap
 
@@ -154,6 +155,22 @@ class HudPoseStabilityTests(unittest.TestCase):
         chunks = _continuous_lane_chunks(samples)
         self.assertEqual(chunks, [samples[:2], samples[2:]])
 
+    def test_selected_lane_surface_keeps_validated_tail_behind_truck(self):
+        points = [(float(ahead), 0.0, 0.0)
+                  for ahead in range(-50, 61, 5)]
+        context, forward = _selected_lane_context(points)
+        self.assertEqual(context[0][0], -40.0)
+        self.assertEqual(context[-1][0], 60.0)
+        self.assertTrue(all(point[0] >= 0.5 for point in forward))
+        self.assertGreater(len(context), len(forward))
+
+    def test_selected_lane_surface_never_bridges_a_route_gap(self):
+        points = [(-10.0, 0.0, 0.0), (0.0, 0.0, 0.0),
+                  (5.0, 0.0, 0.0), (80.0, 0.0, 0.0)]
+        context, forward = _selected_lane_context(points)
+        self.assertEqual(context, points[:3])
+        self.assertEqual(forward, points[2:3])
+
     def test_live_trailer_heading_drives_articulation_across_wrap(self):
         data = {
             "trailer_attached": True,
@@ -200,6 +217,29 @@ class HudPoseStabilityTests(unittest.TestCase):
         zs = [point[1] for segment in segments
               for point in segment[:2]]
         self.assertLess(min(zs), -50.0)
+
+    def test_hud_component_is_anchored_to_revision_matched_lane(self):
+        synthetic = SyntheticMap()
+        synthetic.node(1, 0.0, 20.0)
+        synthetic.node(2, 0.0, -80.0)
+        synthetic.node(3, 0.25, 20.0, y=8.0)
+        synthetic.node(4, 0.25, -80.0, y=8.0)
+        lower_index = synthetic.road(1, 2)
+        upper_index = synthetic.road(3, 4)
+        upper_lane = synthetic.net._build_lane_segments(upper_index)[0]
+
+        # Horizontally the lower deck is marginally closer, but the live
+        # LaneId is authoritative for which connected component to render.
+        segments = synthetic.net.hud_segments_3d_near(
+            (0.0, 0.0), radius=120.0, altitude=8.0,
+            anchor_lane_id=upper_lane.lane_id)
+        self.assertTrue(segments)
+        upper_uid = synthetic.net._seg_road_uids[upper_index]
+        lower_uid = synthetic.net._seg_road_uids[lower_index]
+        keys = {segment[10].split(":", 1)[0] for segment in segments
+                if segment[2] == "road"}
+        self.assertIn(f"r{synthetic.net._road_segment_by_uid[upper_uid]}", keys)
+        self.assertNotIn(f"r{synthetic.net._road_segment_by_uid[lower_uid]}", keys)
 
     def test_hud_uses_offset_lane_carriageway_under_truck_model(self):
         synthetic = SyntheticMap()

@@ -157,6 +157,7 @@ class UltraPilotEngine:
         self._last_navigation_buffer_log = None
         self._had_game_destination = False
         self._last_navigation_log_seq = None
+        self._last_autopilot_log_seq = None
         self._last_runtime_preflight = 0.0
         self._last_camera_diagnostic = 0.0
         self._last_camera_diagnostic_log = 0.0
@@ -781,7 +782,18 @@ class UltraPilotEngine:
                 self._last_navigation_log_seq = nav_seq
                 message = str(nav_event.get("message", "Navigation update"))
                 level = str(nav_event.get("level", "INFO")).upper()
-                (logging.error if level == "ERROR" else logging.info)(message)
+                logger = (logging.error if level == "ERROR" else
+                          logging.warning if level == "WARNING" else
+                          logging.info)
+                logger(message)
+            autopilot_event = self.shared_state.get("autopilot_log_event") or {}
+            autopilot_seq = (autopilot_event.get("seq")
+                             if isinstance(autopilot_event, dict) else None)
+            if (autopilot_seq is not None
+                    and autopilot_seq != self._last_autopilot_log_seq):
+                self._last_autopilot_log_seq = autopilot_seq
+                logging.warning(str(autopilot_event.get(
+                    "message", "Autopilot automatically disabled")))
 
             # 1. Telemetry
             if self.telemetry.update():

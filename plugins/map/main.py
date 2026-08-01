@@ -1755,7 +1755,10 @@ class Plugin(BasePlugin):
             try:
                 altitude = float(self.sdk.get("truck_altitude", 0.0) or 0.0)
                 roads = self.road_net.hud_segments_3d_near(
-                    pos, radius=280.0, limit=950, altitude=altitude)
+                    pos, radius=280.0, limit=950, altitude=altitude,
+                    anchor_lane_id=(self._lane_match.lane_id
+                                    if self._lane_localization_current
+                                    and self._lane_match is not None else None))
                 payload = [[list(a), list(b), kind, lanes, divided, dash_on,
                             pillar, rail_post, half_width, suppress_markings,
                             path_key, path_index]

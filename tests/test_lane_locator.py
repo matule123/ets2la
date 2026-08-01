@@ -380,6 +380,50 @@ class LaneLocatorTests(unittest.TestCase):
         self.assertEqual(still_prefab.lane_id, prefab.lane_id)
         self.assertEqual(on_road.lane_id, road_out.lane_id)
 
+    def test_validated_path_transition_survives_trimmed_runtime_graph_edge(self):
+        """A rolling prefix must not erase an already validated transition.
+
+        This reproduces the August 1 runtime failure: the match was centred
+        (CTE -0.009 m, heading error 0.0 deg), then the generic runtime graph
+        no longer contained the next edge and localisation became unavailable.
+        The immediate ordered LanePath neighbour is sufficient proof, without
+        exposing any later segment or relaxing distance/heading/height gates.
+        """
+        road_in = path_lane(701, 1, 2, (
+            (0.0, 0.0, 0.0), (0.0, 0.0, 20.0)))
+        road_out = path_lane(702, 2, 3, (
+            (0.0, 0.0, 20.0), (0.0, 0.0, 55.0)))
+        network = TransitionNetwork((road_in, road_out), connected=())
+        locator = LaneLocator(network)
+        first = locator.locate(
+            (0.0, 0.0, 18.0), math.pi, (1, 2, 3),
+            authoritative_segments=(road_in, road_out))
+        self.assertEqual(first.lane_id, road_in.lane_id)
+
+        # The SDK has trimmed UID 1 and the runtime graph has no registered
+        # edge, but the truck advances continuously onto the next validated
+        # segment.
+        transitioned = locator.locate(
+            (0.0, 0.0, 24.0), math.pi, (2, 3),
+            authoritative_segments=(road_in, road_out))
+        self.assertIsNotNone(transitioned)
+        self.assertEqual(transitioned.lane_id, road_out.lane_id)
+        self.assertEqual(transitioned.switch_reason, "topology_transition")
+
+        # The proof remains local: a non-neighbouring later segment cannot be
+        # selected merely because it is geometrically close.
+        remote = path_lane(703, 3, 4, (
+            (0.1, 0.0, 24.0), (0.1, 0.0, 45.0)))
+        locator = LaneLocator(TransitionNetwork((road_in, remote), connected=()))
+        locator.locate((0.0, 0.0, 18.0), math.pi, (1, 2, 3, 4),
+                       authoritative_segments=(road_in, road_out, remote))
+        local = locator.locate(
+            (0.1, 0.0, 25.0), math.pi, (2, 3, 4),
+            authoritative_segments=(road_in, road_out, remote))
+        self.assertIsNotNone(local)
+        self.assertEqual(local.lane_id, road_out.lane_id)
+        self.assertNotEqual(local.lane_id, remote.lane_id)
+
     def test_authoritative_path_candidates_are_progress_bounded_and_read_only(self):
         current = path_lane(601, 1, 2, (
             (1.0, 0.0, 0.0), (1.0, 0.0, 20.0)))

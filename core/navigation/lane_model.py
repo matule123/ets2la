@@ -462,6 +462,20 @@ class LaneLocator:
         path_signature, path_anchor, authoritative_window = (
             self._authoritative_window(
                 authoritative_segments, previous, (px, py, pz)))
+        # ``LanePath`` is already the connected, direction-correct and
+        # elevation-validated route.  The rolling SDK buffer can trim the UID
+        # that originally registered a road/prefab transition in the runtime
+        # lane graph while the truck is crossing it.  Preserve only immediate
+        # ordered neighbours around the committed path occurrence as an
+        # additional connectivity proof.  This is deliberately occurrence-
+        # bounded: a repeated LaneId on a later roundabout lap is never made a
+        # candidate or a connection here.
+        authoritative_connections = {
+            (first.lane_id, second.lane_id)
+            for (first_index, first), (second_index, second)
+            in zip(authoritative_window, authoritative_window[1:])
+            if second_index == first_index + 1
+        }
         for _path_index, candidate in authoritative_window:
             if candidate.lane_id in candidate_ids:
                 continue
@@ -598,8 +612,17 @@ class LaneLocator:
                         - lane.lane_id.lane_index) == 1
                 and self._adjacent_road_lane_change(
                     previous.lane_id, lane.lane_id) is None)
+            validated_path_transition = bool(
+                previous is not None
+                and (previous.lane_id, lane.lane_id)
+                    in authoritative_connections
+                # A real lateral lane change still needs progressive crossing
+                # evidence; adjacency in a rebuilt path must not bypass it.
+                and self._adjacent_road_lane_change(
+                    previous.lane_id, lane.lane_id) is None)
             continuous = (previous is None
                           or lane.lane_id == previous.lane_id
+                          or validated_path_transition
                           or (not invalid_adjacent_change
                               and self.network.lanes_connected(
                                   previous.lane_id, lane.lane_id)))
@@ -687,8 +710,10 @@ class LaneLocator:
                 reason = "hysteresis_hold"
             elif chosen[1].lane_id == previous.lane_id:
                 reason = "same_lane"
-            elif self.network.lanes_connected(previous.lane_id,
-                                              chosen[1].lane_id):
+            elif ((previous.lane_id, chosen[1].lane_id)
+                    in authoritative_connections
+                  or self.network.lanes_connected(previous.lane_id,
+                                                  chosen[1].lane_id)):
                 reason = "topology_transition"
             if not adjacent_change and not diagnostic_mode:
                 self._lane_change_evidence = None

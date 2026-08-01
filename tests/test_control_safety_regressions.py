@@ -184,6 +184,11 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         self.assertEqual(sum("automatically disengaged" in line
                              for line in captured.output), 1)
         self.assertNotIn("1000000.00", "\n".join(captured.output))
+        event = state.get("autopilot_log_event")
+        self.assertEqual(event["level"], "WARNING")
+        self.assertEqual(
+            event["message"],
+            "Autopilot automatically disabled: live lane localization unavailable")
 
     def test_engagement_gate_is_derived_from_lane_width(self):
         self.assertAlmostEqual(engagement_lateral_limit({"lane_width_m": 4.5}),

@@ -234,6 +234,43 @@ def _continuous_lane_chunks(points, max_gap=8.0):
     return chunks
 
 
+def _selected_lane_context(points, behind_m=40.0, ahead_m=210.0,
+                           max_join_m=40.0):
+    """Return continuous selected-lane context around the ego position.
+
+    The route highlight is still drawn only in front of the truck, but its
+    asphalt and lane edges need a short validated tail behind it. Otherwise a
+    temporarily incomplete broad road mesh leaves the truck floating at the
+    bottom of the HUD. No interpolation or cross-gap join is performed.
+    """
+    points = list(points or ())
+    if not points:
+        return [], []
+    closest = min(range(len(points)),
+                  key=lambda index: math.hypot(points[index][0],
+                                               points[index][1]))
+    if math.hypot(points[closest][0], points[closest][1]) > 12.0:
+        return [], []
+    first = closest
+    while first > 0:
+        prior = points[first - 1]
+        current = points[first]
+        if prior[0] < -float(behind_m) or math.dist(prior, current) > max_join_m:
+            break
+        first -= 1
+    context = []
+    for point in points[first:]:
+        if point[0] < -float(behind_m):
+            continue
+        if point[0] > float(ahead_m):
+            break
+        if context and math.dist(point, context[-1]) > max_join_m:
+            break
+        context.append(point)
+    forward = [point for point in context if 0.5 <= point[0] <= ahead_m]
+    return context, forward
+
+
 def _car_colour(v):
     """Stable (body, roof) colour pair for a vehicle, keyed on its id."""
     vid = v.get("id", 0) or 0
@@ -1014,27 +1051,10 @@ class UltraPilotHUD(QWidget):
                     float(point[0]), float(point[2]))
                 transformed.append((ahead, lateral,
                                     float(point[1]) - d["altitude"]))
-            # Start at the route point nearest to the truck. Never force a line
-            # from (0, 0) to a distant/stale GPS node: that created the giant
-            # horizontal/diagonal blue strokes in the screenshot.
-            local_path = []
-            if transformed:
-                closest = min(range(len(transformed)),
-                              key=lambda i: math.hypot(transformed[i][0],
-                                                       transformed[i][1]))
-                candidate = transformed[closest:]
-                if (not candidate or math.hypot(candidate[0][0],
-                                                candidate[0][1]) > 12.0):
-                    candidate = []
-                for point in candidate:
-                    if point[0] < -2.0:
-                        continue
-                    if local_path:
-                        gap = math.dist(point, local_path[-1])
-                        if gap > 40.0:
-                            break
-                    local_path.append(point)
-            raw = [point for point in local_path if 0.5 <= point[0] <= 210.0]
+            # Keep a short, topology-validated tail behind the truck for the
+            # selected lane surface. The blue guidance remains forward-only.
+            # Never force a line to a distant/stale GPS point or bridge a gap.
+            lane_context, raw = _selected_lane_context(transformed)
             # Prefab routes are already densely sampled from their exact
             # Hermite curves.  Re-running Catmull-Rom here can overshoot the
             # circle and visually cut across the middle of a roundabout.
@@ -1045,7 +1065,7 @@ class UltraPilotHUD(QWidget):
             lanes = max(1, d.get("lanes", 2))
             HALF = max(4.0, min(16.0, lanes * 3.6 / 2 + 1.5))
 
-            if len(al) >= 2:
+            if len(lane_context) >= 2:
                 # 1) Filled asphalt ribbon (left edge → right edge), curving.
                 # Nearby map geometry already supplies the road boundaries.
                 # Keep the selected path as one clean blue line; a second
@@ -1059,8 +1079,24 @@ class UltraPilotHUD(QWidget):
                 half_lane = max(1.2, min(3.25,
                                         float(d.get("lane_width_m", 4.5)) * .5))
                 qp.setBrush(Qt.BrushStyle.NoBrush)
-                for chunk in _continuous_lane_chunks(al):
+                for chunk in _continuous_lane_chunks(lane_context):
                     left, right = _lane_boundary_points(chunk, half_lane)
+                    projected_pairs = [
+                        (self._project(*left_point[:2], view, left_point[2]),
+                         self._project(*right_point[:2], view, right_point[2]))
+                        for left_point, right_point in zip(left, right)
+                    ]
+                    projected_pairs = [pair for pair in projected_pairs
+                                       if pair[0] is not None
+                                       and pair[1] is not None]
+                    projected_left = [pair[0] for pair in projected_pairs]
+                    projected_right = [pair[1] for pair in projected_pairs]
+                    if len(projected_left) >= 2 and len(projected_right) >= 2:
+                        qp.setPen(Qt.PenStyle.NoPen)
+                        qp.setBrush(QColor(34, 36, 40, 255))
+                        qp.drawPolygon(QPolygonF(
+                            projected_left + list(reversed(projected_right))))
+                    qp.setBrush(Qt.BrushStyle.NoBrush)
                     qp.setPen(QPen(QColor(186, 199, 218, 205), 2.3,
                                    Qt.PenStyle.SolidLine,
                                    Qt.PenCapStyle.RoundCap,
@@ -1072,6 +1108,8 @@ class UltraPilotHUD(QWidget):
                         if len(projected) >= 2:
                             qp.drawPath(_rounded_screen_path(projected))
 
+            if len(al) >= 2:
+                for chunk in _continuous_lane_chunks(al):
                     projected = [self._project(a, l, view, height)
                                  for a, l, height in chunk]
                     projected = [p for p in projected if p is not None]

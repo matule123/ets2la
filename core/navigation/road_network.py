@@ -893,7 +893,8 @@ class RoadNetwork:
         return points
 
     def hud_segments_3d_near(self, pos, radius: float = 280.0, limit: int = 950,
-                             altitude=None, connected_only: bool = True):
+                             altitude=None, connected_only: bool = True,
+                             anchor_lane_id=None):
         """Curved road segments with elevation for the perspective HUD."""
         if not self.loaded or not pos:
             return []
@@ -924,7 +925,16 @@ class RoadNetwork:
                     endpoint_set = set(instance[1])
                     for uid in endpoint_set:
                         prefab_links.setdefault(uid, set()).update(endpoint_set)
-        start_index = self._nearest_segment_index(pos)
+        # Anchor the component to the live, revision-matched LaneId whenever
+        # it is an ordinary road lane. Pure 2-D nearest-road selection can
+        # choose an unconnected parallel road or the deck below an overpass;
+        # the real carriageway then disappears around/behind the truck in the
+        # HUD. Prefab LaneIds intentionally fall back to proximity because
+        # their ``road_uid`` identifies a placed prefab, not a road item.
+        anchor_road_uid = getattr(anchor_lane_id, "road_uid", None)
+        start_index = self._road_segment_by_uid.get(anchor_road_uid)
+        if start_index not in candidate_indices:
+            start_index = self._nearest_segment_index(pos)
         if connected_only and start_index in candidate_indices:
             node_roads = {}
             for index in candidate_indices:
