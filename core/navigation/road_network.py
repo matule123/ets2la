@@ -3775,6 +3775,7 @@ class RoadNetwork:
         """Load compact display-only city, company and POI landmarks."""
         self._map_feature_grid = {}
         self._map_feature_count = 0
+        seen_features = set()
 
         def add(x, z, kind, icon="", label=""):
             try:
@@ -3783,7 +3784,13 @@ class RoadNetwork:
                     return
             except (TypeError, ValueError, OverflowError):
                 return
-            feature = (x, z, str(kind), str(icon or ""), str(label or ""))
+            kind = str(kind)
+            icon = str(icon or "")
+            marker = (round(x / 3.0), round(z / 3.0), kind, icon)
+            if marker in seen_features:
+                return
+            seen_features.add(marker)
+            feature = (x, z, kind, icon, str(label or ""))
             self._map_feature_grid.setdefault(self._cell(x, z), []).append(feature)
             self._map_feature_count += 1
 
@@ -3807,23 +3814,14 @@ class RoadNetwork:
                         company_names.get(token) or token.upper())
 
             pois_path = _find_json(data_dir, "pois")
-            seen_pois = set()
             if pois_path:
                 for item in _loadf(pois_path):
                     if not isinstance(item, dict):
                         continue
-                    try:
-                        marker = (round(float(item.get("x")) / 3.0),
-                                  round(float(item.get("y")) / 3.0),
-                                  str(item.get("icon") or item.get("type") or ""))
-                    except (TypeError, ValueError, OverflowError):
-                        continue
-                    if marker in seen_pois:
-                        continue
-                    seen_pois.add(marker)
                     add(item.get("x"), item.get("y"),
                         str(item.get("type") or "poi"),
-                        str(item.get("icon") or ""), "")
+                        str(item.get("icon") or ""),
+                        str(item.get("label") or ""))
 
             cities_path = _find_json(data_dir, "cities")
             if cities_path:

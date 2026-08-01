@@ -1,5 +1,6 @@
 import math
 import time
+from datetime import datetime, timedelta
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
@@ -9,6 +10,22 @@ from PyQt6.QtGui import QPainter, QColor, QPen, QPolygonF, QPainterPath
 from PyQt6.QtCore import (Qt, QTimer, QPointF, QPoint, QRectF, QThread,
                           pyqtSignal)
 from core.navigation.navigation_intent import snapshot_matches_navigation_intent
+
+
+def navigation_trip_summary(state, now=None):
+    """Return truthful arrival/minutes/km values from SCS route telemetry."""
+    try:
+        distance_m = max(0.0, float(state.get("game_route_distance", 0.0) or 0.0))
+        route_seconds = max(0.0, float(state.get("game_route_time", 0.0) or 0.0))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if distance_m <= 0.0 and route_seconds <= 0.0:
+        return None
+    now = now or datetime.now()
+    arrival = now + timedelta(seconds=route_seconds)
+    minutes = max(0, int(math.ceil(route_seconds / 60.0)))
+    distance_km = max(0, int(round(distance_m / 1000.0)))
+    return arrival.strftime("%H:%M"), minutes, distance_km
 
 
 def live_map_navigation_points(state, now=None):
@@ -107,7 +124,7 @@ class MapView(QWidget):
         self._pal = None         # set by the page (or a default below)
         # A slightly wider initial field matches the navigation-map reference
         # and uses the broad, display-only 1.2 km scene from the map process.
-        self.zoom_radius = 650.0
+        self.zoom_radius = 800.0
         self.pan_world = [0.0, 0.0]
         self._drag_at = None
         self.setMinimumHeight(300)
@@ -122,9 +139,19 @@ class MapView(QWidget):
         self.turn_banner = QLabel("", self)
         self.turn_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.turn_banner.setStyleSheet(
-            "background:#119B5B;color:white;border:none;border-radius:12px;"
-            "padding:12px 22px;font-size:20px;font-weight:800;")
+            "background:#109B58;color:white;border:1px solid #20AE6C;"
+            "border-radius:12px;padding:14px 25px;font-size:24px;font-weight:800;")
+        self.turn_banner.setMinimumSize(270, 68)
         self.turn_banner.hide()
+        self.trip_panel = QLabel("", self)
+        self.trip_panel.setObjectName("LiveMapTripPanel")
+        self.trip_panel.setTextFormat(Qt.TextFormat.RichText)
+        self.trip_panel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.trip_panel.setFixedSize(310, 76)
+        self.trip_panel.setStyleSheet(
+            "background:rgba(12,16,19,238);color:#F2F4F5;"
+            "border:1px solid #3B4146;border-radius:12px;padding:3px;")
+        self.trip_panel.hide()
         self.map_credit = QLabel("UltraPilot Maps", self)
         self.map_credit.setStyleSheet(
             "background:transparent;color:rgba(220,223,226,115);"
@@ -176,12 +203,16 @@ class MapView(QWidget):
         self.turn_banner.move(
             max(54, (self.width() - self.turn_banner.width()) // 2), 14)
         self.turn_banner.raise_()
+        self.trip_panel.move(
+            max(12, (self.width() - self.trip_panel.width()) // 2),
+            max(12, self.height() - self.trip_panel.height() - 18))
+        self.trip_panel.raise_()
         self.empty_state.move(max(14, (self.width() - self.empty_state.width()) // 2),
                               max(52, (self.height() - self.empty_state.height()) // 2))
         self.empty_state.raise_()
 
     def reset_view(self):
-        self.zoom_radius = 650.0
+        self.zoom_radius = 800.0
         self.pan_world[:] = [0.0, 0.0]
         self.update()
 
@@ -265,7 +296,7 @@ class MapView(QWidget):
 
     def set_scene_polygons(self, payload):
         polygons = []
-        for item in (payload or [])[:1400]:
+        for item in (payload or [])[:1800]:
             try:
                 points = []
                 for point in item[0]:
@@ -286,7 +317,7 @@ class MapView(QWidget):
 
     def set_scene_features(self, payload):
         features = []
-        for item in (payload or [])[:800]:
+        for item in (payload or [])[:1000]:
             try:
                 x, z = float(item[0]), float(item[1])
                 if not math.isfinite(x) or not math.isfinite(z):
@@ -322,6 +353,7 @@ class MapView(QWidget):
             return
 
         self.turn_banner.hide()
+        self.trip_panel.hide()
         pts = [point for point in (
             self._to_xz(point)
             for point in live_map_navigation_points(self.state))
@@ -368,10 +400,10 @@ class MapView(QWidget):
             qp.drawPolygon(QPolygonF([tip, left, right]))
 
     def _paint_map(self, qp, w, h, truck, heading):
-        """Layered live map ported from truckermudgeon/maps.
+        """Original Qt renderer using the reference map's visual hierarchy.
 
-        The palette and ordering mirror ``GameMapStyle.tsx``: prefab map-area
-        polygons, road casing, road fill, route and finally POI symbols.
+        It draws prefab map areas, road casing, road fill, the authoritative
+        route and finally locally rendered POI symbols without a web runtime.
         """
         radius = self.zoom_radius
         scale = (min(w, h) - 20) / (2 * radius)
@@ -383,8 +415,8 @@ class MapView(QWidget):
             sy = h / 2 - (cz - p[1]) * scale   # flip Z so north is up
             return QPointF(sx, sy)
 
-        # Exact dark MapArea palette from the downloaded maps renderer.  The
-        # geometry is made of real placed-prefab neighbour loops.
+        # High-contrast dark map-area palette.  Geometry comes from real,
+        # placed-prefab neighbour loops in the selected game dataset.
         map_area_colours = {
             0: QColor.fromHsl(200, 5, 92),
             1: QColor.fromHsl(38, 64, 89),
@@ -405,6 +437,10 @@ class MapView(QWidget):
                 continue
             qp.setBrush(map_area_colours.get(
                 polygon["colour"], QColor("#30302F")))
+            qp.setPen(QPen(QColor(119, 119, 119, 85), 0.8,
+                           Qt.PenStyle.SolidLine,
+                           Qt.PenCapStyle.RoundCap,
+                           Qt.PenJoinStyle.RoundJoin))
             qp.drawPolygon(QPolygonF([to_screen(point) for point in points]))
 
         visible = []
@@ -417,7 +453,7 @@ class MapView(QWidget):
                 continue
             visible.append((segment, to_screen(a), to_screen(b)))
 
-        # Exact dark road palette from GameMapStyle.tsx: [fill, casing].
+        # Dark navigation-map road palette: [fill, casing].
         road_colours = {
             "freeway": (QColor("#95813E"), QColor("#372F21")),
             "divided": (QColor("#3C4043"), QColor("#4C5043")),
@@ -481,6 +517,23 @@ class MapView(QWidget):
         else:
             self.turn_banner.hide()
 
+        trip = navigation_trip_summary(self.state)
+        if trip is not None:
+            arrival, minutes, kilometres = trip
+            self.trip_panel.setText(
+                "<table width='292' cellspacing='0' cellpadding='2'><tr>"
+                f"<td align='center'><b style='font-size:18px'>{arrival}</b><br>"
+                "<span style='color:#AEB5BC;font-size:11px'>príchod</span></td>"
+                f"<td align='center'><b style='font-size:18px'>{minutes}</b><br>"
+                "<span style='color:#AEB5BC;font-size:11px'>minút</span></td>"
+                f"<td align='center'><b style='font-size:18px'>{kilometres}</b><br>"
+                "<span style='color:#AEB5BC;font-size:11px'>km</span></td>"
+                "</tr></table>")
+            self.trip_panel.show()
+            self.trip_panel.raise_()
+        else:
+            self.trip_panel.hide()
+
         # Crisp maps-style position marker at the exact telemetry position.
         c = to_screen(truck)
         fx, fz = -math.sin(heading), -math.cos(heading)
@@ -513,8 +566,39 @@ class MapView(QWidget):
             "dealer": QColor("#D29B13"), "garage": QColor("#1675C1"),
             "train": QColor("#1675C1"), "ferry": QColor("#1675C1"),
             "toll": QColor("#00A84F"), "weigh": QColor("#7D8B95"),
+            "viewpoint": QColor("#8D43C7"), "photo": QColor("#8D43C7"),
+            "recruit": QColor("#1675C1"), "agency": QColor("#1675C1"),
         }
         occupied = []
+        # Company anchors are exact exported positions. Give their industrial
+        # grounds a restrained footprint layer before drawing labels/icons.
+        # This is presentation-only and never enters routing or localisation.
+        for feature in self.scene_features:
+            if feature["kind"].lower() != "company":
+                continue
+            x, z = feature["pos"]
+            if abs(x-cx) > radius*1.35 or abs(z-cz) > radius*1.35:
+                continue
+            point = to_screen((x, z))
+            seed = sum(ord(char) for char in feature["icon"])
+            for block in range(3 + seed % 3):
+                phase = (seed * 0.17) + block * 1.91
+                distance = (13.0 + block * 7.0) * max(.65, scale)
+                centre = QPointF(
+                    point.x() + math.cos(phase) * distance,
+                    point.y() + math.sin(phase) * distance)
+                width = max(8.0, min(30.0,
+                    (18.0 + (seed + block * 7) % 15) * scale))
+                height = max(6.0, min(20.0,
+                    (11.0 + (seed + block * 5) % 10) * scale))
+                qp.save()
+                qp.translate(centre)
+                qp.rotate(((seed + block * 11) % 9 - 4) * 5.0)
+                qp.setPen(QPen(QColor("#413B32"), 0.8))
+                qp.setBrush(QColor("#2D2C2A"))
+                qp.drawRoundedRect(QRectF(-width / 2, -height / 2,
+                                          width, height), 1.5, 1.5)
+                qp.restore()
         for feature in self.scene_features:
             x, z = feature["pos"]
             if abs(x-cx) > radius*1.35 or abs(z-cz) > radius*1.35:
@@ -542,20 +626,24 @@ class MapView(QWidget):
                    abs(point.y()-other.y()) < 17 for other in occupied):
                 continue
             occupied.append(point)
-            size = 13 if scale < .55 else 16
+            size = 15 if scale < .55 else 18
             rect_x, rect_y = point.x()-size/2, point.y()-size/2
             qp.setPen(QPen(QColor("#F3F5F7"), 1.0))
             qp.setBrush(colour)
             qp.drawRoundedRect(int(rect_x), int(rect_y), size, size, 2, 2)
             self._paint_feature_symbol(
                 qp, QRectF(rect_x, rect_y, size, size), icon, kind)
-            if kind == "company" and label and radius <= 650:
-                qp.setPen(QColor("#DCD9D2"))
+            if label and ((kind == "company" and radius <= 950)
+                          or kind in ("landmark", "viewpoint")):
                 font = qp.font()
                 font.setBold(True)
-                font.setPointSize(7)
+                font.setPointSize(8 if kind == "company" else 7)
                 qp.setFont(font)
-                qp.drawText(QPointF(point.x()+size/2+3, point.y()+3), label)
+                label_at = QPointF(point.x()+size/2+4, point.y()+3)
+                qp.setPen(QPen(QColor("#090B0C"), 3.0))
+                qp.drawText(label_at, label)
+                qp.setPen(QColor("#ECEAE4"))
+                qp.drawText(label_at, label)
 
     @staticmethod
     def _paint_feature_symbol(qp, rect, icon, kind):
@@ -610,6 +698,21 @@ class MapView(QWidget):
                         QPointF(x+w*.80, y+h*.29))
             qp.drawLine(QPointF(x+w*.36, y+h*.29),
                         QPointF(x+w*.36, y+h*.72))
+        elif any(value in key for value in ("viewpoint", "photo", "sight")):
+            qp.drawRoundedRect(QRectF(x+w*.20, y+h*.30, w*.60, h*.46),
+                               w*.06, w*.06)
+            qp.drawEllipse(QPointF(x+w*.50, y+h*.53), w*.14, w*.14)
+            qp.drawLine(QPointF(x+w*.30, y+h*.30),
+                        QPointF(x+w*.39, y+h*.20))
+            qp.drawLine(QPointF(x+w*.39, y+h*.20),
+                        QPointF(x+w*.55, y+h*.20))
+        elif any(value in key for value in ("recruit", "agency")):
+            qp.drawEllipse(QPointF(x+w*.50, y+h*.34), w*.13, w*.13)
+            qp.drawArc(QRectF(x+w*.25, y+h*.45, w*.50, h*.38), 0, 180*16)
+            qp.drawLine(QPointF(x+w*.70, y+h*.28),
+                        QPointF(x+w*.82, y+h*.28))
+            qp.drawLine(QPointF(x+w*.76, y+h*.22),
+                        QPointF(x+w*.76, y+h*.34))
         elif kind == "company":
             roof = QPainterPath(QPointF(x+w*.18, y+h*.43))
             roof.lineTo(x+w*.50, y+h*.20)

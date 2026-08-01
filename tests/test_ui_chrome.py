@@ -281,7 +281,8 @@ class UiChromeTests(unittest.TestCase):
         self.assertEqual(page.view.scene_polygons[0]["colour"], 2)
         self.assertEqual(page.view.scene_features[0]["icon"], "gas_ico")
         self.assertEqual(page._last_live_map_scene_revision, 9)
-        self.assertEqual(page.view.zoom_radius, 650.0)
+        self.assertEqual(page.view.zoom_radius, 800.0)
+        self.assertEqual(page.view.trip_panel.objectName(), "LiveMapTripPanel")
         page.close()
 
     def test_plugin_toggle_is_persisted_for_the_next_run(self):

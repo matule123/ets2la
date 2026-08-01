@@ -1,13 +1,24 @@
 import unittest
+from datetime import datetime
 from unittest.mock import patch
 
 from PyQt6.QtCore import QRectF
 
 from core.navigation.road_network import RoadNetwork
-from UI.map_page import MapView
+from UI.map_page import MapView, navigation_trip_summary
 
 
 class LiveMapSceneTests(unittest.TestCase):
+    def test_navigation_trip_panel_uses_real_route_telemetry(self):
+        summary = navigation_trip_summary({
+            "game_route_distance": 469_400.0,
+            "game_route_time": 27 * 60.0,
+        }, now=datetime(2026, 7, 30, 22, 1))
+        self.assertEqual(summary, ("22:28", 27, 469))
+        self.assertIsNone(navigation_trip_summary({
+            "game_route_distance": 0.0, "game_route_time": 0.0,
+        }))
+
     def test_loading_statistics_deduplicate_spatial_prefab_instances(self):
         network = RoadNetwork()
         instance = ("junction", (1, 2, 3), 0, True)
@@ -33,6 +44,8 @@ class LiveMapSceneTests(unittest.TestCase):
         for icon, kind in (("gas_ico", "facility"),
                            ("service_ico", "facility"),
                            ("parking_ico", "facility"),
+                           ("viewpoint_ico", "viewpoint"),
+                           ("recruitment_ico", "facility"),
                            ("", "company")):
             MapView._paint_feature_symbol(painter, rect, icon, kind)
         self.assertNotIn("drawText", painter.calls)
@@ -105,7 +118,9 @@ class LiveMapSceneTests(unittest.TestCase):
             ],
             "pois": [
                 {"x": 12.0, "y": 21.0, "type": "facility",
-                 "icon": "gas_ico"},
+                 "icon": "gas_ico", "label": "Central fuel"},
+                {"x": 10.0, "y": 20.0, "type": "company",
+                 "icon": "acme", "label": "ACME duplicate"},
             ],
             "cities": [
                 {"x": 14.0, "y": 19.0, "token": "town",
@@ -121,6 +136,8 @@ class LiveMapSceneTests(unittest.TestCase):
         features = network.map_features_near((10.0, 20.0), radius=50.0)
         self.assertEqual({feature[2] for feature in features},
                          {"company", "facility", "city"})
+        self.assertIn("Central fuel", {feature[4] for feature in features})
+        self.assertEqual(sum(feature[2] == "company" for feature in features), 1)
         self.assertEqual(network.loaded, True)
 
 
