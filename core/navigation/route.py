@@ -58,6 +58,12 @@ K_CTE_CURVE = 1.80        # hold the mapped lane centre against curve cutting
 K_SOFT = 1.0              # softening constant → CTE term never explodes at v=0
 TRUCK_WHEELBASE_M = 5.0
 NORMALIZED_STEERING_ANGLE_RAD = 0.18
+# Calibrated conversion of Stanley's feedback angle to the normalized SCS
+# steering input. The former implicit factor was 0.18 (feedback radians were
+# effectively treated as controller units), which the real trace proves too
+# weak; a full 1.0 physical conversion hunts on sampled S-curves. Closed-loop
+# sweeps across 0--90 km/h select this bounded response.
+FEEDBACK_STEERING_RESPONSE = 0.21
 STEERING_CURVATURE_SPAN_M = 6.0
 STEERING_PREVIEW_MIN_M = 0.5
 STEERING_PREVIEW_MAX_M = 4.0
@@ -584,7 +590,9 @@ class Route:
         # sampled tangent or CTE through the physical Ackermann scale makes an
         # S-bend hunt.  The confirmed-lane recovery gain above fixes the real
         # broad-curve drift without changing tight prefab steering.
-        feedback = K_HEADING * heading_error + cte_steer
+        feedback = (FEEDBACK_STEERING_RESPONSE
+                    * (K_HEADING * heading_error + cte_steer)
+                    / NORMALIZED_STEERING_ANGLE_RAD)
         steer = feed_forward + speed_gain(speed_ms) * feedback
         # A fixed ±0.70 limit physically cannot follow a proven 25–40 m prefab
         # bend in the truck model (it bottoms out near a 40 m radius), which is

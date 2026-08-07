@@ -15,7 +15,8 @@ from core.navigation.lane_model import (
 from core.navigation.lane_trajectory import build_lane_trajectory
 from core.navigation.road_network import RoadNetwork
 from core.navigation.route import (
-    NORMALIZED_STEERING_ANGLE_RAD, TRUCK_WHEELBASE_M, Route,
+    FEEDBACK_STEERING_RESPONSE, NORMALIZED_STEERING_ANGLE_RAD,
+    TRUCK_WHEELBASE_M, Route,
     curve_speed_limit_ms,
 )
 from plugins.autopilot.main import Plugin as AutopilotPlugin
@@ -150,6 +151,25 @@ class LaneGeometryAuditTests(unittest.TestCase):
             with self.subTest(direction=direction):
                 self.assertEqual(math.copysign(1.0, command), direction)
                 self.assertGreaterEqual(abs(command), 0.08)
+
+    def test_real_trace_lane_error_has_explicit_controller_unit_response(self):
+        """The 16:59 drive must correct before CTE reaches the lane edge.
+
+        At 66 km/h the captured run held only a few percent of steering while
+        CTE grew through 1.023, 1.147 and 1.293 m.  This regression exercises
+        those measured displacements on a straight local tangent, isolating
+        feedback units from curvature feed-forward.
+        """
+        route = Route([(0.0, 0.0), (0.0, 100.0), (0.0, 200.0)])
+        commands = [route.steering(
+            (0.0, 20.0), math.pi, 66.0 / 3.6,
+            cross_track_error_m=cte)
+            for cte in (1.023, 1.147, 1.293)]
+        self.assertGreater(FEEDBACK_STEERING_RESPONSE,
+                           NORMALIZED_STEERING_ANGLE_RAD)
+        self.assertEqual(commands, sorted(commands))
+        self.assertGreaterEqual(commands[0], 0.07)
+        self.assertGreaterEqual(commands[-1], 0.10)
 
     def test_confirmed_lane_recovery_is_smooth_on_broad_curves_at_safe_speeds(self):
         """Game-like 20 Hz replay starts 1.5 m off-centre in both bends."""
