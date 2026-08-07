@@ -23,8 +23,23 @@ def _hud_segment_is_selected_context(kind, navigation_points):
 
 
 def _hud_segment_has_bright_outline(kind, navigation_points):
-    """Only selected GPS geometry may outline prefab navCurves in white."""
-    return not (kind == "lane" and len(navigation_points or ()) >= 2)
+    """Return whether a map path represents a real visible road boundary.
+
+    Prefab ``lane`` items are navigation curves through a junction, not road
+    edges or painted lane markings.  Outlining every one of them when GPS was
+    unavailable turned intersections into a dense wireframe.  They still
+    contribute their overlapping asphalt ribbons, while only actual road
+    carriageways receive the two bright outer boundaries below.
+    """
+    return kind == "road"
+
+
+# Keep the road deck visibly separate from the near-black HUD background.
+# These are presentation colours only; they never enter localisation or route
+# geometry.  The selected lane is a subtly lighter asphalt ribbon so its real
+# width remains readable underneath the blue centre guidance.
+HUD_ROAD_SURFACE = QColor(47, 50, 55, 255)
+HUD_SELECTED_LANE_SURFACE = QColor(54, 58, 64, 255)
 
 # State → accent colour (left as-is; the whole HUD now lives on the left panel).
 _STATE_COLORS = {
@@ -853,7 +868,7 @@ class UltraPilotHUD(QWidget):
             # former disc at every sampled endpoint made otherwise straight
             # prefab lanes look like a chain of grey pills.
             qp.setPen(Qt.PenStyle.NoPen)
-            qp.setBrush(QColor(34, 36, 40, 255))
+            qp.setBrush(HUD_ROAD_SURFACE)
             for (_, sa, sb, sah, sbh, skind, slanes, _divided, _dash,
                  _pillar, _rail, supplied_half, _suppress, _path_key,
                  _path_index) in nearby:
@@ -949,7 +964,7 @@ class UltraPilotHUD(QWidget):
                     # at junctions without the former long polygon spikes.
                     if len(edges) == 2:
                         qp.setPen(Qt.PenStyle.NoPen)
-                        qp.setBrush(QColor(34, 36, 40, 255))
+                        qp.setBrush(HUD_ROAD_SURFACE)
                         qp.drawPolygon(QPolygonF([
                             edges[0][0], edges[0][1],
                             edges[1][1], edges[1][0],
@@ -1109,7 +1124,7 @@ class UltraPilotHUD(QWidget):
                     projected_right = [pair[1] for pair in projected_pairs]
                     if len(projected_left) >= 2 and len(projected_right) >= 2:
                         qp.setPen(Qt.PenStyle.NoPen)
-                        qp.setBrush(QColor(34, 36, 40, 255))
+                        qp.setBrush(HUD_SELECTED_LANE_SURFACE)
                         qp.drawPolygon(QPolygonF(
                             projected_left + list(reversed(projected_right))))
                     qp.setBrush(Qt.BrushStyle.NoBrush)

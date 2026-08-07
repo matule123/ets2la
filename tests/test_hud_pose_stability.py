@@ -30,7 +30,9 @@ class HudPoseStabilityTests(unittest.TestCase):
         self.assertFalse(_hud_segment_is_selected_context("unknown", route))
         self.assertFalse(_hud_segment_has_bright_outline("lane", route))
         self.assertTrue(_hud_segment_has_bright_outline("road", route))
-        self.assertTrue(_hud_segment_has_bright_outline("lane", []))
+        # A prefab navCurve is never a painted road edge.  Showing all of
+        # these curves without GPS produced the real junction wireframe.
+        self.assertFalse(_hud_segment_has_bright_outline("lane", []))
 
     def test_stationary_sdk_chatter_does_not_move_scene(self):
         hud = self.make_hud()
@@ -319,10 +321,14 @@ class HudPoseStabilityTests(unittest.TestCase):
             (8, (50.0, 50.0, 0.0), (52.0, 50.0, 0.0), 2.25)]
         self.assertEqual(len(_ordered_display_path_runs(split)), 2)
 
-    def test_hud_draws_prefab_and_suppressed_approach_outer_boundaries(self):
+    def test_hud_draws_prefab_as_surface_without_navcurve_wireframe(self):
         class Painter:
-            def __init__(self): self.paths = 0
+            def __init__(self):
+                self.paths = 0
+                self.polygons = 0
+
             def drawPath(self, _path): self.paths += 1
+            def drawPolygon(self, _polygon): self.polygons += 1
             def __getattr__(self, _name): return lambda *_a, **_k: None
 
         class View:
@@ -351,8 +357,11 @@ class HudPoseStabilityTests(unittest.TestCase):
         }
         painter = Painter()
         hud._draw_driving_view(painter, View(), data)
-        # Two road edges and two continuously curved prefab-lane edges.
-        self.assertGreaterEqual(painter.paths, 4)
+        # The road approach keeps its two genuine outer edges.  The prefab
+        # navCurve remains as overlapping asphalt polygons but contributes no
+        # pair of misleading white lines through the junction.
+        self.assertEqual(painter.paths, 2)
+        self.assertGreaterEqual(painter.polygons, 3)
 
     def test_traffic_light_is_world_anchored_and_never_uses_string_brush(self):
         class StrictPainter:
