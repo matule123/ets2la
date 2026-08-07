@@ -162,6 +162,17 @@ class Plugin(BasePlugin):
 
     def _lane_match_payload(self, match, revision):
         metadata = self._lane_runtime_metadata(match.lane_id)
+        components = dict(match.score_components)
+        # Lateral/heading displacement have explicit, lane-width-aware safety
+        # gates in the autopilot. ``off_route`` can also be non-zero solely
+        # because the game trimmed the passed UID prefix. Neither is evidence
+        # that this same-revision, topology-confirmed LaneId became ambiguous.
+        # Preserve the original confidence for ranking/diagnostics and publish
+        # a separate identity-quality value for runtime authority.
+        identity_penalty = sum(max(0.0, float(components.get(name, 0.0)))
+                               for name in ("vertical", "derived_width"))
+        authority_confidence = max(
+            0.0, min(1.0, 1.0 - identity_penalty / 18.0))
         return {
             "revision": int(revision),
             "valid": True,
@@ -173,7 +184,8 @@ class Plugin(BasePlugin):
             "vertical_error_m": float(match.vertical_error_m),
             "score": float(match.score),
             "confidence": float(match.confidence),
-            "score_components": dict(match.score_components),
+            "authority_confidence": float(authority_confidence),
+            "score_components": components,
             "switch_reason": match.switch_reason,
             **metadata,
         }

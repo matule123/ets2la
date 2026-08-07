@@ -31,7 +31,16 @@ def effective_lane_confidence(snapshot, live_match=None):
     except (TypeError, ValueError, OverflowError):
         same_revision = False
     if same_revision and live_match.get("valid", True) is not False:
-        locator = float(live_match.get("confidence", locator) or 0.0)
+        # New map producers separate lane *identity* quality from the current
+        # tracking displacement.  The legacy combined confidence includes
+        # lateral error, heading error and the rolling-GPS-prefix penalty;
+        # using it as authority checked those same measurements twice and
+        # disabled a proven LaneId at 0.65 while it was still inside its
+        # independent width/heading safety gates.  Old shared states retain
+        # the original fail-closed confidence field.
+        locator = float(live_match.get(
+            "authority_confidence",
+            live_match.get("confidence", locator)) or 0.0)
     return min(trajectory, locator)
 
 

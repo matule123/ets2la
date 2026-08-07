@@ -476,6 +476,7 @@ class UltraPilotEngine:
                 "autopilot_engagement_request": request_id,
                 "autopilot_engagement_confirmed": None,
                 "tts_message": msg,
+                **({"safety_hazard_active": False} if new_state else {}),
             })
             logging.info("Hotkey N -> %s", msg)
             if not new_state:
@@ -528,6 +529,7 @@ class UltraPilotEngine:
             "autopilot_active": desired,
             "autopilot_engagement_request": seq if desired else None,
             "autopilot_engagement_confirmed": None,
+            **({"safety_hazard_active": False} if desired else {}),
         })
         if not desired:
             self.controller.release_all()
@@ -613,6 +615,7 @@ class UltraPilotEngine:
         self._last_output_steering = steering
         self._last_output_brake = brake
         self.shared_state.set("automatic_safety_stop_reason", str(reason))
+        self.shared_state.set("safety_hazard_active", True)
         # HUD diagnostics must reflect the command actually applied by this
         # engine-owned fallback, not the stale last plugin intent.
         self.shared_state.update_batch({
@@ -631,6 +634,11 @@ class UltraPilotEngine:
         everything once and then leave the controls untouched — so the driver
         keeps full manual control of a real wheel (writing 0 every frame would
         fight the player's steering through the SCS SDK input)."""
+        safety_hazard = bool(self.shared_state.get(
+            "safety_hazard_active", False))
+        set_hazard = getattr(self.controller, "set_hazard", None)
+        if callable(set_hazard):
+            set_hazard(safety_hazard)
         if not self.shared_state.get("autopilot_active", False):
             if self._was_active:
                 self.controller.release_all()
@@ -732,9 +740,10 @@ class UltraPilotEngine:
         # TurnSignals owns route-based indication. Keep its persistent request
         # separate from the legacy planner so the planner cannot overwrite a
         # turn signal one frame after the plugin switched it on.
-        blinker = (self.shared_state.get(CTL_BLINKER)
-                   or self.shared_state.get("route_blinker")
-                   or self.shared_state.get("planner_blinker", "off"))
+        blinker = ("off" if safety_hazard else
+                   (self.shared_state.get(CTL_BLINKER)
+                    or self.shared_state.get("route_blinker")
+                    or self.shared_state.get("planner_blinker", "off")))
         self.controller.set_blinker(blinker)
         self.shared_state.set("active_blinker", blinker)
         if self.shared_state.get(CTL_BLINKER):

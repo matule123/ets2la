@@ -188,6 +188,9 @@ class SCSControlsWriter:
     def set_right_blinker(self, pressed: bool):
         return self._write_bool("rblinker", pressed)
 
+    def set_hazard(self, pressed: bool):
+        return self._write_bool("flasher4way", pressed)
+
     # --- Public API (mirrors the other control backends) ---------------------
     def set_steering(self, value: float):
         v = max(-1.0, min(1.0, value))
@@ -206,6 +209,7 @@ class SCSControlsWriter:
             self._write_float(name, 0.0)
         self._write_bool("lblinker", False)
         self._write_bool("rblinker", False)
+        self._write_bool("flasher4way", False)
 
     def close(self):
         try:

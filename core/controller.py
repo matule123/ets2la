@@ -59,7 +59,8 @@ def _discover_blinker_keys(documents_dir=None):
         return {}
 
     result = {}
-    for side, mix_name in (("left", "lblinker"), ("right", "rblinker")):
+    for side, mix_name in (("left", "lblinker"), ("right", "rblinker"),
+                           ("hazard", "flasher4way")):
         expression = re.search(
             rf'"mix\s+{mix_name}\s+`([^`]*)`', controls, re.IGNORECASE)
         if not expression:
@@ -127,6 +128,8 @@ class Controller:
         self._keys_down = set()
         self.current_blinker = "off"
         self._scs_blinker_button = None
+        self.current_hazard = False
+        self._scs_hazard_button = False
         self._blinker_keys = _discover_blinker_keys()
         if self._blinker_keys:
             logging.info("ETS2 profile blinker keys: left=%s right=%s",
@@ -231,6 +234,32 @@ class Controller:
             elif self.current_blinker == "right":
                 pydirectinput.press(right_key)
         self.current_blinker = side
+
+    def set_hazard(self, enabled: bool):
+        """Toggle four-way flashers once per requested safety-state edge."""
+        enabled = bool(enabled)
+        if self.mode == "SCS_SDK":
+            # Release the previous one-frame button pulse without changing the
+            # remembered on/off state of the game's toggle.
+            if self._scs_hazard_button:
+                self.scs.set_hazard(False)
+                self._scs_hazard_button = False
+            if enabled == self.current_hazard:
+                return
+            logging.warning("Safety hazard lights: %s",
+                            "on" if enabled else "off")
+            self.scs.set_hazard(True)
+            self._scs_hazard_button = True
+            self.current_hazard = enabled
+            return
+        if enabled == self.current_hazard:
+            return
+        key = getattr(self, "_blinker_keys", {}).get("hazard", "f")
+        logging.warning("Safety hazard lights: %s",
+                        "on" if enabled else "off")
+        if _HAS_PDI and key:
+            pydirectinput.press(key)
+        self.current_hazard = enabled
 
     def select_drive(self, pressed: bool = True):
         """Select Drive explicitly instead of using the brake/reverse gesture."""

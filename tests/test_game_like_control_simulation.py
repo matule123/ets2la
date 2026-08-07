@@ -3,7 +3,10 @@
 import math
 import unittest
 
-from core.navigation.route import Route, curve_speed_limit_ms
+from core.navigation.route import (
+    NORMALIZED_STEERING_ANGLE_RAD, TRUCK_WHEELBASE_M, Route,
+    curve_speed_limit_ms,
+)
 from plugins.autopilot.main import Plugin as AutopilotPlugin
 
 
@@ -52,8 +55,9 @@ def _simulate(points, speed_ms):
             (x, z), heading, speed_ms,
             cross_track_error_m=live_cte)
         autopilot._last_steering = autopilot._ramp_steering(target, dt)
-        heading -= (speed_ms / 5.0
-                    * (autopilot._last_steering * 0.18) * dt)
+        heading -= (speed_ms / TRUCK_WHEELBASE_M
+                    * (autopilot._last_steering
+                       * NORMALIZED_STEERING_ANGLE_RAD) * dt)
         x += -math.sin(heading) * speed_ms * dt
         z += -math.cos(heading) * speed_ms * dt
         segment = route.tracking_index((x, z), heading)

@@ -56,14 +56,23 @@ K_HEADING = 1.0           # heading-error weight (Stanley keeps this at 1.0)
 K_CTE = 0.80              # damped lane-centre recovery; avoids edge tracking
 K_CTE_CURVE = 1.80        # hold the mapped lane centre against curve cutting
 K_SOFT = 1.0              # softening constant → CTE term never explodes at v=0
-TRUCK_WHEELBASE_M = 5.0
-NORMALIZED_STEERING_ANGLE_RAD = 0.18
+# Coherent tractor bicycle model.  The former 5.0 m / 0.18 rad pair had a
+# minimum possible turning radius of 27.3 m, yet the validated ProMods trace
+# contains an 18 m roundabout/prefab lane.  It therefore saturated by design,
+# ran off the lane and corrected only after localisation had degraded.  A
+# typical tractor axle spacing and a deliberately conservative usable tyre
+# angle cover a 13.3 m radius without inventing geometry or raising any gate.
+TRUCK_WHEELBASE_M = 3.8
+NORMALIZED_STEERING_ANGLE_RAD = 0.28
 # Calibrated conversion of Stanley's feedback angle to the normalized SCS
 # steering input. The former implicit factor was 0.18 (feedback radians were
 # effectively treated as controller units), which the real trace proves too
 # weak; a full 1.0 physical conversion hunts on sampled S-curves. Closed-loop
 # sweeps across 0--90 km/h select this bounded response.
-FEEDBACK_STEERING_RESPONSE = 0.21
+# Closed-loop sweeps of the coherent model across 0--90 km/h select this
+# bounded response. It keeps broad-curve lane-centre recovery strong without
+# re-amplifying curvature feed-forward or producing a sign-change snap.
+FEEDBACK_STEERING_RESPONSE = 0.36
 STEERING_CURVATURE_SPAN_M = 6.0
 STEERING_PREVIEW_MIN_M = 0.5
 STEERING_PREVIEW_MAX_M = 4.0

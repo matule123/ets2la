@@ -12,7 +12,7 @@ from core.navigation.route import curve_speed_limit_ms
 
 # --- Tuning (kept here, mirrored into settings under "autopilot" section) -----
 STEER_RATE_LIMIT = 0.60      # acquire confirmed curve steering before lane drift
-STEER_UNWIND_RATE = 1.80     # release confirmed lock faster than it is acquired
+STEER_UNWIND_RATE = 0.60     # symmetric release avoids a late, abrupt wheel reversal
 MIN_LANE_TRAJECTORY_CONFIDENCE = CONFIDENCE_THRESHOLD
 # 0.72 rejects ambiguous/off-route matches while retaining a wide margin below
 # ProMods-1.59 centre samples (min 0.895, p05 0.950, median 0.966) and
@@ -42,6 +42,11 @@ AUTHORITY_RETENTION_MAX_M = 3.40
 A_LAT_MAX = 1.8             # stable loaded-truck lateral acceleration (m/s²)
 CURVE_BRAKE_MAX = 0.55      # bounded proactive brake for proven sharp curves
 CURVE_BRAKE_MARGIN_MS = 0.5 # start braking this much before v_safe (hysteresis)
+# A compact prefab can contain right-left-right curvature within a few truck
+# lengths.  Reserve distance for the steering axis and trailer to settle; the
+# old point-mass envelope reached the apex speed mathematically but entered
+# the first lobe too fast to follow the proven lane centre.
+CURVE_STEERING_SETUP_M = 20.0
 
 
 def lane_authority_rejection_reason(state, snapshot, now=None):
@@ -153,6 +158,9 @@ def _authority_reason_key(reason):
         return "outside_confirmed_gps_lane"
     if text.startswith("truck heading differs from the GPS lane"):
         return "gps_lane_heading_mismatch"
+    if (text.startswith("lane authority confidence ")
+            and text.endswith(f" is below {MIN_LANE_TRAJECTORY_CONFIDENCE:.2f}")):
+        return "lane_authority_confidence"
     return text
 
 
@@ -295,6 +303,7 @@ class Plugin(BasePlugin):
             "autopilot_active": False,
             "nav_active": False,
             "nav_steering": 0.0,
+            "safety_hazard_active": True,
             "autopilot_disable_reason": reason,
             "autopilot_log_event": {
                 "seq": seq,
@@ -456,6 +465,7 @@ class Plugin(BasePlugin):
                     "Autopilot lost navigation authority; controlled stop: %s",
                     authority_reason)
                 self._last_authority_stop_reason = authority_reason_key
+                self.sdk.shared_state.set("safety_hazard_active", True)
             self.sdk.controller.set_throttle(0.0)
             self._last_throttle = 0.0
             self._last_steering = self._ramp_steering(0.0, dt)
@@ -630,7 +640,9 @@ class Plugin(BasePlugin):
                 distance_to_curve = 0.0
             if 0.0 < R < 2000.0:
                 curve_limit_ms = curve_speed_limit_ms(
-                    R, distance_to_curve, A_LAT_MAX)
+                    R, max(0.0, distance_to_curve - (
+                        CURVE_STEERING_SETUP_M if R < 45.0 else 0.0)),
+                    A_LAT_MAX)
                 v_now = abs(speed)                        # m/s
                 if v_now > curve_limit_ms + CURVE_BRAKE_MARGIN_MS:
                     excess = v_now - curve_limit_ms
@@ -826,13 +838,13 @@ class Plugin(BasePlugin):
         self.sdk.controller.set_brake(self._last_brake)
 
     def _ramp_steering(self, target: float, dt: float) -> float:
-        """Rate-limit steering without retaining stale lock after a bend.
+        """Rate-limit steering and make every reversal pass through zero.
 
-        Applying and releasing the wheel at the same slow rate left the old
-        command active for several seconds after the route target had crossed
-        zero. That delay is a control integrator: the truck first ran wide,
-        then crossed the centre and kept turning into the opposite lane. Keep
-        engagement gentle, but unwind/reverse toward zero three times faster.
+        The validated lane target already contains curvature feed-forward and
+        cross-track feedback.  A faster, separate unwind rate made its smooth
+        zero crossing into a visible wheel snap.  Use one coherent physical
+        slew rate in both directions and never apply the opposite lock in the
+        same control frame.
         """
         target = float(np.clip(target, -1.0, 1.0))
         current = float(self._last_steering)
@@ -841,8 +853,8 @@ class Plugin(BasePlugin):
         rate = STEER_UNWIND_RATE if unwinding else STEER_RATE_LIMIT
         max_step = rate * max(dt, 1e-3)
         if reversing:
-            # Release the old lock first; do not cross zero at the fast unwind
-            # rate and apply an opposite command in the same control frame.
+            # Release the old lock first; never cross zero and apply an
+            # opposite command in the same control frame.
             return float(max(0.0, current - max_step)
                          if current > 0.0 else min(0.0, current + max_step))
         delta = float(np.clip(target - self._last_steering, -max_step, max_step))

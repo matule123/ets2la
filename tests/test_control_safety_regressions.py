@@ -4,6 +4,7 @@ import math
 import struct
 import sys
 import time
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -26,6 +27,7 @@ from core.navigation.route import (
     NORMALIZED_STEERING_ANGLE_RAD, TRUCK_WHEELBASE_M, Route, K_CTE,
     K_CTE_CURVE, curve_cte_gain, curve_speed_limit_ms,
 )
+from core.navigation.lane_model import LaneId, LaneMatch, LanePoint
 from core.navigation.runtime_preflight import effective_lane_confidence
 from core.sdk.scs_controller_writer import SCSControlsWriter, _FIELDS, _SIZE
 from plugins.autopilot.main import (
@@ -60,11 +62,13 @@ class Controller:
         self.steering = self.throttle = self.brake = 0.0
         self.drive_events = []
         self.blinker = "off"
+        self.hazard = False
 
     def set_steering(self, value): self.steering = value
     def set_throttle(self, value): self.throttle = value
     def set_brake(self, value): self.brake = value
     def set_blinker(self, value): self.blinker = value
+    def set_hazard(self, value): self.hazard = bool(value)
     def pay_toll(self): pass
     def select_drive(self, pressed=True):
         self.drive = pressed
@@ -147,6 +151,52 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         self.assertIn("confidence", lane_authority_rejection_reason(
             state, snapshot))
 
+    def test_real_065_match_keeps_proven_lane_identity_but_not_legacy_score(self):
+        # Real 22:25:34 sample: confidence 0.6506 was produced by adding the
+        # current 1.807 m CTE, 15.4 degree heading error and a rolling-prefix
+        # off-route charge. Those same displacement values are independently
+        # checked below; they must not also erase the already proven LaneId.
+        state = ready_navigation_state()
+        snapshot = state.get("lane_trajectory")
+        snapshot["confidence_components"] = {
+            "trajectory": 0.95, "locator": 0.777856,
+        }
+        live = {
+            "revision": 7, "valid": True,
+            "confidence": 0.6506, "authority_confidence": 0.9666666667,
+            "lateral_error_m": 1.807, "heading_error_rad": math.radians(15.4),
+            "lane_width_m": 4.5,
+        }
+        state.set("lane_match", live)
+        self.assertAlmostEqual(
+            effective_lane_confidence(snapshot, live), 0.95)
+        self.assertEqual(lane_authority_rejection_reason(state, snapshot), "")
+
+        # A legacy producer has no separate identity proof and therefore
+        # remains fail-closed at the unchanged 0.72 authority threshold.
+        live.pop("authority_confidence")
+        self.assertIn("confidence", lane_authority_rejection_reason(
+            state, snapshot))
+
+    def test_map_match_publishes_identity_confidence_without_hiding_tracking(self):
+        lane_id = LaneId(101, 1, 0)
+        match = LaneMatch(
+            lane_id, LanePoint(1.0, 12.0, 3.0, lane_id=lane_id), 0, 0,
+            1.807, 0.0, math.radians(15.4), 6.289, 0.6506,
+            "same_lane", (("lateral", 1.807), ("heading", 1.882),
+                          ("vertical", 0.0), ("off_route", 2.0),
+                          ("derived_width", 0.6)))
+        plugin = MapPlugin.__new__(MapPlugin)
+        plugin.road_net = SimpleNamespace(_lane_id_index={
+            lane_id: SimpleNamespace(width_m=4.5, elevation_layer=0),
+        })
+        payload = plugin._lane_match_payload(match, 7)
+        self.assertAlmostEqual(payload["confidence"], 0.6506)
+        self.assertAlmostEqual(payload["authority_confidence"], 0.9666666667)
+        self.assertAlmostEqual(payload["lateral_error_m"], 1.807)
+        self.assertAlmostEqual(payload["heading_error_rad"],
+                               math.radians(15.4))
+
     def test_real_start_match_engages_once_and_stays_enabled(self):
         # Runtime capture 2026-07-29 09:13:06: lateral=1.1742428 m and
         # heading error=0.0127 rad. Engine said enabled, then the plugin's old
@@ -211,6 +261,7 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         self.assertFalse(state.get("autopilot_active"))
         self.assertEqual(state.get("autopilot_disable_reason"),
                          "live lane localization unavailable")
+        self.assertTrue(state.get("safety_hazard_active"))
         self.assertEqual(sum("automatically disengaged" in line
                              for line in captured.output), 1)
         self.assertNotIn("1000000.00", "\n".join(captured.output))
@@ -316,14 +367,14 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         self.assertIn("elevation layer", lane_authority_rejection_reason(
             state, snapshot))
 
-    def test_steering_unwinds_faster_than_it_winds_into_curve(self):
+    def test_steering_unwinds_at_same_smooth_rate_as_curve_acquisition(self):
         plugin = autopilot({"speed": 10.0, "gear": 3}, State())
         plugin._last_steering = 0.40
         released = plugin._ramp_steering(0.0, 0.10)
         release_step = 0.40 - released
         plugin._last_steering = 0.0
         applied = plugin._ramp_steering(0.40, 0.10)
-        self.assertGreater(release_step, applied * 2.5)
+        self.assertAlmostEqual(release_step, applied, places=7)
         self.assertGreater(released, 0.0)  # still continuous, never snaps
 
     def test_steering_reversal_passes_smoothly_through_zero(self):
@@ -362,6 +413,7 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         writer.set_brake(0.15)
         writer.select_drive()
         writer.set_right_blinker(True)
+        writer.set_hazard(True)
         payload = writer._buf.getvalue()
         self.assertAlmostEqual(struct.unpack_from(
             "f", payload, offsets["steering"])[0], 0.25)
@@ -373,6 +425,8 @@ class ControlSafetyRegressionTests(unittest.TestCase):
             "?", payload, offsets["geardrive"])[0])
         self.assertTrue(struct.unpack_from(
             "?", payload, offsets["rblinker"])[0])
+        self.assertTrue(struct.unpack_from(
+            "?", payload, offsets["flasher4way"])[0])
 
     def test_plugin_controller_proxy_supports_drive_selector(self):
         state = {}
@@ -473,7 +527,7 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         plugin._was_active = True
         plugin._last_steering = 0.40
         outputs = []
-        for _ in range(6):
+        for _ in range(8):
             plugin.on_tick(0.10)
             outputs.append(plugin.sdk.controller.steering)
         self.assertLess(outputs[0], 0.40)
@@ -625,6 +679,42 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         self.assertEqual(controller.scs.events[-2:],
                          [("right", True), ("right", False)])
 
+    def test_scs_hazard_emits_one_toggle_edge_and_following_release(self):
+        class FakeSCS:
+            def __init__(self): self.events = []
+            def set_hazard(self, value): self.events.append(bool(value))
+
+        controller = PhysicalController.__new__(PhysicalController)
+        controller.mode = "SCS_SDK"
+        controller.scs = FakeSCS()
+        controller.current_hazard = False
+        controller._scs_hazard_button = False
+        controller._blinker_keys = {}
+        with mock.patch("core.controller._HAS_PDI", False):
+            controller.set_hazard(True)
+            controller.set_hazard(True)
+        self.assertEqual(controller.scs.events, [True, False])
+        self.assertTrue(controller.current_hazard)
+
+    def test_safety_hazard_overrides_route_indicator_in_engine_flush(self):
+        state = ready_navigation_state(
+            nav_active=True, safety_hazard_active=True,
+            autopilot_control_heartbeat=time.monotonic(),
+            ctl_steering=0.0, ctl_throttle=0.0, ctl_brake=0.4,
+            route_blinker="right")
+        controller = Controller()
+        engine = UltraPilotEngine.__new__(UltraPilotEngine)
+        engine.shared_state = state
+        engine.controller = controller
+        engine._was_active = True
+        engine._drive_selector_pressed = False
+        engine._last_output_steering = 0.0
+        engine._last_output_brake = 0.0
+        engine._last_control_flush = time.monotonic()
+        engine._flush_controls()
+        self.assertTrue(controller.hazard)
+        self.assertEqual(controller.blinker, "off")
+
     def test_scs_steering_is_not_disabled_when_keyboard_backend_exists(self):
         class FakeSCS:
             def __init__(self): self.steering = None
@@ -769,6 +859,25 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         self.assertGreater(plugin.sdk.controller.brake, 0.0)
         self.assertEqual(plugin.sdk.controller.throttle, 0.0)
         self.assertLess(state.get("path_curve_speed_limit_ms"), 7.0)
+
+    def test_captured_eighteen_metre_roundabout_reserves_steering_setup(self):
+        # At 22:26:05 the compact curve was 44 m ahead but the old point-mass
+        # envelope still allowed about 47 km/h. A tractor-trailer needs a
+        # bounded setup distance before the steering apex, without changing
+        # the validated curve radius or the steering lookahead itself.
+        state = ready_navigation_state(
+            nav_active=True, nav_steering=0.35, acc_throttle=1.0,
+            acc_brake=0.0, path_curvature_radius=18.0,
+            path_curve_distance_m=44.0)
+        plugin = autopilot({"speed": 12.0, "gear": 6}, state)
+        plugin._engage_blend = 1.0
+        plugin._was_active = True
+        plugin.on_tick(0.10)
+        expected = curve_speed_limit_ms(18.0, 24.0, 1.8)
+        self.assertAlmostEqual(
+            state.get("path_curve_speed_limit_ms"), expected, places=6)
+        self.assertGreater(plugin.sdk.controller.brake, 0.0)
+        self.assertEqual(plugin.sdk.controller.throttle, 0.0)
 
     def test_live_distance_reason_logs_as_one_stable_category(self):
         self.assertEqual(_authority_reason_key(
