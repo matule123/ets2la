@@ -81,6 +81,12 @@ STEERING_PREVIEW_MAX_M = 4.0
 CURV_WINDOW_M = 60.0
 CURVE_PROFILE_STEP_M = 4.0
 TIGHT_CURVE_RADIUS = 60.0
+# On a proven prefab/roundabout arc, instantaneous heading and CTE feedback
+# may reduce the physical feed-forward but must not reverse it.  Reversing the
+# wheel while the lane curvature still has one sign creates the observed
+# inside-edge cut followed by an opposite-side correction.
+CURVE_DIRECTION_HOLD_RADIUS_M = 70.0
+CURVE_MIN_FEEDFORWARD_FRACTION = 0.85
 ARRIVAL_RADIUS = 12.0     # metres from the last point counts as "arrived"
 
 
@@ -152,6 +158,11 @@ class Route:
             self._segment_lengths.append(length)
             self._cumulative_m.append(self._cumulative_m[-1] + length)
         self._tracking_state = None
+        self.last_steering_debug = {
+            "feed_forward": 0.0, "feedback": 0.0,
+            "local_curvature": 0.0, "raw": 0.0, "output": 0.0,
+            "curve_direction_hold": False,
+        }
 
     # --- Construction / persistence ------------------------------------------
     def add_point(self, x: float, z: float, min_spacing: float = 10.0) -> bool:
@@ -520,6 +531,11 @@ class Route:
         — which on a two-way road is the oncoming lane. A ~2.7 m offset keeps us
         firmly in our own lane, the main fix for "jazdí protismerom".
         """
+        self.last_steering_debug = {
+            "feed_forward": 0.0, "feedback": 0.0,
+            "local_curvature": 0.0, "raw": 0.0, "output": 0.0,
+            "curve_direction_hold": False,
+        }
         if len(self.points) < 2:
             return 0.0
 
@@ -602,7 +618,24 @@ class Route:
         feedback = (FEEDBACK_STEERING_RESPONSE
                     * (K_HEADING * heading_error + cte_steer)
                     / NORMALIZED_STEERING_ANGLE_RAD)
-        steer = feed_forward + speed_gain(speed_ms) * feedback
+        scaled_feedback = speed_gain(speed_ms) * feedback
+        steer = feed_forward + scaled_feedback
+        curve_direction_hold = False
+        if (local_radius <= CURVE_DIRECTION_HOLD_RADIUS_M
+                and abs(feed_forward) > 0.05
+                and (steer * feed_forward <= 0.0
+                     or abs(steer) < (abs(feed_forward)
+                                      * CURVE_MIN_FEEDFORWARD_FRACTION))):
+            # Correcting toward the lane centre is still allowed, but a noisy
+            # tangent/CTE sample cannot demand the opposite lock while the
+            # validated lane continues around the same tight arc.  The hold
+            # disappears naturally at the prefab exit when local curvature
+            # becomes straight or genuinely changes direction.
+            steer = (math.copysign(
+                abs(feed_forward) * CURVE_MIN_FEEDFORWARD_FRACTION,
+                feed_forward))
+            curve_direction_hold = True
+        raw_steer = steer
         # A fixed ±0.70 limit physically cannot follow a proven 25–40 m prefab
         # bend in the truck model (it bottoms out near a 40 m radius), which is
         # why the real exit replay ran wide into the verge. Grant additional
@@ -630,4 +663,13 @@ class Route:
                 straight_limit += 0.34 * _clamp(
                     (abs(cte) - 0.35) / 1.15, 0.0, 1.0)
             steer = _clamp(steer, -straight_limit, straight_limit)
-        return _clamp(steer, -1.0, 1.0)
+        steer = _clamp(steer, -1.0, 1.0)
+        self.last_steering_debug = {
+            "feed_forward": float(feed_forward),
+            "feedback": float(scaled_feedback),
+            "local_curvature": float(local_curvature),
+            "raw": float(raw_steer),
+            "output": float(steer),
+            "curve_direction_hold": bool(curve_direction_hold),
+        }
+        return steer

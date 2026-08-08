@@ -15,7 +15,8 @@ from core.navigation.lane_model import (
 from core.navigation.lane_trajectory import build_lane_trajectory
 from core.navigation.road_network import RoadNetwork
 from core.navigation.route import (
-    FEEDBACK_STEERING_RESPONSE, NORMALIZED_STEERING_ANGLE_RAD,
+    CURVE_MIN_FEEDFORWARD_FRACTION, FEEDBACK_STEERING_RESPONSE,
+    NORMALIZED_STEERING_ANGLE_RAD,
     TRUCK_WHEELBASE_M, Route,
     curve_speed_limit_ms,
 )
@@ -182,6 +183,26 @@ class LaneGeometryAuditTests(unittest.TestCase):
                 self.assertLessEqual(max(
                     abs(current - previous) for previous, current
                     in zip(commands, commands[1:])), 0.031)
+
+    def test_real_roundabout_feedback_cannot_reverse_confirmed_arc(self):
+        """15:07 trace: CTE/heading fought R18 feed-forward across zero."""
+        for direction in (-1.0, 1.0):
+            route = Route(self._arc(direction, 18.0, 48.0))
+            position = route.points[15]
+            heading = (self._path_heading(position, route.points[18])
+                       + math.radians(20.0 * direction))
+            command = route.steering(
+                position, heading, 5.5,
+                cross_track_error_m=2.0 * direction)
+            debug = route.last_steering_debug
+            with self.subTest(direction=direction):
+                self.assertTrue(debug["curve_direction_hold"])
+                self.assertGreater(
+                    command * debug["feed_forward"], 0.0)
+                self.assertGreaterEqual(
+                    abs(command),
+                    abs(debug["feed_forward"])
+                    * CURVE_MIN_FEEDFORWARD_FRACTION - 1e-7)
 
     def test_captured_ten_metre_service_exit_stays_inside_lane(self):
         # The same drive exposed a short R~=10.2 m service connector: 16 m

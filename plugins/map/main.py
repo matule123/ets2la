@@ -2048,8 +2048,11 @@ class Plugin(BasePlugin):
                                  "map dataset may not match the game. Switch maps on the Map page.")
                     self.tags.nav_steering = 0.0
                 else:
+                    steering_debug = dict(getattr(
+                        route, "last_steering_debug", {}) or {})
                     self.sdk.shared_state.update_batch({
                         "nav_steering": float(steer), "nav_active": True,
+                        "nav_steering_debug": steering_debug,
                         "path_curvature_radius": curve_profile["radius_m"],
                         "path_curve_distance_m": curve_profile["distance_m"],
                         "path_curve_signed_curvature": (

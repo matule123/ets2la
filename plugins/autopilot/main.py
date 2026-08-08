@@ -19,6 +19,15 @@ MIN_LANE_TRAJECTORY_CONFIDENCE = CONFIDENCE_THRESHOLD
 # validated built trajectories (0.970-0.980). Exactly 0.72 is accepted.
 STEER_FOLLOW_BLEND = 0.72    # follow lane authority without a second slow integrator
                              # (low = smooth/laggy, high = snappy/jittery)
+# ETS2LA's map steering averages a short window of desired values.  A 150 ms
+# revision-aware filter suppresses sampled-map chatter without adding another
+# large phase lag in an R18 bend; no old GPS revision can leak into a new one.
+NAV_STEERING_SMOOTH_TIME_S = 0.15
+# Releasing an established bend must be faster than acquiring a new lock.
+# Otherwise the filter carries roundabout steering onto the receiving road and
+# creates the exact outside-edge excursion seen after prefab exits.  A genuine
+# reversal still has to unwind to near zero before the opposite side is used.
+NAV_STEERING_UNWIND_TIME_S = 0.08
 VISION_DEADZONE = 0.03       # ignore vision lane offset noise below this
 BRAKE_RAMP_UP = 2.5          # brake can rise this fast per second (anti-jerk)
 BRAKE_RAMP_DOWN = 4.0        # brake releases faster than it engages
@@ -260,6 +269,37 @@ class Plugin(BasePlugin):
         self._drive_engage_started = 0.0
         self._lane_lock_acquired = False
         self._last_authority_stop_reason = None
+        self._filtered_nav_steering = 0.0
+        self._filtered_nav_revision = None
+
+    def _smooth_navigation_steering(self, raw, dt, revision):
+        """Filter map jitter and release old curve lock before a reversal."""
+        raw = float(np.clip(float(raw), -1.0, 1.0))
+        revision = int(revision)
+        if (self._filtered_nav_revision != revision
+                or not math.isfinite(getattr(
+                    self, "_filtered_nav_steering", float("nan")))):
+            self._filtered_nav_revision = revision
+            self._filtered_nav_steering = raw
+            return raw
+        current = self._filtered_nav_steering
+        reversing = current * raw < 0.0
+        if reversing and abs(current) > 0.02:
+            # First unwind the established direction.  This prevents a noisy
+            # opposite sample from becoming an immediate counter-steer, while
+            # allowing the wheel to leave a completed prefab promptly.
+            target = 0.0
+            smooth_time = NAV_STEERING_UNWIND_TIME_S
+        else:
+            target = raw
+            unwinding = abs(raw) < abs(current)
+            smooth_time = (NAV_STEERING_UNWIND_TIME_S if unwinding
+                           else NAV_STEERING_SMOOTH_TIME_S)
+        alpha = 1.0 - math.exp(
+            -max(float(dt), 1e-3) / smooth_time)
+        self._filtered_nav_steering += alpha * (
+            target - self._filtered_nav_steering)
+        return float(np.clip(self._filtered_nav_steering, -1.0, 1.0))
 
     def on_stop(self):
         logging.info("Autopilot Plugin stopped.")
@@ -574,7 +614,11 @@ class Plugin(BasePlugin):
             if emergency_nav_active:
                 nav_steering = float(self.sdk.shared_state.get(
                     "nav_steering", 0.0) or 0.0)
-                target = (STEER_FOLLOW_BLEND * nav_steering
+                filtered_nav = self._smooth_navigation_steering(
+                    nav_steering, dt,
+                    self.sdk.shared_state.get(
+                        "lane_trajectory_revision", -1))
+                target = (STEER_FOLLOW_BLEND * filtered_nav
                           + (1.0 - STEER_FOLLOW_BLEND)
                           * self._last_steering)
             else:
@@ -704,6 +748,7 @@ class Plugin(BasePlugin):
         active = bool(self.sdk.shared_state.get("autopilot_active", False))
         if active and not self._was_active:
             self._engage_blend = 0.0
+            self._filtered_nav_revision = None
         self._was_active = active
         engage = min(1.0, self._engage_blend + dt / 1.2)
         self._engage_blend = engage if active else 0.0
@@ -715,12 +760,17 @@ class Plugin(BasePlugin):
             # 0.35/0.65 exponential lag was a second integrator that caused the
             # truck to overshoot and oscillate (fishtail) in and out of curves.
             nav_steering = float(self.sdk.shared_state.get("nav_steering", 0.0) or 0.0)
+            filtered_nav = self._smooth_navigation_steering(
+                nav_steering, dt,
+                self.sdk.shared_state.get("lane_trajectory_revision", -1))
+            self.sdk.shared_state.set(
+                "nav_steering_filtered", filtered_nav)
             # The map plugin already computes Stanley cross-track feedback
             # from this revision's signed LaneMatch. Do not add that same
             # lateral error a second time here: the former adaptive trim was
             # a duplicate integrator and could carry a bend correction onto
             # the following straight.
-            target = (STEER_FOLLOW_BLEND * nav_steering
+            target = (STEER_FOLLOW_BLEND * filtered_nav
                       + (1 - STEER_FOLLOW_BLEND) * self._last_steering)
             target = float(np.clip(target, -1.0, 1.0))
             self._last_steering = self._ramp_steering(target, dt)
@@ -764,20 +814,35 @@ class Plugin(BasePlugin):
                     "heading_error_rad", 0.0) or 0.0))
                 diagnostic_radius = (None if radius is None else float(radius))
                 diagnostic_curve_distance = float(curve_distance or 0.0)
+                steering_debug = (self.sdk.shared_state.get(
+                    "nav_steering_debug", {}) or {})
+                diagnostic_feed_forward = float(
+                    steering_debug.get("feed_forward", 0.0) or 0.0)
+                diagnostic_feedback = float(
+                    steering_debug.get("feedback", 0.0) or 0.0)
+                diagnostic_direction_hold = bool(
+                    steering_debug.get("curve_direction_hold", False))
             except (TypeError, ValueError, OverflowError):
                 live_lateral = live_heading = float("nan")
                 diagnostic_radius = None
                 diagnostic_curve_distance = float("nan")
+                diagnostic_feed_forward = diagnostic_feedback = float("nan")
+                diagnostic_direction_hold = False
             logging.info(
                 "autopilot: active=%s nav=%s engage=%.2f lane_cte=%.3f "
                 "lane_heading=%.1fdeg vision_off=%.3f "
-                "nav_steer=%.3f target=%.3f steer_out=%.3f speed=%.0f "
+                "nav_steer=%.3f nav_filtered=%.3f target=%.3f "
+                "steer_out=%.3f speed=%.0f "
+                "curve_ff=%.3f curve_fb=%.3f curve_hold=%s "
                 "curve_r=%s curve_d=%.1f curve_limit=%s "
                 "lane_revision=%s confidence=%.3f reject=%s",
                 active, nav_active, self._engage_blend,
                 live_lateral, live_heading, float(lane_offset),
                 float(self.sdk.shared_state.get("nav_steering", 0.0) or 0.0),
+                float(getattr(self, "_filtered_nav_steering", 0.0)),
                 float(self._last_steering), steering_val, speed_kmh,
+                diagnostic_feed_forward, diagnostic_feedback,
+                diagnostic_direction_hold,
                 ("-" if diagnostic_radius is None
                  else f"{diagnostic_radius:.1f}"),
                 diagnostic_curve_distance,

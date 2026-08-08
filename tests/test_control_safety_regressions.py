@@ -384,6 +384,23 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         self.assertLess(first, 0.03)
         self.assertGreaterEqual(first, -0.03)
 
+    def test_navigation_filter_rejects_one_frame_opposite_lock(self):
+        plugin = autopilot({"speed": 10.0, "gear": 3}, State())
+        first = plugin._smooth_navigation_steering(0.40, 0.05, 10)
+        opposite_spike = plugin._smooth_navigation_steering(-0.40, 0.05, 10)
+        self.assertEqual(first, 0.40)
+        self.assertGreater(opposite_spike, 0.0)
+        # A persistent genuine direction change still crosses zero promptly.
+        settled = [plugin._smooth_navigation_steering(-0.40, 0.05, 10)
+                   for _ in range(12)]
+        self.assertLess(settled[-1], -0.35)
+
+    def test_navigation_filter_never_blends_stale_revision(self):
+        plugin = autopilot({"speed": 10.0, "gear": 3}, State())
+        plugin._smooth_navigation_steering(0.55, 0.05, 10)
+        changed = plugin._smooth_navigation_steering(-0.25, 0.05, 11)
+        self.assertEqual(changed, -0.25)
+
     def test_scs_writer_layout_matches_shipped_controller_dll(self):
         offsets, total = {}, 0
         for name, field_type in _FIELDS:

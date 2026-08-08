@@ -109,6 +109,78 @@ class GameLikeControlSimulationTests(unittest.TestCase):
             abs(current-previous)
             for previous, current in zip(commands, commands[1:])), 0.091)
 
+    def test_roundabout_survives_localization_chatter_and_wheel_lag(self):
+        """Replay the 15:07 R18 failure with noisy CTE and a slow game wheel."""
+        dt, radius = 0.05, 18.0
+        speed = curve_speed_limit_ms(radius, 0.0)
+        for direction in (-1.0, 1.0):
+            points = _path_with_curve(direction, radius)
+            exit_x, exit_z = points[-1]
+            approach_x, approach_z = points[-2]
+            tangent_x, tangent_z = (
+                exit_x - approach_x, exit_z - approach_z)
+            tangent_length = math.hypot(tangent_x, tangent_z)
+            tangent_x /= tangent_length
+            tangent_z /= tangent_length
+            # Include 40 m of the receiving road.  The real failure happened
+            # while leaving the prefab, so stopping the replay at the final
+            # arc point would measure an end-of-path artefact instead of the
+            # controller's ability to settle into the outgoing lane.
+            points.extend((
+                exit_x + tangent_x * distance,
+                exit_z + tangent_z * distance,
+            ) for distance in range(2, 42, 2))
+            route = Route(points)
+            autopilot = AutopilotPlugin.__new__(AutopilotPlugin)
+            autopilot._last_steering = 0.0
+            autopilot._filtered_nav_steering = 0.0
+            autopilot._filtered_nav_revision = None
+            x, z = route.points[0]
+            heading = math.atan2(
+                -(route.points[2][0] - x),
+                -(route.points[2][1] - z))
+            physical_wheel = 0.0
+            errors, commands = [], []
+            duration = (route._cumulative_m[-1] - 4.0) / speed
+            for frame in range(int(duration / dt)):
+                segment = route.tracking_index((x, z), heading)
+                true_cte = route.cross_track_error(segment, (x, z))
+                # The captured LaneMatch moved within roughly a metre while
+                # heading residual changed several degrees between log frames.
+                measured_cte = (true_cte + 0.45 * math.sin(
+                    frame * dt * 2.0 * math.pi / 0.85))
+                measured_heading = (heading + math.radians(3.0) * math.sin(
+                    frame * dt * 2.0 * math.pi / 1.10))
+                raw = route.steering(
+                    (x, z), measured_heading, speed,
+                    cross_track_error_m=measured_cte)
+                filtered = autopilot._smooth_navigation_steering(
+                    raw, dt, 10)
+                target = 0.72 * filtered + 0.28 * autopilot._last_steering
+                autopilot._last_steering = autopilot._ramp_steering(
+                    target, dt)
+                # ETS steering does not reach a requested wheel angle in one
+                # control frame; reproduce a 320 ms first-order response.
+                physical_wheel += ((autopilot._last_steering - physical_wheel)
+                                   * min(1.0, dt / 0.32))
+                heading -= (speed / TRUCK_WHEELBASE_M
+                            * physical_wheel
+                            * NORMALIZED_STEERING_ANGLE_RAD * dt)
+                x += -math.sin(heading) * speed * dt
+                z += -math.cos(heading) * speed * dt
+                segment = route.tracking_index((x, z), heading)
+                errors.append(route.cross_track_error(segment, (x, z)))
+                commands.append(autopilot._last_steering)
+            with self.subTest(direction=direction):
+                self.assertLess(abs(errors[-1]), 0.50)
+                # Even with deliberately injected LaneMatch chatter the truck
+                # stays within the inner metre of the confirmed centreline,
+                # then settles below 0.5 m on the receiving road.
+                self.assertLess(max(map(abs, errors)), 0.95)
+                self.assertLessEqual(max(
+                    abs(current-previous) for previous, current
+                    in zip(commands, commands[1:])), 0.031)
+
 
 if __name__ == "__main__":
     unittest.main()
