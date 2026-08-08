@@ -185,13 +185,23 @@ class PluginManager:
         self._publish_processes()
 
     def stop_all(self):
-        for entry in self.plugins.values():
+        for folder, entry in self.plugins.items():
+            logging.info("Stopping plugin '%s'...", folder)
             if entry["stop_event"]:
                 entry["stop_event"].set()
-        for entry in self.plugins.values():
+        for folder, entry in self.plugins.items():
             proc = entry["process"]
             if proc:
                 proc.join(timeout=1)
                 if proc.is_alive():
+                    logging.warning(
+                        "Plugin '%s' did not stop within 1 second; terminating.",
+                        folder)
                     proc.terminate()
+                    proc.join(timeout=1)
+                if proc.is_alive():
+                    logging.error("Plugin '%s' could not be terminated cleanly.",
+                                  folder)
+                else:
+                    logging.info("Plugin '%s' stopped.", folder)
         self.engine.shared_state.set("plugin_processes", {})

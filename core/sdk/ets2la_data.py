@@ -201,6 +201,8 @@ def _state_color(state):
         return "green"
     if state in (ST_Y2R, ST_Y2G):
         return "yellow"
+    if state == ST_SLEEP:
+        return "sleep"
     return "off"
 
 

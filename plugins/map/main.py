@@ -1657,7 +1657,10 @@ class Plugin(BasePlugin):
         def _worker():
             try:
                 roads = net.hud_segments_3d_near(
-                    request_pos, radius=280.0, limit=950,
+                    # The camera clips at 210 m. A much wider 950-chord scene
+                    # made dense roundabout prefabs expensive to repaint and
+                    # could starve visible HUD updates as a route appeared.
+                    request_pos, radius=230.0, limit=600,
                     altitude=request_altitude,
                     anchor_lane_id=anchor_lane_id)
                 payload = [[list(a), list(b), kind, lanes, divided,

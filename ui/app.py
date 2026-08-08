@@ -1128,14 +1128,38 @@ class UltraPilotApp(QMainWindow):
         # Engine owns the master state. Publishing it directly here allowed the
         # worker plugin to observe an unvalidated enable before the command was
         # acknowledged and before an engagement request id existed.
-        self.state.set("autopilot_command", {"seq": seq, "enabled": desired})
-        self.state.set("autopilot_command_pending", seq)
+        # Publish the command and pending marker in one Manager round-trip.
+        # This keeps the Qt click handler responsive while map/HUD workers are
+        # publishing a newly calculated scene through the same shared state.
+        command_state = {
+            "autopilot_command": {"seq": seq, "enabled": desired},
+            "autopilot_command_pending": seq,
+        }
         if not desired:
             # Clear stale intents immediately; Engine also releases the device.
-            self.state.set("ctl_steering", 0.0)
-            self.state.set("ctl_throttle", 0.0)
-            self.state.set("ctl_brake", 0.0)
+            command_state.update({
+                "ctl_steering": 0.0,
+                "ctl_throttle": 0.0,
+                "ctl_brake": 0.0,
+            })
+        self.state.update_batch(command_state)
         logging.info("Autopilot requested -> %s (command %s)", desired, seq)
+
+    def closeEvent(self, event):
+        """The red control closes the complete runtime, not only this window."""
+        try:
+            self.state.update_batch({
+                "ui_ready": False,
+                "app_shutdown_requested": True,
+                "app_shutdown_reason": "main window closed",
+            })
+            logging.info("UI requested complete UltraPilot shutdown.")
+        except Exception as exc:
+            logging.error("UI could not publish shutdown request: %s", exc)
+        super().closeEvent(event)
+        app = QApplication.instance()
+        if app is not None:
+            QTimer.singleShot(0, app.quit)
 
     def toggle_perf_overlay(self):
         """Show/hide the small floating performance panel."""

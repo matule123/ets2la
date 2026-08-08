@@ -23,14 +23,15 @@ def _hud_segment_is_selected_context(kind, navigation_points):
 
 
 def _hud_segment_has_bright_outline(kind, navigation_points):
-    """Draw boundaries for roads and topology-proven prefab lane envelopes.
+    """Only paint real road-look edges in the broad presentation mesh.
 
-    Each prefab path is kept separate by its PPD curve identity and consecutive
-    navCurve indices, so its two subtle edges cannot chord across another arm.
-    This restores readable lanes around roundabouts while the selected GPS lane
-    receives the stronger dedicated highlight below.
+    A prefab contains navCurves for every permitted movement through the
+    junction. Outlining every one of those centre trajectories produces thin
+    doubled lines at several incompatible exit angles. Prefab ribbons still
+    fill the real junction surface, while the revision-matched LanePath below
+    is the sole source of lane edges through a roundabout or intersection.
     """
-    return kind in {"road", "lane"}
+    return kind == "road"
 
 
 # Keep the road deck visibly separate from the near-black HUD background.
@@ -38,8 +39,8 @@ def _hud_segment_has_bright_outline(kind, navigation_points):
 # geometry.  The selected lane is a subtly lighter asphalt ribbon so its real
 # width remains readable underneath the blue centre guidance.
 HUD_ROAD_SURFACE = QColor(47, 50, 55, 255)
-HUD_SELECTED_LANE_SURFACE = QColor(54, 58, 64, 255)
-HUD_ROUTE_GLOW = QColor(59, 130, 246, 82)
+HUD_SELECTED_LANE_SURFACE = QColor(62, 66, 72, 255)
+HUD_ROUTE_GLOW = QColor(59, 130, 246, 68)
 HUD_ROUTE_OUTLINE = QColor(15, 72, 153, 255)
 HUD_ROUTE_CORE = QColor(59, 130, 246, 255)
 
@@ -53,9 +54,9 @@ _STATE_COLORS = {
 
 def _draw_hud_route_curve(painter, route_curve):
     """Paint one GPS line with a separate dark-blue enclosing stripe."""
-    for colour, width in ((HUD_ROUTE_GLOW, 20.0),
-                          (HUD_ROUTE_OUTLINE, 12.0),
-                          (HUD_ROUTE_CORE, 6.0)):
+    for colour, width in ((HUD_ROUTE_GLOW, 12.0),
+                          (HUD_ROUTE_OUTLINE, 7.0),
+                          (HUD_ROUTE_CORE, 4.0)):
         painter.setPen(QPen(colour, width, Qt.PenStyle.SolidLine,
                             Qt.PenCapStyle.RoundCap,
                             Qt.PenJoinStyle.RoundJoin))
@@ -311,6 +312,24 @@ def _selected_lane_context(points, behind_m=40.0, ahead_m=210.0,
     return context, forward
 
 
+def _traffic_light_truck_position(light, world_transform):
+    """Use the Engine-selected relative signal pose when it is available.
+
+    ``nearest_light_ahead`` calculates these values from the same telemetry
+    frame that selected the controlling signal. Re-transforming its absolute
+    world coordinates around the HUD's deliberately stabilised display pose
+    could mirror a right/front signal to left/behind while the truck turned.
+    """
+    try:
+        ahead = float(light["distance"])
+        lateral = float(light["lateral_distance"])
+        if math.isfinite(ahead) and math.isfinite(lateral):
+            return ahead, lateral
+    except (KeyError, TypeError, ValueError, OverflowError):
+        pass
+    return world_transform(float(light["x"]), float(light["z"]))
+
+
 def _car_colour(v):
     """Stable (body, roof) colour pair for a vehicle, keyed on its id."""
     vid = v.get("id", 0) or 0
@@ -379,6 +398,14 @@ class UltraPilotHUD(QWidget):
         self.timer.start(80)   # ~12 fps animation
 
     def _tick(self):
+        if self.shared_state.get("app_shutdown_requested", False):
+            self.timer.stop()
+            self.hide()
+            self.close()
+            app = QApplication.instance()
+            if app is not None:
+                app.quit()
+            return
         self._blink = not self._blink
         self._t += 0.08   # advance the animation clock (timer fires every 80 ms)
         # Global camera controls work while ETS2 owns focus; HUD stays fully
@@ -1138,7 +1165,7 @@ class UltraPilotHUD(QWidget):
                         qp.drawPolygon(QPolygonF(
                             projected_left + list(reversed(projected_right))))
                     qp.setBrush(Qt.BrushStyle.NoBrush)
-                    qp.setPen(QPen(QColor(186, 199, 218, 205), 2.3,
+                    qp.setPen(QPen(QColor(205, 214, 228, 225), 3.0,
                                    Qt.PenStyle.SolidLine,
                                    Qt.PenCapStyle.RoundCap,
                                    Qt.PenJoinStyle.RoundJoin))
@@ -1184,8 +1211,8 @@ class UltraPilotHUD(QWidget):
             light = d.get("light")
             if isinstance(light, dict):
                 try:
-                    light_a, light_l = to_truck(
-                        float(light["x"]), float(light["z"]))
+                    light_a, light_l = _traffic_light_truck_position(
+                        light, to_truck)
                     light_ground = (float(light.get("y", d["altitude"]))
                                     - float(d["altitude"]))
                 except (KeyError, TypeError, ValueError, OverflowError):
@@ -1626,6 +1653,12 @@ class UltraPilotHUD(QWidget):
     def _draw_light(self, qp, view, light, ahead, lateral, ground=0.0):
         """Draw a traffic signal at its real world-space pole position."""
         color = light.get("color", "off")
+        # ETS2 state 32 is the disabled/night mode: the real signal flashes
+        # amber at a calm one-second cadence instead of remaining completely
+        # dark. Keep braking disabled because the state is not red.
+        if color == "sleep":
+            color = ("yellow" if int(getattr(self, "_t", 0.0) * 2.0) % 2 == 0
+                     else "off")
         pole_base = self._project(ahead, lateral, view, ground)
         pole_top = self._project(ahead, lateral, view, ground + 5.9)
         if pole_base is None or pole_top is None:

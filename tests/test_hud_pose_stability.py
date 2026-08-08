@@ -11,6 +11,7 @@ from core.hud import (UltraPilotHUD, _continuous_lane_chunks,
                       _hud_segment_is_selected_context,
                       _lane_boundary_points, _ordered_display_path_runs,
                       _rounded_screen_path, _selected_lane_context,
+                      _traffic_light_truck_position,
                       _variable_lane_boundary_points)
 from core.sdk.scs_sdk import SCSTelemetry
 from tests.test_lane_route_builder import SyntheticMap
@@ -29,11 +30,11 @@ class HudPoseStabilityTests(unittest.TestCase):
         self.assertTrue(_hud_segment_is_selected_context("lane", route))
         self.assertTrue(_hud_segment_is_selected_context("lane", []))
         self.assertFalse(_hud_segment_is_selected_context("unknown", route))
-        self.assertTrue(_hud_segment_has_bright_outline("lane", route))
+        self.assertFalse(_hud_segment_has_bright_outline("lane", route))
         self.assertTrue(_hud_segment_has_bright_outline("road", route))
-        # PPD path identity keeps each prefab envelope separate, so its subtle
-        # edges remain visible even without a selected GPS path.
-        self.assertTrue(_hud_segment_has_bright_outline("lane", []))
+        # Alternative PPD movements remain asphalt-only. Only the validated
+        # LanePath paints edges inside the prefab, avoiding exit-angle tangles.
+        self.assertFalse(_hud_segment_has_bright_outline("lane", []))
 
     def test_gps_line_has_distinct_glow_outline_and_blue_core(self):
         class Painter:
@@ -49,7 +50,7 @@ class HudPoseStabilityTests(unittest.TestCase):
         painter = Painter()
         _draw_hud_route_curve(painter, QPainterPath())
         self.assertEqual([pen.widthF() for pen in painter.pens],
-                         [20.0, 12.0, 6.0])
+                         [12.0, 7.0, 4.0])
         self.assertEqual([pen.color().name().upper() for pen in painter.pens],
                          ["#3B82F6", "#0F4899", "#3B82F6"])
 
@@ -376,10 +377,29 @@ class HudPoseStabilityTests(unittest.TestCase):
         }
         painter = Painter()
         hud._draw_driving_view(painter, View(), data)
-        # The road approach and the topology-separated prefab lane each keep
-        # two visible outer edges; no direct chord is introduced.
-        self.assertEqual(painter.paths, 4)
+        # Only the road-look approach has broad-scene outlines. Alternative
+        # prefab movements are surface-only until one exact LanePath is active.
+        self.assertEqual(painter.paths, 2)
         self.assertGreaterEqual(painter.polygons, 3)
+
+    def test_selected_signal_uses_same_frame_relative_pose(self):
+        calls = []
+
+        def stale_display_transform(x, z):
+            calls.append((x, z))
+            return -30.0, -6.0
+
+        relative = _traffic_light_truck_position({
+            "x": 900.0, "z": 1200.0,
+            "distance": 28.0, "lateral_distance": 6.0,
+        }, stale_display_transform)
+        self.assertEqual(relative, (28.0, 6.0))
+        self.assertEqual(calls, [])
+
+    def test_signal_world_pose_remains_compatibility_fallback(self):
+        self.assertEqual(_traffic_light_truck_position(
+            {"x": 10.0, "z": 20.0}, lambda x, z: (z, x)),
+            (20.0, 10.0))
 
     def test_traffic_light_is_world_anchored_and_never_uses_string_brush(self):
         class StrictPainter:

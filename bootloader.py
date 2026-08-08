@@ -251,7 +251,12 @@ def main():
     processes = {name: spawn(name) for name in targets}
     restart_guard = RestartGuard()
 
+    shutdown_state = {"started": False}
+
     def shutdown():
+        if shutdown_state["started"]:
+            return
+        shutdown_state["started"] = True
         logging.info("Shutting down UltraPilot…")
         # Keep the Manager alive while the Engine asks every plugin to stop.
         # Otherwise a normal close produces BrokenPipe/EOF crash reports.
@@ -274,6 +279,15 @@ def main():
         # Engine/HUD are restarted only if they crash unexpectedly.
         while True:
             time.sleep(1.0)
+            try:
+                shutdown_requested = bool(
+                    shared_dict.get("app_shutdown_requested", False))
+            except Exception:
+                shutdown_requested = False
+            if shutdown_requested:
+                logging.info("Application shutdown request received from UI.")
+                shutdown()
+                break
             if not processes["UI"].is_alive():
                 logging.info("UI closed — exiting UltraPilot.")
                 shutdown()

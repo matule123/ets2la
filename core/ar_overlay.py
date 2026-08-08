@@ -202,6 +202,13 @@ class AROverlay(QWidget):
         self.timer.start(16)
 
     def _tick(self):
+        if self.state.get("app_shutdown_requested", False):
+            self.timer.stop()
+            self.close()
+            app = QApplication.instance()
+            if app is not None:
+                app.quit()
+            return
         self._sync_viewport()
         self.update()
 

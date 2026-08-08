@@ -190,6 +190,10 @@ class UiChromeTests(unittest.TestCase):
         self.assertFalse(region.contains(QPoint(0, 0)))
         self.assertTrue(region.contains(QPoint(610, 380)))
         window.close()
+        self.assertFalse(state.get("ui_ready", True))
+        self.assertTrue(state.get("app_shutdown_requested", False))
+        self.assertEqual(state.get("app_shutdown_reason"),
+                         "main window closed")
 
     def test_settings_use_responsive_cards_and_vector_header_icon(self):
         settings = SettingsMenu(State({"ui_theme": "light"}))

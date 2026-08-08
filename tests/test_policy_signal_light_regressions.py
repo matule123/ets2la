@@ -7,7 +7,7 @@ from unittest import mock
 from core.engine import UltraPilotEngine
 from core.navigation.lane_model import LaneId, LanePath, LanePoint, LaneSegment
 from core.sdk.ets2la_data import (
-    ETS2LAData, _SEM_FMT, _SEM_SIZE, nearest_light_ahead,
+    ETS2LAData, ST_SLEEP, _SEM_FMT, _SEM_SIZE, nearest_light_ahead,
 )
 from plugins.drivepolicy.main import Plugin as DrivePolicyPlugin
 from plugins.map.main import Plugin as MapPlugin
@@ -189,6 +189,18 @@ class PolicySignalLightRegressionTests(unittest.TestCase):
         self.assertAlmostEqual(lights[0]["z"], 61960.0)
         self.assertAlmostEqual(lights[0]["y"], 59.25)
         self.assertEqual(lights[0]["color"], "red")
+
+    def test_sleeping_semaphore_is_published_as_flashing_amber_state(self):
+        entries = [0] * (13 * 40)
+        entries[:13] = [
+            4.0, 1.5, 8.0, 0, 0,
+            1.0, 0.0, 0.0, 0.0, 1, 0.0, ST_SLEEP, 7,
+        ]
+        reader = ETS2LAData()
+        reader._traffic_buf = object()
+        reader._parked_buf = object()
+        reader._sem_buf = bytearray(struct.pack(_SEM_FMT, *entries))
+        self.assertEqual(reader.read_traffic_lights()[0]["color"], "sleep")
 
     def test_nearest_light_rejects_closer_crossing_arm(self):
         lights = [
