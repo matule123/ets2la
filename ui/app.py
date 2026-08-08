@@ -31,6 +31,33 @@ def window_control_notch_path(width, height):
     return path
 
 
+def content_surface_path(width, height, notch_width=59.0, notch_height=24.0,
+                         radius=15.0):
+    """Rounded inner application surface with a top-right control cutout."""
+    width, height = float(width), float(height)
+    notch_width = min(float(notch_width), max(0.0, width - radius * 2.0))
+    notch_x = width - notch_width
+    path = QPainterPath()
+    path.moveTo(radius, 0.5)
+    path.lineTo(max(radius, notch_x - 10.0), 0.5)
+    path.cubicTo(notch_x - 3.0, 0.5, notch_x - 3.0, 8.0,
+                 notch_x + 4.0, 10.0)
+    path.lineTo(notch_x + 4.0, max(10.0, notch_height - 8.0))
+    path.quadTo(notch_x + 4.0, notch_height,
+                notch_x + 13.0, notch_height)
+    path.lineTo(width - radius, notch_height)
+    path.quadTo(width - 0.5, notch_height, width - 0.5,
+                notch_height + radius)
+    path.lineTo(width - 0.5, height - radius)
+    path.quadTo(width - 0.5, height - 0.5, width - radius, height - 0.5)
+    path.lineTo(radius, height - 0.5)
+    path.quadTo(0.5, height - 0.5, 0.5, height - radius)
+    path.lineTo(0.5, radius)
+    path.quadTo(0.5, 0.5, radius, 0.5)
+    path.closeSubpath()
+    return path
+
+
 def rounded_window_region(width, height, radius=15.0):
     """Antialiased-looking top-level mask for the frameless window."""
     path = QPainterPath()
@@ -62,6 +89,34 @@ class WindowControlDot(QPushButton):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(self._color)
         painter.drawEllipse(QRectF(0.5, 0.5, 10.0, 10.0))
+
+
+class ContentSurface(QFrame):
+    """The one shared rounded content window used by every sidebar page."""
+
+    def __init__(self, palette, parent=None):
+        super().__init__(parent)
+        self._palette = palette
+        self.setObjectName("ContentSurface")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setStyleSheet("QFrame#ContentSurface{background:transparent;border:none;}")
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(self._palette["border"]), 1.0))
+        painter.setBrush(QColor(self._palette["surface"]))
+        painter.drawPath(content_surface_path(self.width(), self.height()))
+        painter.end()
+
+    def set_palette(self, palette):
+        self._palette = palette
+        self.update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        path = content_surface_path(self.width(), self.height())
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
 
 class MacTitleBar(QFrame):
@@ -749,11 +804,6 @@ class UltraPilotApp(QMainWindow):
         self.drag_area = WindowDragArea(self)
         self.drag_area.setGeometry(0, 0, central.width(), 34)
         self.drag_area.raise_()
-        self.title_bar = MacTitleBar(self, self._pal)
-        self.title_bar.setParent(central)
-        self.title_bar.move(central.width() - self.title_bar.width(), 0)
-        self.title_bar.raise_()
-
         self.sidebar = QFrame()
         self.sidebar.setObjectName("Sidebar")
         self.sidebar.setFixedWidth(232)
@@ -868,6 +918,28 @@ class UltraPilotApp(QMainWindow):
         sb.addWidget(footer_card)
         main_layout.addWidget(self.sidebar)
 
+        # Every sidebar destination is rendered inside the same rounded inner
+        # window.  Its top-right path leaves a real shaped seat for the dots.
+        content_host = QWidget()
+        self.content_host = content_host
+        content_host.setObjectName("ContentHost")
+        content_host.setStyleSheet("QWidget#ContentHost{background:transparent;border:none;}")
+        content_host_layout = QVBoxLayout(content_host)
+        content_host_layout.setContentsMargins(8, 8, 8, 8)
+        content_host_layout.setSpacing(0)
+        self.content_surface = ContentSurface(self._pal)
+        surface_layout = QVBoxLayout(self.content_surface)
+        surface_layout.setContentsMargins(1, 1, 1, 1)
+        surface_layout.setSpacing(0)
+        content_host_layout.addWidget(self.content_surface)
+        main_layout.addWidget(content_host, 1)
+
+        self.title_bar = MacTitleBar(self, self._pal)
+        self.title_bar.setParent(self.content_host)
+        self.title_bar.move(self.content_host.width() - 8
+                            - self.title_bar.width(), 8)
+        self.title_bar.raise_()
+
         self.pages = QStackedWidget()
         # Build each page defensively so one broken page can't stop the app.
         def _add(factory, name):
@@ -894,7 +966,7 @@ class UltraPilotApp(QMainWindow):
         _add(lambda: PluginsPage(state), "Plugins")
         _add(lambda: SettingsMenu(state), "Settings")
         _add(lambda: AboutPage(state), "About")
-        main_layout.addWidget(self.pages)
+        surface_layout.addWidget(self.pages)
 
         self.start_btn = QPushButton("ZAPNÚŤ AUTOPILOT")
         self.start_btn.setObjectName("SidebarAutopilot")
@@ -993,8 +1065,8 @@ class UltraPilotApp(QMainWindow):
             self.drag_area.setGeometry(0, 0, self.centralWidget().width(), 34)
             self.drag_area.raise_()
         if hasattr(self, "title_bar"):
-            self.title_bar.move(self.centralWidget().width()
-                                - self.title_bar.width(), 0)
+            self.title_bar.move(self.content_host.width() - 8
+                                - self.title_bar.width(), 8)
             self.title_bar.raise_()
 
     def showEvent(self, event):
@@ -1080,6 +1152,7 @@ class UltraPilotApp(QMainWindow):
             self._pal = palette(new_theme)
             self.setStyleSheet(stylesheet(new_theme))
             self.title_bar.set_palette(self._pal)
+            self.content_surface.set_palette(self._pal)
             self.brand_word.setStyleSheet(
                 "font-size:21px;font-weight:750;color:"
                 + self._pal["text"] + ";border:none;")

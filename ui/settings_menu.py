@@ -1,7 +1,7 @@
 import logging
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
                              QLabel, QSlider, QCheckBox, QFrame, QComboBox,
-                             QPushButton)
+                             QPushButton, QSizePolicy)
 from PyQt6.QtCore import Qt
 from core.theme import palette
 
@@ -118,6 +118,9 @@ class SettingsMenu(QWidget):
 
         workspace = QFrame()
         workspace.setObjectName("SettingsWorkspace")
+        workspace.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                QSizePolicy.Policy.Expanding)
+        workspace.setMinimumHeight(540)
         workspace.setStyleSheet(
             "QFrame#SettingsWorkspace{background:" + self._pal['card']
             + ";border:1px solid " + self._pal['border']
@@ -162,8 +165,8 @@ class SettingsMenu(QWidget):
         plugins_label.setObjectName("SettingsCategoryLabel")
         nav_layout.addSpacing(13)
         nav_layout.addWidget(plugins_label)
-        add_nav("Adaptívny tempomat", "controls")
-        add_nav("Lane Control", "controls")
+        add_nav("Adaptívny tempomat", "acc")
+        add_nav("Lane Control", "lane")
         nav_layout.addStretch()
         self._settings_category_labels = (global_label, plugins_label)
         workspace_layout.addWidget(nav_panel)
@@ -213,6 +216,7 @@ class SettingsMenu(QWidget):
         grid.setVerticalSpacing(16)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
+        self._settings_grid = grid
 
         # --- ACC Section ---
         acc_frame, acc_layout = self._section_card(
@@ -358,8 +362,7 @@ class SettingsMenu(QWidget):
         content_layout.addLayout(grid)
         content_layout.addStretch()
         workspace_layout.addWidget(content_panel, 1)
-        layout.addWidget(workspace)
-        layout.addStretch()
+        layout.addWidget(workspace, 1)
         default_nav.setChecked(True)
         self._show_settings_section("global", default_nav)
         self._restyle_workspace()
@@ -380,11 +383,29 @@ class SettingsMenu(QWidget):
             "global": (self._app_frame, self._sound_frame),
             "controls": (self._acc_frame, self._steer_frame),
             "sdk": (self._sdk_frame,),
+            "acc": (self._acc_frame,),
+            "lane": (self._steer_frame,),
         }
         visible = set(groups.get(section, groups["global"]))
-        for frame in (self._acc_frame, self._steer_frame, self._app_frame,
-                      self._sound_frame, self._sdk_frame):
+        frames = (self._acc_frame, self._steer_frame, self._app_frame,
+                  self._sound_frame, self._sdk_frame)
+        for frame in frames:
+            self._settings_grid.removeWidget(frame)
             frame.setVisible(frame in visible)
+        # A single category owns the full content width. Only the combined
+        # Controls overview deliberately uses two balanced columns.
+        if section == "controls":
+            self._settings_grid.addWidget(self._acc_frame, 0, 0)
+            self._settings_grid.addWidget(self._steer_frame, 0, 1)
+        elif section == "acc":
+            self._settings_grid.addWidget(self._acc_frame, 0, 0, 1, 2)
+        elif section == "lane":
+            self._settings_grid.addWidget(self._steer_frame, 0, 0, 1, 2)
+        elif section == "sdk":
+            self._settings_grid.addWidget(self._sdk_frame, 0, 0, 1, 2)
+        else:
+            self._settings_grid.addWidget(self._app_frame, 0, 0, 1, 2)
+            self._settings_grid.addWidget(self._sound_frame, 1, 0, 1, 2)
         headings = {
             "global": ("Globálne nastavenia",
                        "Vzhľad, jazyk a správanie celej aplikácie."),
@@ -392,6 +413,10 @@ class SettingsMenu(QWidget):
                          "Adaptívny tempomat a výstup riadenia kamióna."),
             "sdk": ("SDK a runtime",
                     "Stav rozhraní potrebných na komunikáciu s ETS2."),
+            "acc": ("Adaptívny tempomat",
+                    "Cieľová rýchlosť, odstup a rešpektovanie limitov."),
+            "lane": ("Lane Control",
+                     "Smer a citlivosť výstupu pre bezpečné vedenie v pruhu."),
         }
         title, subtitle = headings.get(section, headings["global"])
         self._hero_title.setText(title)

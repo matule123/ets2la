@@ -14,8 +14,8 @@ from core.theme import palette, stylesheet
 sys.modules.setdefault("ui", importlib.import_module("UI"))
 from UI import app as app_module
 from UI.app import (MacTitleBar, UltraPilotApp, rounded_window_region,
-                    window_control_notch_path, DashboardPage, AboutPage,
-                    PluginsPage)
+                    window_control_notch_path, content_surface_path,
+                    DashboardPage, AboutPage, PluginsPage)
 from UI.icons import line_icon
 from UI.map_page import MapPage
 from UI.dynamic_island import DynamicIsland, _friendly_activity_message
@@ -77,6 +77,13 @@ class UiChromeTests(unittest.TestCase):
         for x in (14.5, 29.5, 44.5):
             self.assertTrue(path.contains(type(bounds.center())(x, 11.5)))
 
+    def test_shared_content_surface_has_real_top_right_control_cutout(self):
+        path = content_surface_path(900, 700)
+        point = type(path.boundingRect().center())
+        self.assertTrue(path.contains(point(10, 20)))
+        self.assertFalse(path.contains(point(890, 10)))
+        self.assertTrue(path.contains(point(890, 45)))
+
     def test_sidebar_uses_card_navigation_styles_and_original_line_icons(self):
         css = stylesheet("light")
         for selector in ("QPushButton#NavButton:checked",
@@ -113,6 +120,8 @@ class UiChromeTests(unittest.TestCase):
         self.assertEqual(window.start_btn.height(), 48)
         self.assertEqual(window.start_btn.text(), "Zapnúť autopilota")
         self.assertEqual(window.centralWidget().objectName(), "WindowSurface")
+        self.assertEqual(window.content_surface.objectName(), "ContentSurface")
+        self.assertIs(window.title_bar.parentWidget(), window.content_host)
         self.assertIn("border: 1px solid #AEB5BE", stylesheet("light"))
         region = rounded_window_region(1220, 760)
         self.assertFalse(region.contains(QPoint(0, 0)))
@@ -142,11 +151,26 @@ class UiChromeTests(unittest.TestCase):
         self.assertGreaterEqual(len(buttons), 5)
         self.assertEqual(buttons[0].text(), "Globálne")
         self.assertTrue(buttons[0].isChecked())
+        self.assertGreaterEqual(workspace.minimumHeight(), 540)
         self.assertTrue(settings._app_frame.isVisibleTo(settings))
+        app_pos = settings._settings_grid.getItemPosition(
+            settings._settings_grid.indexOf(settings._app_frame))
+        self.assertEqual(app_pos[3], 2)
         buttons[1].click()
         self.app.processEvents()
         self.assertTrue(settings._acc_frame.isVisibleTo(settings))
         self.assertFalse(settings._app_frame.isVisibleTo(settings))
+        buttons[3].click()
+        self.app.processEvents()
+        self.assertTrue(settings._acc_frame.isVisibleTo(settings))
+        self.assertFalse(settings._steer_frame.isVisibleTo(settings))
+        acc_pos = settings._settings_grid.getItemPosition(
+            settings._settings_grid.indexOf(settings._acc_frame))
+        self.assertEqual(acc_pos[3], 2)
+        buttons[4].click()
+        self.app.processEvents()
+        self.assertFalse(settings._acc_frame.isVisibleTo(settings))
+        self.assertTrue(settings._steer_frame.isVisibleTo(settings))
         settings.close()
 
     def test_onboarding_language_page_uses_two_column_status_cards(self):
