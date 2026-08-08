@@ -93,6 +93,11 @@ class LaneSegment:
     # ``lane_index`` when SCS inserts rail/no_vehicles lanes and is essential
     # for preserving the physical lane across adjacent road items.
     raw_lane_index: int = -1
+    # Ordered pair in the authoritative game GPS buffer which proved this
+    # segment.  Several directed map edges may share one pair when the sparse
+    # SDK corridor needs a topological bridge.  ``-1`` is reserved for a
+    # proven rolling-prefix segment which starts at the live truck position.
+    gps_pair_index: int = -1
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +110,10 @@ class LanePath:
     valid: bool = False
     failure_reason: str = ""
     revision: int = 0
+    # First authoritative GPS pair expected after a locator-proven rolling
+    # prefix was removed.  This is independent evidence for trajectory
+    # validation; ``-1`` is reserved for legacy/manual paths without pair IDs.
+    expected_first_gps_pair_index: int = -1
 
 
 @dataclass(frozen=True, slots=True)

@@ -20,7 +20,9 @@ class RouteDiagnosticFormatTests(unittest.TestCase):
     def test_every_stable_failure_code_has_a_deterministic_classifier_case(self):
         cases = {
             "DATASET_MISSING_PREFAB": (
-                "select_lane_sequence", "prefab token is missing", {}),
+                "resolve_gps_corridor",
+                "missing prefab description blkw_1401i for GPS UID pair 1 -> 2",
+                {"prefab_token": "blkw_1401i"}),
             "DATASET_VERSION_MISMATCH": (
                 "dataset_version", "dataset version differs from game", {}),
             "DATASET_MISSING_UID": (

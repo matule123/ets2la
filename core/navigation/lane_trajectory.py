@@ -32,6 +32,9 @@ class TrajectoryValidation:
     max_corridor_deviation_m: float = 0.0
     max_height_jump_m: float = 0.0
     self_intersections: int = 0
+    first_gps_pair_index: int = -1
+    last_gps_pair_index: int = -1
+    gps_pair_count: int = 0
 
 
 MAX_CONTROL_GAP_M = 3.25
@@ -41,6 +44,9 @@ MAX_CURVATURE = 0.55
 MAX_CURVATURE_JUMP = 0.35
 MAX_HEIGHT_JUMP_M = 1.50
 MAX_LENGTH_CHANGE_RATIO = 0.035
+MAX_PROVEN_BOUNDARY_GAP_M = 0.75
+MAX_PROVEN_BOUNDARY_VERTICAL_M = 0.50
+MAX_PROVEN_BOUNDARY_HEADING_DEG = 15.0
 
 
 def _xyz(point):
@@ -246,7 +252,9 @@ def _count_self_intersections(points):
 def _invalid(path, reason):
     return LanePath(path.segments, (), path.source_gps_uids,
                     valid=False, failure_reason=reason,
-                    revision=path.revision)
+                    revision=path.revision,
+                    expected_first_gps_pair_index=(
+                        path.expected_first_gps_pair_index))
 
 
 def _source_length(segments):
@@ -324,14 +332,27 @@ def build_lane_trajectory(lane_path: LanePath, spacing_m: float = 2.0,
                        for connection in previous.successors):
                 return failed(_invalid(lane_path,
                     f"unconfirmed topology {previous.lane_id} -> {segment.lane_id}"))
-            gap = math.dist(_xyz(flattened[-1]), _xyz(sampled[0]))
-            if gap > 6.0:
+            source, target = flattened[-1], sampled[0]
+            gap = math.dist(_xyz(source), _xyz(target))
+            vertical = abs(target.y-source.y)
+            heading = abs(wrap_angle(target.heading-source.heading))
+            if (gap > MAX_PROVEN_BOUNDARY_GAP_M
+                    or vertical > MAX_PROVEN_BOUNDARY_VERTICAL_M):
                 return failed(_invalid(lane_path,
-                    f"confirmed segment boundary has {gap:.2f} m gap at "
-                    f"UID {segment.start_uid}"))
+                    f"confirmed segment boundary at GPS pair "
+                    f"{segment.gps_pair_index} has {gap:.2f} m gap "
+                    f"({vertical:.2f} m vertical) at UID "
+                    f"{segment.start_uid}; no chord is permitted"))
+            if heading > math.radians(
+                    MAX_PROVEN_BOUNDARY_HEADING_DEG):
+                return failed(_invalid(lane_path,
+                    f"small boundary repair at GPS pair "
+                    f"{segment.gps_pair_index} changes heading by "
+                    f"{math.degrees(heading):.1f} degrees at UID "
+                    f"{segment.start_uid}"))
             if gap > 0.25:
                 interval_count = max(1, int(math.ceil(gap / spacing_m)))
-                start, end = flattened[-1], sampled[0]
+                start, end = source, target
                 for interval in range(1, interval_count):
                     fraction = interval/interval_count
                     owner = previous if fraction <= 0.5 else segment
@@ -346,7 +367,8 @@ def build_lane_trajectory(lane_path: LanePath, spacing_m: float = 2.0,
     points = _with_kinematics(flattened)
     result = LanePath(lane_path.segments, points, lane_path.source_gps_uids,
                       _polyline_length(points), lane_path.confidence,
-                      True, "", lane_path.revision)
+                      True, "", lane_path.revision,
+                      lane_path.expected_first_gps_pair_index)
     source_length = _source_length(lane_path.segments)
     if source_length > 1e-6:
         length_ratio = abs(result.distance_m-source_length) / source_length
@@ -399,11 +421,90 @@ def validate_lane_trajectory(lane_path: LanePath) -> TrajectoryValidation:
     for index, (first, second) in enumerate(zip(segments, segments[1:])):
         if first.end_uid != second.start_uid:
             return TrajectoryValidation(False,
-                f"LaneSegment topology UID mismatch {first.end_uid} -> {second.start_uid}")
+                f"LaneSegment topology UID mismatch at boundary {index}: "
+                f"{first.end_uid} -> {second.start_uid}")
         if not any(connection.target == second.lane_id
                    for connection in first.successors):
             return TrajectoryValidation(False,
                 f"missing LaneConnection {first.lane_id} -> {second.lane_id}")
+        source, target = first.centerline[-1], second.centerline[0]
+        gap = math.dist(_xyz(source), _xyz(target))
+        vertical = abs(target.y-source.y)
+        heading = abs(math.degrees(wrap_angle(
+            target.heading-source.heading)))
+        if (gap > MAX_PROVEN_BOUNDARY_GAP_M
+                or vertical > MAX_PROVEN_BOUNDARY_VERTICAL_M):
+            return TrajectoryValidation(False,
+                f"LaneSegment boundary {index} at GPS pair "
+                f"{second.gps_pair_index} has {gap:.2f} m gap "
+                f"({vertical:.2f} m vertical) at UID {second.start_uid}")
+        if heading > MAX_PROVEN_BOUNDARY_HEADING_DEG:
+            return TrajectoryValidation(False,
+                f"LaneSegment boundary {index} at GPS pair "
+                f"{second.gps_pair_index} changes heading by "
+                f"{heading:.1f} degrees at UID {second.start_uid}")
+
+    # ``gps_pair_index`` binds every production LaneSegment to the exact
+    # ordered SDK pair which proved it.  This catches swapped arms, repeated
+    # UID/set-based shortcuts and stale bridge pieces without rejecting the
+    # one allowed rolling-prefix segment marked ``-1``.
+    gps_pairs = [segment.gps_pair_index for segment in segments
+                 if segment.gps_pair_index >= 0]
+    first_gps_pair = gps_pairs[0] if gps_pairs else -1
+    last_gps_pair = gps_pairs[-1] if gps_pairs else -1
+    unique_gps_pairs = list(dict.fromkeys(gps_pairs))
+    source_uids = tuple(int(uid) for uid in lane_path.source_gps_uids)
+    distinct_pair_indices = [
+        index for index, (start, end) in enumerate(
+            zip(source_uids, source_uids[1:]))
+        if start != end
+    ]
+    if gps_pairs:
+        if not distinct_pair_indices:
+            return TrajectoryValidation(False,
+                "LaneSegments have GPS pair identities but the source GPS "
+                "corridor has no directed pair")
+        expected_first_gps_pair = (
+            lane_path.expected_first_gps_pair_index
+            if lane_path.expected_first_gps_pair_index >= 0
+            else distinct_pair_indices[0])
+        if first_gps_pair != expected_first_gps_pair:
+            return TrajectoryValidation(False,
+                f"trajectory omits first GPS pair "
+                f"{expected_first_gps_pair} (first is {first_gps_pair})")
+        if any(second < first for first, second in zip(
+                gps_pairs, gps_pairs[1:])):
+            return TrajectoryValidation(False,
+                f"GPS pair order moves backwards: {gps_pairs}")
+        if any(index not in distinct_pair_indices for index in gps_pairs):
+            return TrajectoryValidation(False,
+                f"LaneSegment references a missing/repeated GPS pair: "
+                f"{gps_pairs}")
+        expected = [index for index in distinct_pair_indices
+                    if first_gps_pair <= index <= last_gps_pair]
+        if unique_gps_pairs != expected:
+            return TrajectoryValidation(False,
+                f"GPS pair order omits or reorders corridor edges: "
+                f"{unique_gps_pairs} != {expected}")
+        if last_gps_pair != distinct_pair_indices[-1]:
+            return TrajectoryValidation(False,
+                f"trajectory omits final GPS pair "
+                f"{distinct_pair_indices[-1]} (last is {last_gps_pair})")
+        for pair_index in unique_gps_pairs:
+            group = [segment for segment in segments
+                     if segment.gps_pair_index == pair_index]
+            # Trimming may start part-way through the first centreline, but it
+            # never changes the source LaneSegment UID identity.
+            if group[0].start_uid != source_uids[pair_index]:
+                return TrajectoryValidation(False,
+                    f"GPS pair {pair_index} starts at UID "
+                    f"{group[0].start_uid}, expected "
+                    f"{source_uids[pair_index]}")
+            if group[-1].end_uid != source_uids[pair_index + 1]:
+                return TrajectoryValidation(False,
+                    f"GPS pair {pair_index} ends at UID "
+                    f"{group[-1].end_uid}, expected "
+                    f"{source_uids[pair_index + 1]}")
 
     first_source, last_source = segments[0].centerline[0], segments[-1].centerline[-1]
     if math.dist(_xyz(points[0]), _xyz(first_source)) > 1e-6:
@@ -467,6 +568,9 @@ def validate_lane_trajectory(lane_path: LanePath) -> TrajectoryValidation:
         max_corridor_deviation_m=max_deviation,
         max_height_jump_m=max(height_jumps, default=0.0),
         self_intersections=self_intersections,
+        first_gps_pair_index=first_gps_pair,
+        last_gps_pair_index=last_gps_pair,
+        gps_pair_count=len(unique_gps_pairs),
     )
     if max_spacing > MAX_CONTROL_GAP_M:
         return TrajectoryValidation(False,

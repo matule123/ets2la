@@ -816,6 +816,15 @@ class LaneGeometryAuditTests(unittest.TestCase):
         self.assertIsNone(segment)
         self.assertIn("missing", reason)
 
+        # Geometry plus input/output/next/prev is still insufficient without
+        # the navNode identity of the GPS-selected physical exit.
+        net._prefab_lane_data[token]["curves"][0]["nav_node_index"] = -1
+        segment, reason = net._prefab_lane_segment(
+            GpsCorridorEdge(1, 2, "prefab", 0,
+                            prefab_instance=(instance,)), 0)
+        self.assertIsNone(segment)
+        self.assertIn("missing", reason)
+
     def test_legacy_prefab_uses_item_node_zero_as_world_anchor(self):
         net = RoadNetwork(); net.loaded = True
         net.nodes.update({1: (100.0, 100.0), 2: (1000.0, 1000.0)})

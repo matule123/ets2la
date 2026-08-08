@@ -177,6 +177,53 @@ class LaneTrajectorySyntheticTests(unittest.TestCase):
         self.assertEqual({point.segment_index for point in trajectory.points},
                          {0, 1, 2})
 
+    def test_ordered_gps_pair_identity_handles_repeats_and_omissions(self):
+        m = SyntheticMap()
+        for uid, z in enumerate((0, 40, 80, 120), 1):
+            m.node(uid, 0, z)
+        first = m.road(1, 2, 2)
+        m.road(2, 3, 2); m.road(3, 4, 2)
+        # The adjacent duplicate UID has no edge.  The remaining occurrence
+        # indices must stay tied to the exact ordered SDK buffer positions.
+        gps = (1, 2, 2, 3, 4)
+        corridor = m.net.resolve_gps_corridor(gps)
+        self.assertEqual([edge.gps_pair_index for edge in corridor.edges],
+                         [0, 2, 3])
+        match = m.match_on(first, 0, gps)
+        segments, reason = m.net.select_lane_sequence(corridor, match)
+        self.assertEqual(reason, "")
+        source = m.net.connect_lane_sequence(segments, gps)
+        trajectory = build_lane_trajectory(source)
+        validation = validate_lane_trajectory(trajectory)
+        self.assertTrue(validation.valid, validation.failure_reason)
+        self.assertEqual(validation.first_gps_pair_index, 0)
+        self.assertEqual(validation.last_gps_pair_index, 3)
+        self.assertEqual(validation.gps_pair_count, 3)
+
+        omitted_first = replace(
+            trajectory, segments=trajectory.segments[1:])
+        result = validate_lane_trajectory(omitted_first)
+        self.assertFalse(result.valid)
+        self.assertIn("omits first GPS pair 0", result.failure_reason)
+
+        omitted_middle = replace(trajectory, segments=(
+            trajectory.segments[0],
+            replace(trajectory.segments[1], gps_pair_index=3),
+            trajectory.segments[2],
+        ))
+        result = validate_lane_trajectory(omitted_middle)
+        self.assertFalse(result.valid)
+        self.assertIn("omits or reorders", result.failure_reason)
+
+        swapped = replace(trajectory, segments=(
+            trajectory.segments[0],
+            replace(trajectory.segments[1], gps_pair_index=3),
+            replace(trajectory.segments[2], gps_pair_index=2),
+        ))
+        result = validate_lane_trajectory(swapped)
+        self.assertFalse(result.valid)
+        self.assertIn("moves backwards", result.failure_reason)
+
     def test_bridge_and_road_below_remain_on_separate_heights(self):
         lower, _ = self.assert_valid_trajectory(single_lane_path(
             [(0, 0, 0), (0, 0, 40)], uid=20))

@@ -4,7 +4,9 @@ import pickle
 import unittest
 from unittest import mock
 
-from core.navigation.lane_model import LaneId, LaneLocator, LanePoint, LaneSegment
+from core.navigation.lane_model import (
+    LaneConnection, LaneId, LaneLocator, LanePoint, LaneSegment,
+)
 from core.navigation.road_network import CACHE_VERSION, RoadNetwork
 
 
@@ -124,7 +126,7 @@ class LaneRouteBuilderTests(unittest.TestCase):
         self.assertGreaterEqual(phases[-1][0], 0.88)
         self.assertIn("prefaby", phases[-1][1].lower())
 
-    def test_confirmed_prefab_exit_tapers_into_following_road(self):
+    def test_confirmed_prefab_exit_cannot_move_following_road_geometry(self):
         prefab_id = LaneId(10, 1, 0, "junction", 3, (3,))
         road_id = LaneId(20, 1, 0)
         prefab = LaneSegment(
@@ -132,24 +134,24 @@ class LaneRouteBuilderTests(unittest.TestCase):
             "prefab", (
                 LanePoint(3.0, 0.0, 10.0, 0.0, 0.0, lane_id=prefab_id),
                 LanePoint(3.0, 0.0, 0.0, 10.0, 0.0, lane_id=prefab_id),
-            ))
+            ), successors=(LaneConnection(road_id, "prefab"),),
+            gps_pair_index=0)
         road_points = tuple(
             LanePoint(0.0, 0.0, -distance, distance, 0.0,
                       lane_id=road_id)
             for distance in (0.0, 10.0, 20.0, 30.0, 40.0, 50.0))
         road = LaneSegment(
             road_id, 2, 3, 1, 0, 1, 4.5, "derived", 0, "look",
-            "road", road_points)
-        tapered = RoadNetwork._retarget_road_start_from_prefab(prefab, road)
-        self.assertEqual((tapered.centerline[0].x, tapered.centerline[0].z),
-                         (3.0, 0.0))
-        self.assertEqual((tapered.centerline[-1].x, tapered.centerline[-1].z),
-                         (0.0, -50.0))
-        jumps = [abs(math.degrees((b.heading-a.heading+math.pi)
-                                  % (2*math.pi)-math.pi))
-                 for a, b in zip(tapered.centerline,
-                                 tapered.centerline[1:])]
-        self.assertLess(max(jumps), 10.0)
+            "road", road_points, gps_pair_index=1)
+        original = tuple((point.x, point.y, point.z)
+                         for point in road.centerline)
+        path = RoadNetwork().connect_lane_sequence(
+            (prefab, road), (1, 2, 3))
+        self.assertFalse(path.valid)
+        self.assertIn("3.00 m geometry gap", path.failure_reason)
+        self.assertIn("no chord", path.failure_reason)
+        self.assertEqual(tuple((point.x, point.y, point.z)
+                               for point in road.centerline), original)
 
     def test_ets2la_lane_centres_cover_balanced_unbalanced_and_one_way(self):
         net = RoadNetwork()
@@ -238,7 +240,7 @@ class LaneRouteBuilderTests(unittest.TestCase):
         self.assertTrue(path.valid, path.failure_reason)
         self.assertEqual([lane.lane_index for lane in segments], [1, 1])
 
-    def test_lane_count_change_merge_and_split(self):
+    def test_lane_count_change_merge_and_split_requires_real_geometry(self):
         m = SyntheticMap()
         for uid, z in enumerate((0, 40, 80, 120), 1):
             m.node(uid, 0, z)
@@ -252,8 +254,39 @@ class LaneRouteBuilderTests(unittest.TestCase):
         self.assertEqual([lane.lane_index for lane in segments], [2, 1, 1])
         self.assertEqual(segments[0].successors[0].kind, "merge")
         self.assertEqual(segments[1].successors[0].kind, "split")
+        path = m.net.connect_lane_sequence(segments, corridor.gps_uids)
+        self.assertFalse(path.valid)
+        self.assertIn("4.50 m geometry gap", path.failure_reason)
+        self.assertIn("no chord", path.failure_reason)
+
+        # The middle lane remains physically continuous through the same
+        # explicit merge/split topology and therefore is safe to publish.
+        middle = m.match_on(first, 1, (1, 2, 3, 4))
+        continuous, reason = m.net.select_lane_sequence(corridor, middle)
+        self.assertEqual(reason, "")
+        self.assertEqual([lane.lane_index for lane in continuous], [1, 1, 1])
         self.assertTrue(m.net.connect_lane_sequence(
-            segments, corridor.gps_uids).valid)
+            continuous, corridor.gps_uids).valid)
+
+    def test_missing_prefab_description_reports_pair_token_and_index(self):
+        m = SyntheticMap()
+        m.node(10, 0, 0); m.node(20, 0, 20)
+        m.net._missing_prefab_pairs[(10, 20)] = {"blkw_1401i"}
+        corridor = m.net.resolve_gps_corridor((10, 20))
+        self.assertFalse(corridor.valid)
+        self.assertEqual(corridor.failure_reason,
+                         "missing prefab description blkw_1401i for GPS UID "
+                         "pair 10 -> 20 at index 0")
+
+        # A damaged unrelated prefab item must not shadow a complete direct
+        # road edge for the same pair.
+        road = SyntheticMap()
+        road.node(10, 0, 0); road.node(20, 0, 20)
+        road.road(10, 20, 1)
+        road.net._missing_prefab_pairs[(10, 20)] = {"damaged-prefab"}
+        corridor = road.net.resolve_gps_corridor((10, 20))
+        self.assertTrue(corridor.valid, corridor.failure_reason)
+        self.assertEqual(corridor.edges[0].kind, "road")
 
     def test_intersection_follows_authoritative_uid_branch(self):
         m = SyntheticMap()

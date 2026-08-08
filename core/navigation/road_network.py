@@ -31,7 +31,10 @@ from core.navigation.route_diagnostics import (
 )
 from core.navigation.road_look_offsets_159 import LANE_OFFSETS_159
 
-CACHE_VERSION = 11  # adds Truckermudgeon prefab map polygons for the live map
+CACHE_VERSION = 12  # adds explicit GPS-pair identity to lane segments
+MAX_PROVEN_LANE_BOUNDARY_GAP_M = 0.75
+MAX_PROVEN_LANE_BOUNDARY_VERTICAL_M = 0.50
+MAX_PROVEN_LANE_BOUNDARY_HEADING_DEG = 15.0
 
 
 def _uid(value):
@@ -150,6 +153,7 @@ class RoadNetwork:
         self._prefab_desc = {}   # token -> compact detailed prefab description
         self._prefab_grid = {}   # spatial index of placed prefab instances
         self._prefab_pairs = {}  # unordered endpoint UID pair -> prefab instances
+        self._missing_prefab_pairs = {}  # endpoint pair -> missing PPD tokens
         self._prefab_lane_data = {}  # token -> dataset lane/curve connectivity
         self._prefab_map_polygons = {}  # token -> Truckermudgeon map polygons
         # Display-only map landmarks.  They are deliberately not part of the
@@ -413,7 +417,8 @@ class RoadNetwork:
                       "_road_segment_by_uid",
                       "_grid", "_seg_grid", "_road_look_token",
                       "_road_length", "road_looks", "_prefab_desc", "_prefab_grid",
-                      "_prefab_pairs", "_prefab_lane_data",
+                      "_prefab_pairs", "_missing_prefab_pairs",
+                      "_prefab_lane_data",
                       "_prefab_map_polygons", "loaded"):
                 setattr(self, k, data.get(k, getattr(self, k)))
             self.loaded = bool(data.get("loaded", True))
@@ -448,6 +453,7 @@ class RoadNetwork:
                     "_prefab_desc": self._prefab_desc,
                     "_prefab_grid": self._prefab_grid,
                     "_prefab_pairs": self._prefab_pairs,
+                    "_missing_prefab_pairs": self._missing_prefab_pairs,
                     "_prefab_lane_data": self._prefab_lane_data,
                     "_prefab_map_polygons": self._prefab_map_polygons,
                     "loaded": self.loaded,
@@ -606,11 +612,17 @@ class RoadNetwork:
 
             for raw in _loadf(inst_path):
                 token = str(raw.get("token", ""))
-                if token not in self._prefab_desc:
-                    continue
                 raw_uids = tuple(_uid(value) for value in raw.get("nodeUids", ())
                                  if _uid(value))
                 if not raw_uids:
+                    continue
+                if token not in self._prefab_desc:
+                    for i in range(len(raw_uids)):
+                        for j in range(i + 1, len(raw_uids)):
+                            pair = (min(raw_uids[i], raw_uids[j]),
+                                    max(raw_uids[i], raw_uids[j]))
+                            self._missing_prefab_pairs.setdefault(
+                                pair, set()).add(token)
                     continue
                 origin_index = int(raw.get("originNodeIndex", 0))
                 if not (0 <= origin_index < len(raw_uids)):
@@ -646,6 +658,7 @@ class RoadNetwork:
             self._prefab_desc.clear()
             self._prefab_grid.clear()
             self._prefab_pairs.clear()
+            self._missing_prefab_pairs.clear()
             self._prefab_lane_data.clear()
             self._prefab_map_polygons.clear()
 
@@ -1127,6 +1140,14 @@ class RoadNetwork:
             if direct is not None:
                 edges.append(direct)
                 continue
+            pair = (min(start, goal), max(start, goal))
+            missing_prefabs = tuple(sorted(
+                self._missing_prefab_pairs.get(pair, ())))
+            if missing_prefabs and not self._prefab_pairs.get(pair):
+                return GpsCorridor(
+                    uids, tuple(edges), False,
+                    f"missing prefab description {missing_prefabs[0]} for "
+                    f"GPS UID pair {start} -> {goal} at index {pair_index}")
             bridge = self._route_bridge(start, goal)
             if len(bridge) < 2:
                 return GpsCorridor(
@@ -1161,10 +1182,9 @@ class RoadNetwork:
             if (second not in a["next_lines"]
                     or first not in b["prev_lines"]):
                 return False
-        # navNodeIndex did not exist in older PPD revisions. The chain reaching
-        # this function was already selected through physical navNodes and is
-        # still bounded by inputLanes/outputLanes, so -1 is missing data rather
-        # than permission to invent a connector.
+        # navNodeIndex is checked against the physical target by the two
+        # connector enumerators.  This helper proves only every reciprocal
+        # nextLines/prevLines edge inside the candidate chain.
         return True
 
     def _prefab_connector_options(self, instance, start_uid, end_uid):
@@ -1207,19 +1227,20 @@ class RoadNetwork:
                     continue
                 nav_node_index = int(curves[indices[0]].get(
                     "nav_node_index", -1))
-                if nav_node_index != -1:
-                    # A PPD can duplicate an AI navNode for different entry
-                    # histories around a roundabout. In that case the curve
-                    # refers to the canonical duplicate rather than the exact
-                    # target index, but both carry the same endIndex. This is
-                    # the only valid alias; a different endIndex is another
-                    # lane/exit and is rejected.
-                    if not (0 <= nav_node_index < len(nav_nodes)):
-                        continue
-                    if (nav_node_index != target
-                            and nav_nodes[nav_node_index][1]
-                                != nav_nodes[target][1]):
-                        continue
+                # Missing navNodeIndex is missing topology, not permission to
+                # infer the selected exit from geometry.  ProMods 1.59 has
+                # this field on all 74,366 navCurves.
+                if not (0 <= nav_node_index < len(nav_nodes)):
+                    continue
+                # A PPD can duplicate an AI navNode for different entry
+                # histories around a roundabout. In that case the curve
+                # refers to the canonical duplicate rather than the exact
+                # target index, but both carry the same endIndex. This is the
+                # only valid alias; a different endIndex is another lane/exit.
+                if (nav_node_index != target
+                        and nav_nodes[nav_node_index][1]
+                            != nav_nodes[target][1]):
+                    continue
                 combined = tuple(curve_indices) + tuple(indices)
                 if curve_indices:
                     if (indices[0] not in curves[curve_indices[-1]]["next_lines"]
@@ -1275,11 +1296,10 @@ class RoadNetwork:
             if curve_index in ends:
                 nav_index = int(curves[curve_index].get(
                     "nav_node_index", -1))
-                if (nav_index == -1
-                        or (0 <= nav_index < len(nav_nodes)
-                            and (nav_index == end_nav
-                                 or nav_nodes[nav_index][1]
-                                    == nav_nodes[end_nav][1]))):
+                if (0 <= nav_index < len(nav_nodes)
+                        and (nav_index == end_nav
+                             or nav_nodes[nav_index][1]
+                                == nav_nodes[end_nav][1])):
                     candidate = tuple(chain)
                     if self._curve_chain_is_valid(lane_data, candidate):
                         options.append(candidate)
@@ -1480,7 +1500,8 @@ class RoadNetwork:
             int(round(points[len(points)//2].y / 3.0)), None,
             ("roundabout" if "roundabout" in prefab_path else "prefab"),
             points, connector_curve_indices=tuple(indices),
-            gps_uids=frozenset((edge.start_uid, edge.end_uid)))
+            gps_uids=frozenset((edge.start_uid, edge.end_uid)),
+            gps_pair_index=edge.gps_pair_index)
 
     def _prefab_lane_segment(self, edge, lane_index, start_position=None,
                              register=True, allow_parallel_sibling=False):
@@ -1800,7 +1821,8 @@ class RoadNetwork:
             lane_id, edge.start_uid, edge.end_uid, 1, previous.lane_index, 1,
             previous.width_m, "derived",
             int(round(points[len(points)//2].y / 3.0)), None, "graph",
-            tuple(points), gps_uids=frozenset((edge.start_uid, edge.end_uid)))
+            tuple(points), gps_uids=frozenset((edge.start_uid, edge.end_uid)),
+            gps_pair_index=edge.gps_pair_index)
         self._lane_id_index[lane_id] = segment
         return segment
 
@@ -1824,133 +1846,9 @@ class RoadNetwork:
                               gps_exit_uid=second.end_uid)
 
     @staticmethod
-    def _retarget_road_end_to_prefab(road, prefab):
-        """Taper a confirmed road lane into the selected prefab input lane.
-
-        A PPD can expose different input navCurves for different GPS exits.
-        When the requested exit starts one lane beside the continuing lane,
-        the lane change belongs on the preceding road—not in a 4.5 m chord at
-        the physical prefab boundary. This helper is intentionally narrow: it
-        requires shared topology, equal height, matching direction and enough
-        road distance for a gradual transition to the exact PPD endpoint.
-        """
-        if (road.lane_id.prefab_token is not None
-                or prefab.lane_id.prefab_token in (None, "graph")
-                or road.end_uid != prefab.start_uid
-                or len(road.centerline) < 3 or len(prefab.centerline) < 2):
-            return road
-        source = road.centerline[-1]
-        target = prefab.centerline[0]
-        dx, dy, dz = (target.x-source.x, target.y-source.y,
-                      target.z-source.z)
-        gap = math.sqrt(dx*dx + dy*dy + dz*dz)
-        if gap <= 0.35:
-            return road
-        first_heading = road.centerline[-1].heading
-        second_heading = prefab.centerline[0].heading
-        heading_jump = abs((second_heading-first_heading+math.pi)
-                           % (2.0*math.pi)-math.pi)
-        forward_x, forward_z = -math.sin(first_heading), -math.cos(first_heading)
-        longitudinal = dx*forward_x + dz*forward_z
-        lateral = dx*math.cos(first_heading) - dz*math.sin(first_heading)
-        total = road.centerline[-1].s
-        if (gap > road.width_m * 1.10 or abs(dy) > 1.0
-                or heading_jump > math.radians(15.0)
-                or abs(longitudinal) > 1.5
-                or abs(lateral) > road.width_m * 1.05
-                or total < max(24.0, abs(lateral) * 7.0)):
-            return road
-
-        transition = min(total, max(36.0, abs(lateral) * 12.0))
-        shifted = []
-        for point in road.centerline:
-            progress = max(0.0, min(1.0,
-                (point.s - (total-transition)) / transition))
-            smooth = progress*progress*(3.0-2.0*progress)
-            shifted.append((point.x + dx*smooth,
-                            point.y + dy*smooth,
-                            point.z + dz*smooth))
-        # Preserve the exact authoritative PPD boundary and rebuild arc length
-        # and headings after the bounded lane transition.
-        shifted[-1] = (target.x, target.y, target.z)
-        rebuilt, travelled = [], 0.0
-        for index, point in enumerate(shifted):
-            if rebuilt:
-                travelled += math.dist(shifted[index-1], point)
-            before = shifted[max(0, index-1)]
-            after = shifted[min(len(shifted)-1, index+1)]
-            tx, tz = after[0]-before[0], after[2]-before[2]
-            heading = (math.atan2(-tx, -tz) if math.hypot(tx, tz) > 1e-8
-                       else (rebuilt[-1].heading if rebuilt else first_heading))
-            rebuilt.append(LanePoint(
-                point[0], point[1], point[2], travelled, heading,
-                lane_id=road.lane_id))
-        return replace(road, centerline=tuple(rebuilt))
-
-    @staticmethod
-    def _retarget_road_start_from_prefab(prefab, road):
-        """Taper a confirmed prefab output into the following road lane.
-
-        This is the exit-side counterpart of ``_retarget_road_end_to_prefab``.
-        It removes a one-sample lateral kink only when the two real segments
-        share a UID, height and direction and the correction stays inside one
-        lane width over a sufficiently long road segment.
-        """
-        if (prefab.lane_id.prefab_token in (None, "graph")
-                or road.lane_id.prefab_token is not None
-                or prefab.end_uid != road.start_uid
-                or len(prefab.centerline) < 2 or len(road.centerline) < 3):
-            return road
-        source = road.centerline[0]
-        target = prefab.centerline[-1]
-        dx, dy, dz = (target.x-source.x, target.y-source.y,
-                      target.z-source.z)
-        gap = math.sqrt(dx*dx + dy*dy + dz*dz)
-        if gap <= 0.35:
-            return road
-        first_heading = prefab.centerline[-1].heading
-        second_heading = road.centerline[0].heading
-        heading_jump = abs((second_heading-first_heading+math.pi)
-                           % (2.0*math.pi)-math.pi)
-        forward_x, forward_z = -math.sin(second_heading), -math.cos(second_heading)
-        longitudinal = dx*forward_x + dz*forward_z
-        lateral = dx*math.cos(second_heading) - dz*math.sin(second_heading)
-        total = road.centerline[-1].s
-        if (gap > road.width_m * 1.10 or abs(dy) > 1.0
-                or heading_jump > math.radians(15.0)
-                or abs(longitudinal) > 1.5
-                or abs(lateral) > road.width_m * 1.05
-                or total < max(24.0, abs(lateral) * 7.0)):
-            return road
-
-        transition = min(total, max(36.0, abs(lateral) * 12.0))
-        shifted = []
-        for point in road.centerline:
-            progress = max(0.0, min(1.0, point.s / transition))
-            smooth = 1.0 - progress*progress*(3.0-2.0*progress)
-            shifted.append((point.x + dx*smooth,
-                            point.y + dy*smooth,
-                            point.z + dz*smooth))
-        shifted[0] = (target.x, target.y, target.z)
-        rebuilt, travelled = [], 0.0
-        for index, point in enumerate(shifted):
-            if rebuilt:
-                travelled += math.dist(shifted[index-1], point)
-            before = shifted[max(0, index-1)]
-            after = shifted[min(len(shifted)-1, index+1)]
-            tx, tz = after[0]-before[0], after[2]-before[2]
-            heading = (math.atan2(-tx, -tz) if math.hypot(tx, tz) > 1e-8
-                       else (rebuilt[-1].heading if rebuilt else second_heading))
-            rebuilt.append(LanePoint(
-                point[0], point[1], point[2], travelled, heading,
-                lane_id=road.lane_id))
-        return replace(road, centerline=tuple(rebuilt))
-
-    @staticmethod
     def _lane_boundary_is_continuous(first, second):
         """Require one shared lane endpoint, direction and elevation layer."""
         if (first.end_uid != second.start_uid
-                or first.direction != second.direction
                 or not first.centerline or not second.centerline):
             return False
         source = first.centerline[-1]
@@ -1959,7 +1857,11 @@ class RoadNetwork:
                         (target.x, target.y, target.z))
         heading = abs((target.heading-source.heading+math.pi)
                       % (2.0*math.pi)-math.pi)
-        return gap <= 0.35 and heading <= math.radians(15.0)
+        return (gap <= MAX_PROVEN_LANE_BOUNDARY_GAP_M
+                and abs(target.y-source.y)
+                    <= MAX_PROVEN_LANE_BOUNDARY_VERTICAL_M
+                and heading <= math.radians(
+                    MAX_PROVEN_LANE_BOUNDARY_HEADING_DEG))
 
     def _parallel_segments_for_edge(self, edge, original):
         """Enumerate only real adjacent road lanes or PPD-proven siblings."""
@@ -2002,12 +1904,13 @@ class RoadNetwork:
         """Move a required adjacent-lane transition onto a safe earlier road.
 
         The normal selector follows the currently occupied lane greedily. A
-        chain of short road/prefab pieces can then reach a junction whose only
+        chain of road/prefab pieces can then reach a junction whose only
         GPS-confirmed input starts on the adjacent lane. Never bridge that
-        boundary. Walk the already selected GPS edges backwards, using only
-        real directed road lanes and reciprocal PPD input/output chains, until
-        one sufficiently long road can contain the transition. Every
-        intermediate boundary must remain an exact endpoint match.
+        boundary. Walk the already selected GPS edges backwards using only
+        real directed road lanes and reciprocal PPD input/output chains. The
+        alternative is accepted only if an earlier real merge/split or prefab
+        boundary anchors it without moving a centreline. Every intermediate
+        boundary must remain an exact endpoint match.
         """
         if (not selected or edge_number <= 0
                 or current.lane_id.prefab_token in (None, "graph")
@@ -2043,10 +1946,12 @@ class RoadNetwork:
                 return []
             edge = corridor.edges[index]
             original = selected[index]
-            matches = [candidate for candidate in
-                       self._parallel_segments_for_edge(edge, original)
-                       if self._lane_boundary_is_continuous(
-                           candidate, downstream)]
+            matches = [
+                replace(candidate, gps_pair_index=edge.gps_pair_index)
+                for candidate in self._parallel_segments_for_edge(
+                    edge, original)
+                if self._lane_boundary_is_continuous(candidate, downstream)
+            ]
             solutions = []
             for candidate in matches:
                 explored += 1
@@ -2056,17 +1961,6 @@ class RoadNetwork:
                         previous, candidate):
                     solutions.append((index, {index: candidate}))
                     anchored = True
-                elif (previous is not None
-                        and previous.lane_id.prefab_token
-                            not in (None, "graph")
-                        and candidate.lane_id.prefab_token is None):
-                    tapered = self._retarget_road_start_from_prefab(
-                        previous, candidate)
-                    if (self._lane_boundary_is_continuous(previous, tapered)
-                            and self._lane_boundary_is_continuous(
-                                tapered, downstream)):
-                        solutions.append((index, {index: tapered}))
-                        anchored = True
                 if not anchored:
                     for start, upstream in search(index-1, candidate):
                         combined = dict(upstream)
@@ -2115,8 +2009,16 @@ class RoadNetwork:
             self._lane_id_index[segment.lane_id] = segment
         return rebuilt
 
-    def select_lane_sequence(self, corridor, start_match):
+    def select_lane_sequence(self, corridor, start_match,
+                             failure_details=None):
         """Select one continuous lane for every authoritative corridor edge."""
+        def observe_failure(**details):
+            # This is an internal plain dict owned by build_lane_path().  It is
+            # deliberately write-only and never consulted by lane selection,
+            # so diagnostics cannot alter topology, cache state or revision.
+            if isinstance(failure_details, dict):
+                failure_details.update(details)
+
         if not isinstance(corridor, GpsCorridor) or not corridor.valid:
             return (), (getattr(corridor, "failure_reason", "invalid corridor")
                         or "invalid corridor")
@@ -2168,12 +2070,36 @@ class RoadNetwork:
                          ranked_lanes[1].centerline[0].y,
                          ranked_lanes[1].centerline[0].z))
                         if len(ranked_lanes) > 1 else float("inf"))
-                    if best_gap > 6.0:
+                    if best_gap > MAX_PROVEN_LANE_BOUNDARY_GAP_M:
+                        observe_failure(
+                            gps_uid_index=edge.gps_pair_index,
+                            gps_uid=edge.start_uid,
+                            lane_id_before=lane_id_payload(
+                                selected[-1].lane_id),
+                            lane_id_after=lane_id_payload(
+                                ranked_lanes[0].lane_id),
+                            geometry={
+                                "gap_m": float(best_gap),
+                                "next_lane_gap_m": float(next_gap),
+                            })
                         return tuple(selected), (
                             f"prefab output has no continuous lane on road edge "
                             f"{edge.start_uid} -> {edge.end_uid} "
                             f"(nearest gap {best_gap:.2f} m)")
                     if next_gap - best_gap < 0.35:
+                        observe_failure(
+                            gps_uid_index=edge.gps_pair_index,
+                            gps_uid=edge.start_uid,
+                            lane_id_before=lane_id_payload(
+                                selected[-1].lane_id),
+                            lane_id_after=lane_id_payload(
+                                ranked_lanes[0].lane_id),
+                            ambiguous_lane_ids=[lane_id_payload(
+                                lane.lane_id) for lane in ranked_lanes[:2]],
+                            geometry={
+                                "gap_m": float(best_gap),
+                                "next_lane_gap_m": float(next_gap),
+                            })
                         return tuple(selected), (
                             f"prefab output is ambiguous between road lanes at "
                             f"{edge.start_uid} (gaps {best_gap:.2f} m and "
@@ -2210,20 +2136,63 @@ class RoadNetwork:
                             and self._segment_uses_parallel_prefab_sibling(
                                 selected[-1]))))
                 if current is None:
+                    observe_failure(
+                        gps_uid_index=edge.gps_pair_index,
+                        gps_uid=edge.start_uid,
+                        prefab_token=(edge.prefab_instance[0][0]
+                                      if edge.prefab_instance else None),
+                        lane_id_before=(lane_id_payload(
+                            selected[-1].lane_id) if selected else
+                            lane_id_payload(start_match.lane_id)))
                     return tuple(selected), (
                         f"{reason} for prefab {edge.start_uid} -> {edge.end_uid}")
                 if selected:
-                    selected[-1] = self._retarget_road_end_to_prefab(
-                        selected[-1], current)
                     source = selected[-1].centerline[-1]
                     target = current.centerline[0]
                     boundary_gap = math.dist(
                         (source.x, source.y, source.z),
                         (target.x, target.y, target.z))
-                    if boundary_gap > 0.35:
+                    if boundary_gap > MAX_PROVEN_LANE_BOUNDARY_GAP_M:
                         recovered = self._backtrack_confirmed_lane_change(
                             corridor, selected, current, edge_number)
                         if recovered is None:
+                            heading_jump = abs((
+                                target.heading-source.heading+math.pi
+                            ) % (2.0*math.pi)-math.pi)
+                            forward_x = -math.sin(source.heading)
+                            forward_z = -math.cos(source.heading)
+                            delta_x = target.x-source.x
+                            delta_z = target.z-source.z
+                            observe_failure(
+                                gps_uid_index=edge.gps_pair_index,
+                                gps_uid=current.start_uid,
+                                prefab_token=current.lane_id.prefab_token,
+                                lane_id_before=lane_id_payload(
+                                    selected[-1].lane_id),
+                                lane_id_after=lane_id_payload(
+                                    current.lane_id),
+                                planned_lane_connection={
+                                    "type": "prefab",
+                                    "source": lane_id_payload(
+                                        selected[-1].lane_id),
+                                    "target": lane_id_payload(
+                                        current.lane_id),
+                                },
+                                geometry={
+                                    "gap_m": float(boundary_gap),
+                                    "lateral_gap_m": float(abs(
+                                        delta_x*math.cos(source.heading)
+                                        - delta_z*math.sin(source.heading))),
+                                    "longitudinal_gap_m": float(abs(
+                                        delta_x*forward_x
+                                        + delta_z*forward_z)),
+                                    "vertical_gap_m": float(abs(
+                                        target.y-source.y)),
+                                    "elevation_jump_m": float(abs(
+                                        target.y-source.y)),
+                                    "heading_jump_deg": float(math.degrees(
+                                        heading_jump)),
+                                })
                             return tuple(selected), (
                                 "road-to-prefab lane identity mismatch at UID "
                                 f"{current.start_uid}: geometry gap "
@@ -2236,11 +2205,7 @@ class RoadNetwork:
                 return tuple(selected), (
                     f"graph-only edge {edge.start_uid} -> {edge.end_uid} "
                     "has no lane-confirmed geometry")
-            if (selected and selected[-1].lane_id.prefab_token
-                    not in (None, "graph")
-                    and current.lane_id.prefab_token is None):
-                current = self._retarget_road_start_from_prefab(
-                    selected[-1], current)
+            current = replace(current, gps_pair_index=edge.gps_pair_index)
             if selected:
                 if (selected[-1].lane_id.prefab_token not in (None, "graph")
                         and current.lane_id.prefab_token not in (None, "graph")):
@@ -2255,6 +2220,19 @@ class RoadNetwork:
                         (previous_end.x, previous_end.y, previous_end.z),
                         (current_start.x, current_start.y, current_start.z))
                     if gap > 0.35:
+                        observe_failure(
+                            gps_uid_index=edge.gps_pair_index,
+                            gps_uid=current.start_uid,
+                            prefab_token=current.lane_id.prefab_token,
+                            lane_id_before=lane_id_payload(
+                                selected[-1].lane_id),
+                            lane_id_after=lane_id_payload(current.lane_id),
+                            geometry={
+                                "gap_m": float(gap),
+                                "lateral_gap_m": float(abs(lateral)),
+                                "vertical_gap_m": float(abs(elevation)),
+                                "elevation_jump_m": float(abs(elevation)),
+                            })
                         return tuple(selected), (
                             "prefab lane identity mismatch at UID "
                             f"{current.start_uid}: geometry gap {gap:.2f} m "
@@ -2262,6 +2240,17 @@ class RoadNetwork:
                             f"elevation {abs(elevation):.2f} m)")
                 connection = self._lane_connection(selected[-1], current)
                 if connection is None:
+                    observe_failure(
+                        gps_uid_index=edge.gps_pair_index,
+                        gps_uid=current.start_uid,
+                        lane_id_before=lane_id_payload(
+                            selected[-1].lane_id),
+                        lane_id_after=lane_id_payload(current.lane_id),
+                        planned_lane_connection={
+                            "type": edge.kind,
+                            "source": lane_id_payload(selected[-1].lane_id),
+                            "target": lane_id_payload(current.lane_id),
+                        })
                     return tuple(selected), (
                         f"no LaneConnection from {selected[-1].end_uid} to "
                         f"{current.start_uid} at corridor edge {edge_number}")
@@ -2273,135 +2262,68 @@ class RoadNetwork:
                               if current.raw_lane_index >= 0 else lane_index)
         return tuple(selected), ""
 
-    def connect_lane_sequence(self, segments, gps_uids):
+    def connect_lane_sequence(self, segments, gps_uids,
+                              expected_first_gps_pair_index=None):
         """Join only confirmed lane connections into an unsmoothed 3-D path."""
         segments = list(segments)
         uids = tuple(_uid(value) for value in gps_uids if _uid(value))
         if not segments:
             return LanePath((), (), uids, valid=False,
                             failure_reason="lane sequence is empty")
-        # Placed SCS prefab graph anchors can lie outside the compact local
-        # nav-curve footprint. Fit only an already confirmed prefab transition
-        # to its adjacent lane centres; never bridge an unconfirmed graph gap.
-        for index, segment in enumerate(tuple(segments)):
-            if segment.lane_id.prefab_token in (None, "graph"):
-                continue
-            previous = segments[index - 1] if index else None
-            following = segments[index + 1] if index + 1 < len(segments) else None
-            original_start, original_end = segment.centerline[0], segment.centerline[-1]
-            start = previous.centerline[-1] if previous is not None else original_start
-            end = following.centerline[0] if following is not None else original_end
-            start_gap = math.dist((original_start.x, original_start.y, original_start.z),
-                                  (start.x, start.y, start.z))
-            end_gap = math.dist((original_end.x, original_end.y, original_end.z),
-                                (end.x, end.y, end.z))
-            if max(start_gap, end_gap) <= 6.0:
-                continue
-            # Never replace a curved prefab/roundabout connector with a single
-            # endpoint fit.  That construction cuts across the island even
-            # though the prefab nav-curves correctly travel around it.  A
-            # misplaced curved connector must fail closed at the geometry-gap
-            # check below rather than becoming an unsafe shortcut.
-            source_length = sum(math.dist(
-                (a.x, a.y, a.z), (b.x, b.y, b.z))
-                for a, b in zip(segment.centerline, segment.centerline[1:]))
-            source_chord = math.dist(
-                (original_start.x, original_start.y, original_start.z),
-                (original_end.x, original_end.y, original_end.z))
-            source_turn = sum(abs(
-                (b.heading - a.heading + math.pi) % (2.0 * math.pi) - math.pi)
-                              for a, b in zip(segment.centerline,
-                                              segment.centerline[1:]))
-            curved_connector = bool(
-                segment.lane_type == "roundabout"
-                or source_turn > math.radians(35.0)
-                or (source_chord > 1.0
-                    and source_length / source_chord > 1.10))
-            if curved_connector:
-                target_dx, target_dz = end.x - start.x, end.z - start.z
-                target_chord = math.hypot(target_dx, target_dz)
-                source_dx = original_end.x - original_start.x
-                source_dz = original_end.z - original_start.z
-                source_chord_xz = math.hypot(source_dx, source_dz)
-                if source_chord_xz < 1.0 or target_chord < 1.0:
-                    continue
-                scale = target_chord / source_chord_xz
-                # A large similarity scale turns a compact roundabout arc into
-                # a shortcut across its island. Roundabout nav-curves must be
-                # close to their placed prefab scale or fail closed.
-                scale_valid = (0.72 <= scale <= 1.38
-                               if segment.lane_type == "roundabout"
-                               else 0.35 <= scale <= 5.0)
-                if not scale_valid:
-                    continue
-                source_angle = math.atan2(source_dz, source_dx)
-                target_angle = math.atan2(target_dz, target_dx)
-                rotation = target_angle - source_angle
-                cosine, sine = math.cos(rotation), math.sin(rotation)
-                fitted = []
-                count = max(1, len(segment.centerline) - 1)
-                for point_index, point in enumerate(segment.centerline):
-                    local_x = (point.x - original_start.x) * scale
-                    local_z = (point.z - original_start.z) * scale
-                    fraction = point_index / count
-                    # Preserve the complete prefab curve instead of replacing
-                    # it with an endpoint chord. Endpoint correction in Y is
-                    # linear; X/Z undergo one shape-preserving similarity fit.
-                    fitted.append(LanePoint(
-                        start.x + local_x * cosine - local_z * sine,
-                        point.y + (start.y - original_start.y) * (1.0-fraction)
-                        + (end.y - original_end.y) * fraction,
-                        start.z + local_x * sine + local_z * cosine,
-                        lane_id=segment.lane_id, segment_index=index,
-                    ))
-                dense = [fitted[0]]
-                for first_point, second_point in zip(fitted, fitted[1:]):
-                    gap = math.dist(
-                        (first_point.x, first_point.y, first_point.z),
-                        (second_point.x, second_point.y, second_point.z))
-                    steps = max(1, int(math.ceil(gap / 2.25)))
-                    for step in range(1, steps + 1):
-                        fraction = step / steps
-                        dense.append(LanePoint(
-                            first_point.x + (second_point.x-first_point.x)*fraction,
-                            first_point.y + (second_point.y-first_point.y)*fraction,
-                            first_point.z + (second_point.z-first_point.z)*fraction,
-                            lane_id=segment.lane_id, segment_index=index,
-                        ))
-                segments[index] = replace(segment, centerline=tuple(dense))
-                continue
-            if (max(start_gap, end_gap) > 140.0
-                    or abs(start.y - end.y) > 6.0
-                    or (previous is None and following is None)):
-                continue
-            start_heading = (previous.centerline[-1].heading if previous is not None
-                             else following.centerline[0].heading)
-            end_heading = (following.centerline[0].heading if following is not None
-                           else previous.centerline[-1].heading)
-            distance = math.dist((start.x, start.y, start.z),
-                                 (end.x, end.y, end.z))
-            if distance < 1.0 or distance > 150.0:
-                continue
-            tangent = min(18.0, distance * 0.38)
-            count = max(5, int(math.ceil(distance / 2.0)) + 1)
-            fitted = []
-            for point_index in range(count):
-                t = point_index / (count - 1)
-                t2, t3 = t*t, t*t*t
-                h00, h10 = 2*t3 - 3*t2 + 1, t3 - 2*t2 + t
-                h01, h11 = -2*t3 + 3*t2, t3 - t2
-                sdx, sdz = -math.sin(start_heading), -math.cos(start_heading)
-                edx, edz = -math.sin(end_heading), -math.cos(end_heading)
-                fitted.append(LanePoint(
-                    h00*start.x + h10*tangent*sdx
-                    + h01*end.x + h11*tangent*edx,
-                    start.y + (end.y-start.y)*t,
-                    h00*start.z + h10*tangent*sdz
-                    + h01*end.z + h11*tangent*edz,
-                    lane_id=segment.lane_id, segment_index=index,
-                ))
-            segments[index] = replace(segment, centerline=tuple(fitted))
-
+        # Reject every unproven boundary before resampling can see it.  A
+        # LaneConnection proves directed topology, but topology is
+        # not permission to move a centreline or draw a chord between lanes.
+        # Only a small endpoint residual with matching direction and elevation
+        # may be densified below.
+        for boundary_index, (first, second) in enumerate(
+                zip(segments, segments[1:])):
+            connection = next((item for item in first.successors
+                               if item.target == second.lane_id), None)
+            if (first.end_uid != second.start_uid or connection is None
+                    or not first.centerline or not second.centerline):
+                return LanePath(
+                    tuple(segments), (), uids, valid=False,
+                    failure_reason=(
+                        f"unconfirmed lane transition at boundary "
+                        f"{boundary_index}: {first.lane_id} -> "
+                        f"{second.lane_id}"))
+            source, target = first.centerline[-1], second.centerline[0]
+            gap = math.dist((source.x, source.y, source.z),
+                            (target.x, target.y, target.z))
+            vertical = abs(target.y-source.y)
+            heading = abs((target.heading-source.heading+math.pi)
+                          % (2.0*math.pi)-math.pi)
+            if (gap > MAX_PROVEN_LANE_BOUNDARY_GAP_M
+                    or vertical > MAX_PROVEN_LANE_BOUNDARY_VERTICAL_M):
+                return LanePath(
+                    tuple(segments), (), uids, valid=False,
+                    failure_reason=(
+                        f"confirmed lane transition at GPS pair "
+                        f"{second.gps_pair_index} has {gap:.2f} m geometry "
+                        f"gap ({vertical:.2f} m vertical) at UID "
+                        f"{second.start_uid}; no chord is permitted"))
+            if heading > math.radians(
+                    MAX_PROVEN_LANE_BOUNDARY_HEADING_DEG):
+                return LanePath(
+                    tuple(segments), (), uids, valid=False,
+                    failure_reason=(
+                        f"small boundary repair at GPS pair "
+                        f"{second.gps_pair_index} changes heading by "
+                        f"{math.degrees(heading):.1f} degrees at UID "
+                        f"{second.start_uid}"))
+            if (gap > 0.35
+                    and first.lane_id.prefab_token is None
+                    and second.lane_id.prefab_token is None
+                    and first.raw_lane_index >= 0
+                    and second.raw_lane_index >= 0
+                    and first.raw_lane_index != second.raw_lane_index
+                    and connection.kind not in ("merge", "split")):
+                return LanePath(
+                    tuple(segments), (), uids, valid=False,
+                    failure_reason=(
+                        f"road boundary at GPS pair {second.gps_pair_index} "
+                        f"changes raw lane {first.raw_lane_index} -> "
+                        f"{second.raw_lane_index} without a merge or split"))
         segments = tuple(segments)
         # Topology alone is not permission to steer through a reversed prefab
         # arm. Confirm that its entry and exit tangents agree with the adjacent
@@ -2459,10 +2381,11 @@ class RoadNetwork:
                         failure_reason=(
                             "unproven prefab geometry chord of "
                             f"{gap:.2f} m at UID {segment.start_uid}"))
-                if gap > 6.0:
+                if gap > MAX_PROVEN_LANE_BOUNDARY_GAP_M:
                     return LanePath(segments, tuple(points), uids, valid=False,
-                        failure_reason=(f"confirmed lane transition has {gap:.1f} m "
-                                        f"geometry gap at UID {segment.start_uid}"))
+                        failure_reason=(f"confirmed lane transition has {gap:.2f} m "
+                                        f"geometry gap at UID {segment.start_uid}; "
+                                        "no chord is permitted"))
                 if gap > 0.35:
                     # This only densifies an already confirmed LaneConnection.
                     start, end = points[-1], segment.centerline[0]
@@ -2496,9 +2419,17 @@ class RoadNetwork:
         graph_count = sum(segment.lane_id.prefab_token == "graph"
                           for segment in segments)
         confidence = max(0.0, 0.98 - prefab_count * 0.01 - graph_count * 0.08)
+        pair_indices = [segment.gps_pair_index for segment in segments
+                        if segment.gps_pair_index >= 0]
+        if expected_first_gps_pair_index is None:
+            distinct_pairs = [index for index, (start, end) in enumerate(
+                zip(uids, uids[1:])) if start != end]
+            expected_first_gps_pair_index = (
+                distinct_pairs[0] if pair_indices and distinct_pairs else -1)
         self._lane_path_revision += 1
         return LanePath(segments, tuple(rebuilt), uids, distance, confidence,
-                        True, "", self._lane_path_revision)
+                        True, "", self._lane_path_revision,
+                        int(expected_first_gps_pair_index))
 
     def build_lane_path(self, gps_uids, position, heading, altitude=None,
                         previous_match=None, start_match=None,
@@ -2515,11 +2446,26 @@ class RoadNetwork:
                 missing = next((
                     (index, uid) for index, uid in enumerate(corridor.gps_uids)
                     if uid not in self.nodes), (None, None))
+                missing_prefab = next((
+                    (index, start, tuple(sorted(
+                        self._missing_prefab_pairs.get(
+                            (min(start, end), max(start, end)), ()))))
+                    for index, (start, end) in enumerate(zip(
+                        corridor.gps_uids, corridor.gps_uids[1:]))
+                    if (self._missing_prefab_pairs.get(
+                            (min(start, end), max(start, end)))
+                        and not self._prefab_pairs.get(
+                            (min(start, end), max(start, end))))
+                ), (None, None, ()))
                 safe_diagnostic_call(
                     diagnostics, "fail_phase", "resolve_gps_corridor",
                     corridor.failure_reason, {
-                        "gps_uid_index": missing[0],
-                        "gps_uid": missing[1],
+                        "gps_uid_index": (missing[0] if missing[0] is not None
+                                          else missing_prefab[0]),
+                        "gps_uid": (missing[1] if missing[1] is not None
+                                    else missing_prefab[1]),
+                        "prefab_token": (missing_prefab[2][0]
+                                         if missing_prefab[2] else None),
                         "resolved_edge_count": len(corridor.edges),
                     })
             return LanePath((), (), corridor.gps_uids, valid=False,
@@ -2564,14 +2510,15 @@ class RoadNetwork:
         if diagnostics is not None:
             safe_diagnostic_call(diagnostics, "start_phase",
                                  "select_lane_sequence")
-        segments, reason = self.select_lane_sequence(corridor, match)
+        selection_failure = {}
+        segments, reason = self.select_lane_sequence(
+            corridor, match, failure_details=selection_failure)
         if reason:
             if diagnostics is not None:
                 edge_index = min(len(segments), max(0, len(corridor.edges) - 1))
                 edge = corridor.edges[edge_index] if corridor.edges else None
                 last = segments[-1] if segments else None
-                safe_diagnostic_call(diagnostics, "fail_phase",
-                                     "select_lane_sequence", reason, {
+                details = {
                     "gps_uid_index": (edge.gps_pair_index if edge else None),
                     "gps_uid": (edge.start_uid if edge else None),
                     "road_token": (last.road_look_token if last else None),
@@ -2579,7 +2526,7 @@ class RoadNetwork:
                         edge.prefab_instance[0][0]
                         if edge and edge.prefab_instance else
                         last.lane_id.prefab_token if last else None),
-                    "lane_id_after": ({
+                    "lane_id_before": ({
                         "road_uid": int(last.lane_id.road_uid),
                         "direction": int(last.lane_id.direction),
                         "lane_index": int(last.lane_id.lane_index),
@@ -2587,8 +2534,18 @@ class RoadNetwork:
                         "connector_index": last.lane_id.connector_index,
                         "connector_path": list(last.lane_id.connector_path),
                     } if last else None),
+                    "planned_lane_connection": ({
+                        "type": edge.kind,
+                        "source": lane_id_payload(last.lane_id),
+                        "target": None,
+                    } if edge and last else None),
                     "selected_segment_count": len(segments),
-                })
+                }
+                # Prefer the exact rejected target and measured geometry
+                # captured inside lane selection over this generic fallback.
+                details.update(selection_failure)
+                safe_diagnostic_call(diagnostics, "fail_phase",
+                                     "select_lane_sequence", reason, details)
             return LanePath(segments, (), corridor.gps_uids, valid=False,
                             failure_reason=reason), match
         if diagnostics is not None:
@@ -2601,6 +2558,7 @@ class RoadNetwork:
         # still be on the confirmed incoming lane leading to that anchor. Add
         # this real lane segment before the first corridor edge so HUD, AR and
         # steering start at the truck instead of 10+ metres across the prefab.
+        expected_first_gps_pair_index = 0
         active = self._lane_id_index.get(match.lane_id) if match else None
         if active is not None and segments and active.lane_id != segments[0].lane_id:
             active_index = next(
@@ -2615,6 +2573,7 @@ class RoadNetwork:
                 # caused navigation to fail a few metres after setting off.
                 segments = tuple(segments[active_index:])
                 active = segments[0]
+                expected_first_gps_pair_index = active.gps_pair_index
             else:
                 prefix = None
                 if active.end_uid != segments[0].start_uid:
@@ -2626,10 +2585,13 @@ class RoadNetwork:
                             active.centerline[-1],
                             allow_parallel_sibling=True)
                 if prefix is not None:
-                    active = self._retarget_road_end_to_prefab(active, prefix)
                     first_connection = self._lane_connection(active, prefix)
                     next_connection = self._lane_connection(prefix, segments[0])
-                    if first_connection is not None and next_connection is not None:
+                    if (first_connection is not None
+                            and next_connection is not None
+                            and self._lane_boundary_is_continuous(active, prefix)
+                            and self._lane_boundary_is_continuous(
+                                prefix, segments[0])):
                         active = replace(active, successors=(first_connection,))
                         prefix = replace(prefix, successors=(next_connection,))
                         segments = (active, prefix) + tuple(segments)
@@ -2638,19 +2600,15 @@ class RoadNetwork:
                         connection = None
                 else:
                     # A rolling GPS window can start exactly at the prefab
-                    # connected to the truck's current road lane. This direct
-                    # prefix path used to add only LaneConnection metadata and
-                    # skipped the same bounded road->prefab taper used by the
-                    # normal corridor loop. On the captured ProMods junction
-                    # that joined road lane 1 to prefab lane 0 in one sample
-                    # (52.16 degree heading jump). Retarget only when the
-                    # existing topology, direction, height and one-lane bounds
-                    # prove the transition; otherwise validation stays closed.
+                    # connected to the truck's current road lane.  The old
+                    # implementation moved the road centreline up to 4.50 m
+                    # while retaining its original LaneId.  That made invented
+                    # geometry validate against itself.  Keep both measured
+                    # centrelines immutable and accept only their small,
+                    # direction/elevation-proven endpoint residual.
                     if (active.end_uid == segments[0].start_uid
                             and segments[0].lane_id.prefab_token
                                 not in (None, "graph")):
-                        active = self._retarget_road_end_to_prefab(
-                            active, segments[0])
                         active_end = active.centerline[-1]
                         prefab_start = segments[0].centerline[0]
                         entry_gap = math.dist(
@@ -2667,14 +2625,9 @@ class RoadNetwork:
                         # gate is only for the demonstrated adjacent-lane
                         # chord; normal residuals still reach the existing
                         # trajectory validator unchanged.
-                        if entry_gap > 0.35 and lateral_gap > 1.0:
-                            # The captured ProMods failure had 4.50 m of
-                            # lateral displacement but only 11.95 m of road
-                            # remaining. A one-sample join hit 52.16 degrees
-                            # and aimed the truck at the roadside pole. If the
-                            # bounded taper cannot prove a safe lane change,
-                            # report the actionable lane error before geometry
-                            # construction instead of emitting a chord.
+                        if (entry_gap > MAX_PROVEN_LANE_BOUNDARY_GAP_M
+                                or not self._lane_boundary_is_continuous(
+                                    active, segments[0])):
                             failed = LanePath(
                                 tuple(segments), (), corridor.gps_uids,
                                 valid=False,
@@ -2755,7 +2708,9 @@ class RoadNetwork:
         if diagnostics is not None:
             safe_diagnostic_call(diagnostics, "start_phase",
                                  "connect_lane_sequence")
-        path = self.connect_lane_sequence(segments, corridor.gps_uids)
+        path = self.connect_lane_sequence(
+            segments, corridor.gps_uids,
+            expected_first_gps_pair_index=expected_first_gps_pair_index)
         if diagnostics is not None:
             safe_diagnostic_call(diagnostics, "observe_lane_path", path)
             if path.valid:

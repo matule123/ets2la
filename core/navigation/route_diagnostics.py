@@ -85,13 +85,20 @@ def classify_failure(phase: str, reason: str, details=None) -> str:
         return "STALE_REVISION"
     if "version" in phase or ("dataset" in reason and "version" in reason):
         return "DATASET_VERSION_MISMATCH"
-    if "absent from the active map" in reason or "gps uid" in reason and any(
-            word in reason for word in ("missing", "absent", "not found")):
-        return "DATASET_MISSING_UID"
     if "locator" in phase or "localization" in phase:
         if outcome == "ambiguous" or "ambiguous" in reason:
             return "LOCALIZATION_AMBIGUOUS"
         return "LOCALIZATION_NO_MATCH"
+    # A missing PPD is tied to a GPS UID pair as well.  Classify the specific
+    # dataset defect before the generic UID rule so diagnostics do not hide
+    # the prefab token which made the corridor unavailable.
+    if "prefab" in reason and any(word in reason for word in (
+            "missing", "absent", "unavailable", "no lane", "no connector",
+            "not found", "lacks")):
+        return "DATASET_MISSING_PREFAB"
+    if "absent from the active map" in reason or "gps uid" in reason and any(
+            word in reason for word in ("missing", "absent", "not found")):
+        return "DATASET_MISSING_UID"
     if "ambiguous" in reason:
         return "TOPOLOGY_AMBIGUOUS"
     if any(word in reason for word in (
@@ -103,10 +110,6 @@ def classify_failure(phase: str, reason: str, details=None) -> str:
         return "GEOMETRY_HEADING_JUMP"
     if "gap" in reason or "offset" in reason:
         return "GEOMETRY_GAP"
-    if "prefab" in reason and any(word in reason for word in (
-            "missing", "absent", "unavailable", "no lane", "no connector",
-            "not found", "lacks")):
-        return "DATASET_MISSING_PREFAB"
     if any(word in reason for word in (
             "no laneconnection", "missing laneconnection", "no connection",
             "does not connect", "unconfirmed topology", "unconfirmed lane",
