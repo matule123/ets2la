@@ -73,6 +73,50 @@ class LaneGeometryAuditTests(unittest.TestCase):
         return math.atan2(-(second[0] - first[0]),
                           -(second[1] - first[1]))
 
+    def test_wide_live_map_scene_never_blocks_navigation_tick(self):
+        started, release = threading.Event(), threading.Event()
+
+        class SlowPresentationNetwork:
+            loaded = True
+
+            def live_map_segments_3d_near(self, *_args, **_kwargs):
+                started.set()
+                release.wait(2.0)
+                return [((0.0, 0.0, 0.0), (1.0, 0.0, 0.0),
+                         "road", 2, False, True, False, False,
+                         4.5, False, "r0:0", 0)]
+
+            def live_map_road_type(self, *_args, **_kwargs):
+                return "local"
+
+            def live_map_polygons_near(self, *_args, **_kwargs):
+                return []
+
+            def map_features_near(self, *_args, **_kwargs):
+                return []
+
+        plugin, sdk, _point = build_map_plugin()
+        plugin.road_net = SlowPresentationNetwork()
+        before = time.monotonic()
+        self.assertTrue(plugin._schedule_live_map_scene((0.0, 0.0), 3.0))
+        elapsed = time.monotonic() - before
+        self.assertLess(elapsed, 0.20)
+        self.assertTrue(started.wait(0.5))
+
+        # The deliberately blocked presentation worker does not own or delay
+        # the authoritative lane heartbeat.
+        heartbeat = time.monotonic()
+        sdk.set("lane_trajectory_heartbeat", heartbeat)
+        self.assertEqual(sdk.get("lane_trajectory_heartbeat"), heartbeat)
+
+        release.set()
+        deadline = time.monotonic() + 1.0
+        while plugin._live_map_loading and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertFalse(plugin._live_map_loading)
+        self.assertEqual(sdk.get("live_map_scene_revision"), 1)
+        self.assertEqual(len(sdk.get("live_map_road_segments")), 1)
+
     def test_straight_left_right_and_feedforward_units(self):
         straight = Route([(0.0, 0.0), (0.0, 50.0), (0.0, 100.0)])
         self.assertAlmostEqual(straight.steering(

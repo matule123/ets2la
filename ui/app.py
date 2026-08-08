@@ -4,10 +4,11 @@ import logging
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QWidget, QStackedWidget, QFrame, QScrollArea, QLineEdit, QGridLayout,
+    QToolTip,
 )
 from PyQt6.QtCore import QTimer, Qt, QSize, QRectF
 from PyQt6.QtGui import (QColor, QPainter, QPainterPath, QPen,
-                         QRegion)
+                         QRegion, QCursor)
 
 from ui.settings_menu import SettingsMenu
 from ui.map_page import MapPage
@@ -77,8 +78,9 @@ class WindowControlDot(QPushButton):
         self.setAccessibleName(tooltip)
         self.setToolTip(tooltip)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        # ETS2LA frontend uses three identical 11 px circles.
-        self.setFixedSize(11, 11)
+        # The visible circle stays 11 px, while a 15 px hitbox makes the
+        # minimize/close actions reliable at normal Windows scaling.
+        self.setFixedSize(15, 15)
         self.setStyleSheet("QPushButton{background:transparent;border:none;"
                            "padding:0;margin:0;}")
         self.clicked.connect(action)
@@ -88,7 +90,61 @@ class WindowControlDot(QPushButton):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(self._color)
-        painter.drawEllipse(QRectF(0.5, 0.5, 10.0, 10.0))
+        painter.drawEllipse(QRectF(2.5, 2.5, 10.0, 10.0))
+
+    def enterEvent(self, event):
+        QToolTip.showText(QCursor.pos(), self.toolTip(), self)
+        super().enterEvent(event)
+
+
+class WindowMoveHandle(QPushButton):
+    """Drag target revealed to the left of the traffic-light controls."""
+
+    def __init__(self, window, parent=None):
+        super().__init__("⠿   Presunúť okno   ⠿", parent)
+        self.window = window
+        self._offset = None
+        self._dragging = False
+        self.setObjectName("WindowMoveHandle")
+        self.setAccessibleName("Presunúť okno")
+        self.setToolTip("Podrž ľavé tlačidlo a potiahni na presunutie okna")
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        self.setFixedHeight(18)
+        self.setStyleSheet(
+            "QPushButton#WindowMoveHandle{background:transparent;border:none;"
+            "padding:0 8px;font-size:11px;font-weight:650;color:#6B7280;}"
+            "QPushButton#WindowMoveHandle:hover{color:#1D4ED8;}")
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        self._dragging = True
+        handle = self.window.windowHandle()
+        if handle is not None and handle.startSystemMove():
+            self._offset = None
+            event.accept()
+            return
+        self._offset = (event.globalPosition().toPoint()
+                        - self.window.frameGeometry().topLeft())
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if (self._dragging and self._offset is not None
+                and event.buttons() & Qt.MouseButton.LeftButton
+                and not self.window.isMaximized()):
+            self.window.move(event.globalPosition().toPoint() - self._offset)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._dragging = False
+        self._offset = None
+        event.accept()
+        parent = self.parentWidget()
+        if parent is not None and not parent.underMouse():
+            parent.set_expanded(False)
 
 
 class ContentHost(QWidget):
@@ -149,14 +205,17 @@ class MacTitleBar(QFrame):
         super().__init__()
         self.window = window
         self._palette = palette
-        # Reference geometry: 59x24, 11 px dots and a 4 px gap.
+        # Collapsed geometry is the 59x24 ETS2LA control notch.
         self.setFixedSize(59, 24)
         self.setObjectName("MacTitleBar")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setStyleSheet("#MacTitleBar{background:transparent;border:none;}")
         row = QHBoxLayout(self)
-        row.setContentsMargins(9, 6, 9, 7)
-        row.setSpacing(4)
+        row.setContentsMargins(7, 4, 7, 5)
+        row.setSpacing(0)
+        self.drag_handle = WindowMoveHandle(window, self)
+        self.drag_handle.hide()
+        row.addWidget(self.drag_handle, 1)
         self.controls = {}
         for key, color, glyph, tip, action in (
                 ("maximize", "#22C55E", "+", "Maximalizovať",
@@ -168,6 +227,27 @@ class MacTitleBar(QFrame):
                                    tip, action, self)
             row.addWidget(dot)
             self.controls[key] = dot
+
+    def set_expanded(self, expanded):
+        expanded = bool(expanded)
+        self.drag_handle.setVisible(expanded)
+        self.setFixedWidth(258 if expanded else 59)
+        parent = self.parentWidget()
+        if parent is not None and hasattr(parent, "position_title_bar"):
+            parent.position_title_bar()
+        self.update()
+
+    def enterEvent(self, event):
+        self.set_expanded(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        QTimer.singleShot(120, self._collapse_after_leave)
+        super().leaveEvent(event)
+
+    def _collapse_after_leave(self):
+        if not self.underMouse() and not self.drag_handle._dragging:
+            self.set_expanded(False)
 
     def paintEvent(self, event):
         painter = QPainter(self)

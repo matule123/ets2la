@@ -69,6 +69,12 @@ class Plugin(BasePlugin):
         self._live_map_pos = None
         self._live_map_revision = int(self.sdk.get(
             "live_map_scene_revision", 0) or 0)
+        # Wide live-map scene queries are presentation-only and can take
+        # several seconds while a new region populates its lane caches.  They
+        # must never run on the navigation tick that owns the 500 ms safety
+        # heartbeat.
+        self._live_map_loading = False
+        self._live_map_job_id = 0
         self._lane_signature = None
         self._rolling_route_refresh_needed = False
         self._lane_path = None
@@ -128,6 +134,8 @@ class Plugin(BasePlugin):
 
     def on_stop(self):
         logging.info("Map (navigation) plugin stopped.")
+        self._live_map_job_id += 1
+        self._live_map_loading = False
         self._deactivate_recorded_route(clear_outputs=True)
 
     @staticmethod
@@ -1437,6 +1445,8 @@ class Plugin(BasePlugin):
             self._build_tokens = {}
             self._roads_pos = None
             self._live_map_pos = None
+            self._live_map_job_id += 1
+            self._live_map_loading = False
             # Invalidate control geometry before publishing any map metadata;
             # another process must never observe a switched dataset alongside
             # steering from the previous one.
@@ -1478,6 +1488,74 @@ class Plugin(BasePlugin):
             self._live_map_revision += 1
             self.sdk.set("map_status", f"Loading map dataset {arg}...")
             logging.info("Navigation: switching map dataset to %s.", arg)
+
+    def _schedule_live_map_scene(self, pos, altitude):
+        """Build broad presentation geometry without blocking navigation.
+
+        The worker captures both the network and map generation.  A result
+        from an old dataset or a superseded job is discarded instead of being
+        published into the current live-map revision.
+        """
+        if getattr(self, "_live_map_loading", False):
+            return False
+        net = self.road_net
+        if net is None or not getattr(net, "loaded", False):
+            return False
+
+        import threading
+        request_pos = (float(pos[0]), float(pos[1]))
+        request_altitude = float(altitude)
+        generation = self._map_load_generation
+        self._live_map_job_id = getattr(self, "_live_map_job_id", 0) + 1
+        job_id = self._live_map_job_id
+        self._live_map_loading = True
+
+        def _worker():
+            try:
+                roads = net.live_map_segments_3d_near(
+                    request_pos, radius=1200.0, limit=8500,
+                    altitude=request_altitude)
+                road_payload = []
+                for (a, b, kind, lanes, divided, dash_on, pillar,
+                     rail_post, half_width, suppress_markings, path_key,
+                     path_index) in roads:
+                    road_payload.append([
+                        list(a), list(b), kind, lanes, divided, dash_on,
+                        pillar, rail_post, half_width, suppress_markings,
+                        path_key, path_index,
+                        net.live_map_road_type(
+                            path_key, lanes=lanes, divided=divided),
+                    ])
+                polygon_payload = [
+                    [[list(point) for point in points], colour, z_index]
+                    for points, colour, z_index in
+                    net.live_map_polygons_near(
+                        request_pos, radius=1200.0, limit=1800)
+                ]
+                feature_payload = [list(feature) for feature in
+                                   net.map_features_near(
+                                       request_pos, radius=1200.0, limit=1000)]
+
+                if (job_id != self._live_map_job_id
+                        or generation != self._map_load_generation
+                        or self.road_net is not net):
+                    return
+                self._live_map_revision += 1
+                self.sdk.shared_state.update_batch({
+                    "live_map_road_segments": road_payload,
+                    "live_map_scene_polygons": polygon_payload,
+                    "live_map_scene_features": feature_payload,
+                    "live_map_scene_revision": self._live_map_revision,
+                })
+                self._live_map_pos = request_pos
+            except Exception as e:
+                logging.debug("Live-map scene error: %s", e)
+            finally:
+                if job_id == self._live_map_job_id:
+                    self._live_map_loading = False
+
+        threading.Thread(target=_worker, name="LiveMapScene", daemon=True).start()
+        return True
 
     def _load_road_net(self):
         """Load the downloaded road network once, in the background (non-blocking).
@@ -1804,41 +1882,9 @@ class Plugin(BasePlugin):
             float(pos[1]) - self._live_map_pos[1]) >= 18.0)
         if (self._live_map_t >= 1.0 and live_map_moved
                 and self.road_net is not None and self.road_net.loaded):
-            self._live_map_t = 0.0
-            try:
-                altitude = float(self.sdk.get("truck_altitude", 0.0) or 0.0)
-                roads = self.road_net.live_map_segments_3d_near(
-                    pos, radius=1200.0, limit=8500, altitude=altitude)
-                road_payload = []
-                for (a, b, kind, lanes, divided, dash_on, pillar,
-                     rail_post, half_width, suppress_markings, path_key,
-                     path_index) in roads:
-                    road_payload.append([
-                        list(a), list(b), kind, lanes, divided, dash_on,
-                        pillar, rail_post, half_width, suppress_markings,
-                        path_key, path_index,
-                        self.road_net.live_map_road_type(
-                            path_key, lanes=lanes, divided=divided),
-                    ])
-                polygon_payload = [
-                    [[list(point) for point in points], colour, z_index]
-                    for points, colour, z_index in
-                    self.road_net.live_map_polygons_near(
-                        pos, radius=1200.0, limit=1800)
-                ]
-                feature_payload = [list(feature) for feature in
-                                   self.road_net.map_features_near(
-                                       pos, radius=1200.0, limit=1000)]
-                self._live_map_revision += 1
-                self.sdk.shared_state.update_batch({
-                    "live_map_road_segments": road_payload,
-                    "live_map_scene_polygons": polygon_payload,
-                    "live_map_scene_features": feature_payload,
-                    "live_map_scene_revision": self._live_map_revision,
-                })
-                self._live_map_pos = (float(pos[0]), float(pos[1]))
-            except Exception as e:
-                logging.debug("Live-map scene error: %s", e)
+            altitude = float(self.sdk.get("truck_altitude", 0.0) or 0.0)
+            if self._schedule_live_map_scene(pos, altitude):
+                self._live_map_t = 0.0
 
         # Localization diagnostics: every ~2 s, log where the truck is and where
         # the map thinks the nearest road is. If the distance is huge (hundreds

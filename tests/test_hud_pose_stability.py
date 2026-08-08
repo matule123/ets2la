@@ -6,6 +6,7 @@ from PyQt6.QtCore import QPointF, QRectF
 from PyQt6.QtGui import QPainterPath
 
 from core.hud import (UltraPilotHUD, _continuous_lane_chunks,
+                      _draw_hud_route_curve,
                       _hud_segment_has_bright_outline,
                       _hud_segment_is_selected_context,
                       _lane_boundary_points, _ordered_display_path_runs,
@@ -33,6 +34,24 @@ class HudPoseStabilityTests(unittest.TestCase):
         # A prefab navCurve is never a painted road edge.  Showing all of
         # these curves without GPS produced the real junction wireframe.
         self.assertFalse(_hud_segment_has_bright_outline("lane", []))
+
+    def test_gps_line_has_distinct_glow_outline_and_blue_core(self):
+        class Painter:
+            def __init__(self):
+                self.pens = []
+
+            def setPen(self, pen):
+                self.pens.append(pen)
+
+            def drawPath(self, _path):
+                pass
+
+        painter = Painter()
+        _draw_hud_route_curve(painter, QPainterPath())
+        self.assertEqual([pen.widthF() for pen in painter.pens],
+                         [16.0, 10.0, 6.0])
+        self.assertEqual([pen.color().name().upper() for pen in painter.pens],
+                         ["#3B82F6", "#0D3068", "#3B82F6"])
 
     def test_stationary_sdk_chatter_does_not_move_scene(self):
         hud = self.make_hud()

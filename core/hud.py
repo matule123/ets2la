@@ -40,6 +40,9 @@ def _hud_segment_has_bright_outline(kind, navigation_points):
 # width remains readable underneath the blue centre guidance.
 HUD_ROAD_SURFACE = QColor(47, 50, 55, 255)
 HUD_SELECTED_LANE_SURFACE = QColor(54, 58, 64, 255)
+HUD_ROUTE_GLOW = QColor(59, 130, 246, 70)
+HUD_ROUTE_OUTLINE = QColor(13, 48, 104, 245)
+HUD_ROUTE_CORE = QColor(59, 130, 246, 255)
 
 # State → accent colour (left as-is; the whole HUD now lives on the left panel).
 _STATE_COLORS = {
@@ -47,6 +50,17 @@ _STATE_COLORS = {
     "PAY_TOLL": "#EAB308", "FOLLOW_LANE": "#10B981", "CRUISE": "#10B981",
     "IDLE": "#9CA3AF",
 }
+
+
+def _draw_hud_route_curve(painter, route_curve):
+    """Paint one GPS line with a separate dark-blue enclosing stripe."""
+    for colour, width in ((HUD_ROUTE_GLOW, 16.0),
+                          (HUD_ROUTE_OUTLINE, 10.0),
+                          (HUD_ROUTE_CORE, 6.0)):
+        painter.setPen(QPen(colour, width, Qt.PenStyle.SolidLine,
+                            Qt.PenCapStyle.RoundCap,
+                            Qt.PenJoinStyle.RoundJoin))
+        painter.drawPath(route_curve)
 
 
 def _gear_text(gear):
@@ -1147,16 +1161,7 @@ class UltraPilotHUD(QWidget):
                     if len(projected) < 2:
                         continue
                     route_curve = _rounded_screen_path(projected)
-                    qp.setPen(QPen(QColor(59, 130, 246, 85), 14,
-                                   Qt.PenStyle.SolidLine,
-                                   Qt.PenCapStyle.RoundCap,
-                                   Qt.PenJoinStyle.RoundJoin))
-                    qp.drawPath(route_curve)
-                    qp.setPen(QPen(QColor("#3B82F6"), 6,
-                                   Qt.PenStyle.SolidLine,
-                                   Qt.PenCapStyle.RoundCap,
-                                   Qt.PenJoinStyle.RoundJoin))
-                    qp.drawPath(route_curve)
+                    _draw_hud_route_curve(qp, route_curve)
             # With no GPS route we intentionally draw no invented straight
             # ribbon. Only real nearby map segments remain visible.
 

@@ -4,6 +4,7 @@ import unittest
 from unittest import mock
 
 from PyQt6.QtCore import QPoint, Qt
+from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import (QApplication, QWidget, QFrame, QLabel, QStatusBar,
                              QPushButton)
 
@@ -49,7 +50,7 @@ class UiChromeTests(unittest.TestCase):
         self.assertEqual(list(bar.controls), ["maximize", "minimize", "close"])
         controls = list(bar.controls.values())
         self.assertEqual((bar.width(), bar.height()), (59, 24))
-        self.assertTrue(all(button.width() == 11 and button.height() == 11
+        self.assertTrue(all(button.width() == 15 and button.height() == 15
                             for button in controls))
         self.assertEqual([button._color.name().upper() for button in controls],
                          ["#22C55E", "#EAB308", "#EF4444"])
@@ -66,6 +67,42 @@ class UiChromeTests(unittest.TestCase):
         host.close()
         self.assertEqual([button.accessibleName() for button in controls],
                          ["Maximalizovať", "Minimalizovať", "Zavrieť"])
+
+    def test_window_controls_click_and_expand_to_native_move_handle(self):
+        class Host(QWidget):
+            def __init__(self):
+                super().__init__()
+                self.minimized = 0
+                self.closed = 0
+
+            def showMinimized(self):
+                self.minimized += 1
+
+            def close(self):
+                self.closed += 1
+                return True
+
+        host = Host()
+        bar = MacTitleBar(host, palette("light"))
+        host.show()
+        bar.show()
+        self.app.processEvents()
+        QTest.mouseClick(bar.controls["minimize"], Qt.MouseButton.LeftButton)
+        QTest.mouseClick(bar.controls["close"], Qt.MouseButton.LeftButton)
+        self.assertEqual(host.minimized, 1)
+        self.assertEqual(host.closed, 1)
+        self.assertEqual(bar.controls["minimize"].toolTip(), "Minimalizovať")
+        self.assertEqual(bar.controls["close"].toolTip(), "Zavrieť")
+        bar.set_expanded(True)
+        self.assertEqual(bar.width(), 258)
+        self.assertTrue(bar.drag_handle.isVisible())
+        self.assertIn("Presunúť okno", bar.drag_handle.text())
+        self.assertEqual(bar.drag_handle.cursor().shape(),
+                         Qt.CursorShape.SizeAllCursor)
+        bar.set_expanded(False)
+        self.assertEqual(bar.width(), 59)
+        bar.close()
+        host.close()
 
     def test_window_controls_are_seated_in_a_curved_notch(self):
         path = window_control_notch_path(59, 24)
