@@ -106,7 +106,7 @@ class ContentHost(QWidget):
     def position_title_bar(self):
         if self._title_bar is None:
             return
-        self._title_bar.move(self.width() - 8 - self._title_bar.width(), 8)
+        self._title_bar.move(self.width() - self._title_bar.width(), 0)
         self._title_bar.raise_()
 
     def resizeEvent(self, event):
@@ -955,7 +955,9 @@ class UltraPilotApp(QMainWindow):
         content_host.setObjectName("ContentHost")
         content_host.setStyleSheet("QWidget#ContentHost{background:transparent;border:none;}")
         content_host_layout = QVBoxLayout(content_host)
-        content_host_layout.setContentsMargins(8, 8, 8, 8)
+        # Left/bottom breathing room; top/right stay flush so the controls are
+        # genuinely seated in the application's top-right corner.
+        content_host_layout.setContentsMargins(8, 0, 0, 8)
         content_host_layout.setSpacing(0)
         self.content_surface = ContentSurface(self._pal)
         surface_layout = QVBoxLayout(self.content_surface)

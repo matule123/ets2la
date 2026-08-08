@@ -128,6 +128,10 @@ class UiChromeTests(unittest.TestCase):
                                + window.content_surface.width()
                                - window.title_bar.width())
         self.assertEqual(window.title_bar.x(), expected_controls_x)
+        self.assertEqual(window.title_bar.y(), 0)
+        self.assertEqual(window.content_surface.y(), 0)
+        self.assertEqual(window.title_bar.x() + window.title_bar.width(),
+                         window.content_host.width())
         word_origin = window.brand_word.mapTo(window.brand_container,
                                               QPoint(0, 0))
         word_center = word_origin.x() + window.brand_word.width() / 2.0
