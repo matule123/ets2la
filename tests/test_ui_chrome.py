@@ -113,6 +113,8 @@ class UiChromeTests(unittest.TestCase):
               mock.patch("UI.update_widget.UpdateCheckerWidget.check",
                          autospec=True)):
             window = UltraPilotApp(state)
+        window.show()
+        self.app.processEvents()
         self.assertEqual((window.width(), window.height()), (1220, 760))
         self.assertGreaterEqual(window.minimumWidth(), 980)
         self.assertFalse(window.findChildren(QStatusBar))
@@ -122,6 +124,16 @@ class UiChromeTests(unittest.TestCase):
         self.assertEqual(window.centralWidget().objectName(), "WindowSurface")
         self.assertEqual(window.content_surface.objectName(), "ContentSurface")
         self.assertIs(window.title_bar.parentWidget(), window.content_host)
+        expected_controls_x = (window.content_surface.x()
+                               + window.content_surface.width()
+                               - window.title_bar.width())
+        self.assertEqual(window.title_bar.x(), expected_controls_x)
+        word_origin = window.brand_word.mapTo(window.brand_container,
+                                              QPoint(0, 0))
+        word_center = word_origin.x() + window.brand_word.width() / 2.0
+        self.assertAlmostEqual(word_center,
+                               window.brand_container.width() / 2.0,
+                               delta=1.0)
         self.assertIn("border: 1px solid #AEB5BE", stylesheet("light"))
         region = rounded_window_region(1220, 760)
         self.assertFalse(region.contains(QPoint(0, 0)))

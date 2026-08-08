@@ -91,6 +91,29 @@ class WindowControlDot(QPushButton):
         painter.drawEllipse(QRectF(0.5, 0.5, 10.0, 10.0))
 
 
+class ContentHost(QWidget):
+    """Anchors the floating controls to the content surface on every resize."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._title_bar = None
+
+    def attach_title_bar(self, title_bar):
+        self._title_bar = title_bar
+        title_bar.setParent(self)
+        self.position_title_bar()
+
+    def position_title_bar(self):
+        if self._title_bar is None:
+            return
+        self._title_bar.move(self.width() - 8 - self._title_bar.width(), 8)
+        self._title_bar.raise_()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.position_title_bar()
+
+
 class ContentSurface(QFrame):
     """The one shared rounded content window used by every sidebar page."""
 
@@ -814,10 +837,12 @@ class UltraPilotApp(QMainWindow):
         # Brand block at the top: logo + wordmark + version.
         from PyQt6.QtGui import QPixmap, QIcon
         from core.paths import resource as _res
-        brand_row = QHBoxLayout()
+        brand_row = QGridLayout()
         brand_row.setContentsMargins(8, 0, 8, 0)
-        brand_row.setSpacing(9)
+        brand_row.setHorizontalSpacing(0)
         logo = QLabel()
+        logo.setFixedSize(34, 34)
+        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         _pm = QIcon(_res("assets", "favicon.ico")).pixmap(34, 34)
         if _pm.isNull():
             _pm = QPixmap(_res("assets", "logo.png")).scaledToWidth(
@@ -825,19 +850,24 @@ class UltraPilotApp(QMainWindow):
         if not _pm.isNull():
             logo.setPixmap(_pm)
         logo.setStyleSheet("border:none;")
-        brand_row.addWidget(logo)
-        brand_txt = QVBoxLayout()
-        brand_txt.setSpacing(0)
+        brand_row.addWidget(logo, 0, 0)
         word = QLabel("UltraPilot")
         self.brand_word = word
         word.setObjectName("BrandWordmark")
+        word.setAlignment(Qt.AlignmentFlag.AlignCenter)
         word.setStyleSheet(
             "font-size:21px;font-weight:750;color:" + self._pal["text"]
             + ";border:none;")
-        brand_txt.addWidget(word)
-        brand_row.addLayout(brand_txt)
-        brand_row.addStretch()
+        brand_row.addWidget(word, 0, 1)
+        brand_balance = QWidget()
+        brand_balance.setFixedSize(34, 34)
+        brand_balance.setStyleSheet("border:none;background:transparent;")
+        brand_row.addWidget(brand_balance, 0, 2)
+        brand_row.setColumnMinimumWidth(0, 34)
+        brand_row.setColumnStretch(1, 1)
+        brand_row.setColumnMinimumWidth(2, 34)
         brand_w = QWidget()
+        self.brand_container = brand_w
         brand_w.setLayout(brand_row)
         brand_w.setStyleSheet("border:none;")
         sb.addWidget(brand_w)
@@ -920,7 +950,7 @@ class UltraPilotApp(QMainWindow):
 
         # Every sidebar destination is rendered inside the same rounded inner
         # window.  Its top-right path leaves a real shaped seat for the dots.
-        content_host = QWidget()
+        content_host = ContentHost()
         self.content_host = content_host
         content_host.setObjectName("ContentHost")
         content_host.setStyleSheet("QWidget#ContentHost{background:transparent;border:none;}")
@@ -935,10 +965,7 @@ class UltraPilotApp(QMainWindow):
         main_layout.addWidget(content_host, 1)
 
         self.title_bar = MacTitleBar(self, self._pal)
-        self.title_bar.setParent(self.content_host)
-        self.title_bar.move(self.content_host.width() - 8
-                            - self.title_bar.width(), 8)
-        self.title_bar.raise_()
+        self.content_host.attach_title_bar(self.title_bar)
 
         self.pages = QStackedWidget()
         # Build each page defensively so one broken page can't stop the app.
@@ -1065,9 +1092,7 @@ class UltraPilotApp(QMainWindow):
             self.drag_area.setGeometry(0, 0, self.centralWidget().width(), 34)
             self.drag_area.raise_()
         if hasattr(self, "title_bar"):
-            self.title_bar.move(self.content_host.width() - 8
-                                - self.title_bar.width(), 8)
-            self.title_bar.raise_()
+            self.content_host.position_title_bar()
 
     def showEvent(self, event):
         """The main window is up — let the HUD process know it can appear now."""
