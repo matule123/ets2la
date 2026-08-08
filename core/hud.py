@@ -1653,10 +1653,12 @@ class UltraPilotHUD(QWidget):
     def _draw_light(self, qp, view, light, ahead, lateral, ground=0.0):
         """Draw a traffic signal at its real world-space pole position."""
         color = light.get("color", "off")
+        sleeping = color == "sleep"
         # ETS2 state 32 is the disabled/night mode: the real signal flashes
         # amber at a calm one-second cadence instead of remaining completely
-        # dark. Keep braking disabled because the state is not red.
-        if color == "sleep":
+        # dark. Keep braking disabled and hide the meaningless transition
+        # countdown because a sleeping signal has no next normal phase.
+        if sleeping:
             color = ("yellow" if int(getattr(self, "_t", 0.0) * 2.0) % 2 == 0
                      else "off")
         pole_base = self._project(ahead, lateral, view, ground)
@@ -1720,7 +1722,7 @@ class UltraPilotHUD(QWidget):
             time_left = float(light.get("time_left", 0.0) or 0.0)
         except (TypeError, ValueError, OverflowError):
             time_left = 0.0
-        if math.isfinite(time_left) and time_left > 0.0:
+        if not sleeping and math.isfinite(time_left) and time_left > 0.0:
             label_x = max(top_left.x(), top_right.x()) + 5.0
             label_y = min(top_left.y(), top_right.y())
             qp.setPen(QColor("#FFFFFF"))

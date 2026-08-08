@@ -401,6 +401,33 @@ class HudPoseStabilityTests(unittest.TestCase):
             {"x": 10.0, "z": 20.0}, lambda x, z: (z, x)),
             (20.0, 10.0))
 
+    def test_sleeping_signal_flashes_without_transition_countdown(self):
+        class Painter:
+            def __init__(self):
+                self.labels = []
+
+            def drawText(self, *args):
+                self.labels.append(args)
+
+            def __getattr__(self, _name):
+                return lambda *_args, **_kwargs: None
+
+        hud = self.make_hud()
+        hud._view_yaw = 0.0
+        hud._t = 0.0
+        painter = Painter()
+        hud._draw_light(
+            painter, QRectF(0.0, 0.0, 900.0, 600.0),
+            {"color": "sleep", "time_left": 9.8},
+            ahead=30.0, lateral=4.0, ground=0.0)
+        self.assertEqual(painter.labels, [])
+
+        hud._draw_light(
+            painter, QRectF(0.0, 0.0, 900.0, 600.0),
+            {"color": "red", "time_left": 9.8},
+            ahead=30.0, lateral=4.0, ground=0.0)
+        self.assertEqual(len(painter.labels), 1)
+
     def test_traffic_light_is_world_anchored_and_never_uses_string_brush(self):
         class StrictPainter:
             def setBrush(self, brush):

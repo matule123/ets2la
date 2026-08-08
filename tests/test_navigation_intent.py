@@ -270,6 +270,19 @@ class NavigationIntentStateMachineTests(unittest.TestCase):
 
 
 class NavigationBuildGuardTests(unittest.TestCase):
+    def test_abandoned_stale_build_does_not_complete_current_input(self):
+        guard = NavigationBuildGuard()
+        input_key = ((20, 30), "lane", "session")
+        stale = guard.begin("intent", input_key, "stale-build")
+
+        guard.abandon(stale)
+
+        self.assertFalse(guard.may_publish(stale))
+        self.assertFalse(guard.input_completed("intent", input_key))
+        replacement = guard.begin("intent", input_key, "fresh-build")
+        self.assertIsNotNone(replacement)
+        self.assertTrue(guard.may_publish(replacement))
+
     def test_duplicate_parallel_and_reverse_completion_are_rejected(self):
         guard = NavigationBuildGuard()
         first = guard.begin("intent", (1, 2), "build-old")

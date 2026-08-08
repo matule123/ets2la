@@ -329,7 +329,8 @@ class Plugin(BasePlugin):
                 int(self.sdk.get("navigation_buffer_extended", 0) or 0))
         return diagnostic
 
-    def _remember_route_diagnostic(self, diagnostic, status):
+    def _remember_route_diagnostic(self, diagnostic, status,
+                                   complete_input=True):
         record = (safe_diagnostic_call(diagnostic, "finish", status)
                   or getattr(diagnostic, "record", {}) or {})
         try:
@@ -356,7 +357,12 @@ class Plugin(BasePlugin):
             pass
         token = self._build_tokens.pop(
             getattr(diagnostic, "build_id", None), None)
-        self._build_guard.finish(token)
+        if complete_input:
+            self._build_guard.finish(token)
+        else:
+            # A stale callback did not evaluate the current GPS input and may
+            # not suppress its replacement build on the following tick.
+            self._build_guard.abandon(token)
         return record
 
     def _fail_route_build(self, diagnostic, reason, uids, status=None):
@@ -486,7 +492,8 @@ class Plugin(BasePlugin):
             "current_revision": int(self.sdk.get(
                 "lane_trajectory_revision", -1) or -1),
         })
-        self._remember_route_diagnostic(diagnostic, "stale")
+        self._remember_route_diagnostic(
+            diagnostic, "stale", complete_input=False)
 
     def _handle_diagnostic_export(self):
         request = self.sdk.get("route_diagnostic_export_request")

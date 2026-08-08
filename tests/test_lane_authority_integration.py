@@ -92,6 +92,23 @@ def build_map_plugin(y=3.0):
 
 
 class LaneAuthorityIntegrationTests(unittest.TestCase):
+    def test_stale_locator_callback_releases_input_for_fresh_gps_build(self):
+        """17:10 regression: stale rolling GPS work is not a completed input."""
+        plugin, _sdk, _point = build_map_plugin()
+        diagnostic = mock.Mock()
+        diagnostic.build_id = "stale-rolling-build"
+        diagnostic.record = {}
+        diagnostic.finish.return_value = {}
+        token = object()
+        plugin._build_tokens[diagnostic.build_id] = token
+        plugin._build_guard = mock.Mock()
+
+        plugin._finish_stale_route_build(
+            diagnostic, "GPS revision changed during LaneLocator", 10)
+
+        plugin._build_guard.abandon.assert_called_once_with(token)
+        plugin._build_guard.finish.assert_not_called()
+
     def test_rolling_gps_prefix_does_not_invalidate_valid_snapshot(self):
         plugin, sdk, point = build_map_plugin()
         before = dict(sdk.get("lane_trajectory"))

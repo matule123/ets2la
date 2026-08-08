@@ -285,6 +285,18 @@ class NavigationBuildGuard:
             self._active.pop(token.intent_id, None)
             self._completed.add((token.intent_id, token.input_key))
 
+    def abandon(self, token):
+        """Release a superseded build without completing its input.
+
+        A GPS revision can change while LaneLocator or trajectory validation
+        is running. That callback is stale evidence: recording its input as
+        completed would suppress the fresh build for the new rolling window.
+        """
+        if token is None:
+            return
+        if self._active.get(token.intent_id) == token:
+            self._active.pop(token.intent_id, None)
+
     def input_completed(self, intent_id, input_key):
         return (str(intent_id or ""), tuple(input_key)) in self._completed
 
