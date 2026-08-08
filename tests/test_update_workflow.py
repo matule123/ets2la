@@ -180,8 +180,12 @@ class UpdateUiStateTests(unittest.TestCase):
             "Stiahnuté 0.00 MB • celkovú veľkosť zisťujem")
         dialog.set_progress(0.5, "5.0 MB / 10.0 MB")
         self.assertEqual(dialog.progress.value(), 50)
+        self.assertEqual(dialog.progress_percent.text(), "50 %")
         self.assertEqual(dialog.progress_text.text(), "5.0 MB / 10.0 MB")
         self.assertFalse(dialog.primary_btn.isEnabled())
+        self.assertIn("#2563EB", dialog.progress.styleSheet())
+        self.assertIn("#60A5FA", dialog.progress.styleSheet())
+        self.assertNotIn("#10B981", dialog.progress.styleSheet())
 
         dialog.set_ready(
             "Pripravené na inštaláciu: 3.42 MB • stiahnutý balík 0.84 MB")
@@ -194,6 +198,8 @@ class UpdateUiStateTests(unittest.TestCase):
             dialog.progress_text.text(),
             "Pripravené na inštaláciu: 3.42 MB • stiahnutý balík 0.84 MB")
         self.assertTrue(dialog.primary_btn.isEnabled())
+        self.assertEqual(dialog.progress_percent.text(), "100 %")
+        self.assertEqual(dialog.phase_badge.text(), "Overené a pripravené")
         dialog.close()
 
     def test_available_update_uses_plain_update_button(self):

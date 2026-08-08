@@ -32,8 +32,8 @@ from core.theme import stylesheet
 
 
 # ----------------------------------------------------------------- helpers
-ACCENT = "#10B981"
-ACCENT_HI = "#34D399"
+ACCENT = "#2563EB"
+ACCENT_HI = "#60A5FA"
 SUCCESS = "#22C55E"
 DANGER = "#EF4444"
 WARN = "#F59E0B"
@@ -52,10 +52,10 @@ def _btn_primary(text):
     b.setCursor(Qt.CursorShape.PointingHandCursor)
     b.setStyleSheet(
         "QPushButton#Primary{background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-        "stop:0 " + ACCENT_HI + ", stop:1 #059669); color:#fff; border:none;"
+        "stop:0 " + ACCENT_HI + ", stop:1 #2563EB); color:#fff; border:1px solid #1D4ED8;"
         "border-radius:10px; padding:11px 24px; font-size:14px; font-weight:700;}"
         "QPushButton#Primary:hover{background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-        "stop:0 #3DEDA6, stop:1 #06A977);}"
+        "stop:0 #93C5FD, stop:1 #2563EB);}"
         "QPushButton#Primary:disabled{background:#E5E7EB; color:#9CA3AF;}")
     return b
 
@@ -163,7 +163,7 @@ class _LanguageFlag(QWidget):
             "hu": ("#CE2939", "#FFFFFF", "#477050"),
             "en": ("#16366F",),
         }
-        bands = colors.get(self.code, ("#E5E7EB", "#10B981"))
+        bands = colors.get(self.code, ("#E5E7EB", "#2563EB"))
         height = rect.height() / len(bands)
         for index, color in enumerate(bands):
             p.fillRect(rect.x(), int(rect.y() + index * height), rect.width(),
@@ -271,19 +271,19 @@ class _LangRow(QWidget):
     def mark_selected(self, selected):
         if selected:
             self.setStyleSheet(
-                "#LanguageCard{background:#ECFDF5;border:2px solid " + ACCENT + ";"
+                "#LanguageCard{background:#EFF6FF;border:2px solid " + ACCENT + ";"
                 "border-radius:14px;}")
             self.code_badge.setStyleSheet(
                 "background:" + ACCENT + ";color:#FFFFFF;border:none;"
                 "border-radius:12px;font-size:12px;font-weight:800;")
             self.action.setText(_("lang_selected"))
-            self.action.setStyleSheet("QPushButton{background:#10B981;color:#FFFFFF;border:none;border-radius:8px;padding:6px 14px;font-size:12px;font-weight:700;}")
+            self.action.setStyleSheet("QPushButton{background:#2563EB;color:#FFFFFF;border:1px solid #1D4ED8;border-radius:8px;padding:6px 14px;font-size:12px;font-weight:700;}")
         else:
             self.setStyleSheet(
                 "#LanguageCard{background:#FFFFFF;border:1px solid #E5E7EB;"
-                "border-radius:14px;}#LanguageCard:hover{border-color:#6EE7B7;} ")
+                "border-radius:14px;}#LanguageCard:hover{border-color:#93C5FD;} ")
             self.code_badge.setStyleSheet(
-                "background:#ECFDF5;color:#047857;border:1px solid #A7F3D0;"
+                "background:#EFF6FF;color:#1D4ED8;border:1px solid #BFDBFE;"
                 "border-radius:12px;font-size:12px;font-weight:800;")
             if self.info.get("downloaded") or self.info.get("bundled"):
                 self.action.setText(_("lang_select"))
@@ -384,7 +384,7 @@ class OnboardingWizard(QWidget):
         logo.setStyleSheet("border:none;")
         h.addWidget(logo)
         brand = QLabel("UltraPilot")
-        brand.setStyleSheet("font-size:18px; font-weight:800; color:#065F46;")
+        brand.setStyleSheet("font-size:18px; font-weight:800; color:#1D4ED8;")
         h.addWidget(brand)
         h.addStretch()
         return hero
@@ -481,7 +481,7 @@ class OnboardingWizard(QWidget):
         intro.setObjectName("LanguageIntro")
         intro.setStyleSheet(
             "#LanguageIntro{background:qlineargradient(x1:0,y1:0,x2:1,y2:1,"
-            "stop:0 #ECFDF5,stop:1 #F8FFFC);border:1px solid #A7F3D0;"
+            "stop:0 #EFF6FF,stop:1 #F8FAFF);border:1px solid #BFDBFE;"
             "border-radius:16px;}#LanguageIntro QLabel{background:transparent;border:none;}")
         intro_lay = QHBoxLayout(intro)
         intro_lay.setContentsMargins(20, 16, 20, 16)
@@ -490,7 +490,7 @@ class OnboardingWizard(QWidget):
         mark.setFixedSize(48, 48)
         mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
         mark.setStyleSheet(
-            "background:#10B981;color:#FFFFFF;border:none;border-radius:15px;"
+            "background:#2563EB;color:#FFFFFF;border:1px solid #1D4ED8;border-radius:15px;"
             "font-size:21px;font-weight:800;")
         intro_lay.addWidget(mark)
         text_col = QVBoxLayout()
@@ -831,7 +831,7 @@ class OnboardingWizard(QWidget):
         else:
             btn.setText(_("sdk_install"))
             btn.setEnabled(True)
-            btn.setStyleSheet("QPushButton{background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 " + ACCENT_HI + ", stop:1 #059669); color:#fff; border:none; border-radius:8px; padding:6px 14px; font-size:12px; font-weight:600;} QPushButton:hover{background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #3DEDA6, stop:1 #06A977);} QPushButton:disabled{background:#E5E7EB; color:#9CA3AF;}")
+            btn.setStyleSheet("QPushButton{background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 " + ACCENT_HI + ", stop:1 #2563EB); color:#fff; border:1px solid #1D4ED8; border-radius:8px; padding:6px 14px; font-size:12px; font-weight:600;} QPushButton:hover{background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #93C5FD, stop:1 #2563EB);} QPushButton:disabled{background:#E5E7EB; color:#9CA3AF;}")
 
     def _refresh_game_status(self, card, game, status_key):
         if hasattr(card, "_status_lbl"):
@@ -1032,14 +1032,14 @@ class OnboardingWizard(QWidget):
         selected = (self.selected_map == d["key"])
         # Card border.
         if selected:
-            card.setStyleSheet("QFrame{background:#ECFDF5; border:2px solid " + ACCENT + "; border-radius:12px;} QLabel{background:transparent;border:none;}")
+            card.setStyleSheet("QFrame{background:#EFF6FF; border:2px solid " + ACCENT + "; border-radius:12px;} QLabel{background:transparent;border:none;}")
         else:
             card.setStyleSheet("QFrame{background:#FFFFFF; border:1px solid #E5E7EB; border-radius:12px;} QLabel{background:transparent;border:none;}")
         if is_down:
             status_lbl.setText(_("map_ready"))
             status_lbl.setStyleSheet("font-size:12px; color:" + SUCCESS + "; font-weight:600; border:none;")
             btn.setText(_("map_selected") if selected else _("map_select"))
-            btn.setStyleSheet("QPushButton{background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 " + ACCENT_HI + ", stop:1 #059669); color:#fff; border:none; border-radius:8px; padding:6px 14px; font-size:12px; font-weight:600;} QPushButton:hover{background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #3DEDA6, stop:1 #06A977);}")
+            btn.setStyleSheet("QPushButton{background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 " + ACCENT_HI + ", stop:1 #2563EB); color:#fff; border:1px solid #1D4ED8; border-radius:8px; padding:6px 14px; font-size:12px; font-weight:600;} QPushButton:hover{background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #93C5FD, stop:1 #2563EB);}")
             btn.setEnabled(True)
             btn.clicked.disconnect() if btn.receivers(btn.clicked) else None
             btn.clicked.connect(lambda _, key=d["key"]: self._select_map(key))

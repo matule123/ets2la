@@ -21,6 +21,14 @@ def _caption_qss(pal):
     return "color: " + pal['muted'] + ";"
 
 
+def _icon_qss(pal, radius=9):
+    dark = pal["bg"] == "#0D1117"
+    background = "#172554" if dark else "#EFF6FF"
+    border = "#1E3A8A" if dark else "#DBEAFE"
+    return ("background:" + background + ";border:1px solid " + border
+            + ";border-radius:" + str(radius) + "px;")
+
+
 class SettingsMenu(QWidget):
     """
     Live settings panel for UltraPilot.
@@ -42,6 +50,7 @@ class SettingsMenu(QWidget):
         self._themed_frames = []
         self._themed_titles = []
         self._themed_captions = []
+        self._themed_icons = []
         self.init_ui()
 
     def _section_card(self, icon_name, title, subtitle):
@@ -59,8 +68,8 @@ class SettingsMenu(QWidget):
         icon.setFixedSize(34, 34)
         icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         icon.setPixmap(line_icon(icon_name, self._pal['title'], 24).pixmap(24, 24))
-        icon.setStyleSheet("background:#ECFDF5;border:1px solid #D1FAE5;"
-                           "border-radius:9px;")
+        icon.setStyleSheet(_icon_qss(self._pal))
+        self._themed_icons.append((icon, icon_name, 24))
         header.addWidget(icon)
         texts = QVBoxLayout()
         texts.setSpacing(1)
@@ -107,9 +116,10 @@ class SettingsMenu(QWidget):
         hero_icon = QLabel()
         hero_icon.setFixedSize(46, 46)
         hero_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hero_icon.setPixmap(line_icon("settings", "#047857", 30).pixmap(30, 30))
-        hero_icon.setStyleSheet("background:#D1FAE5;border:1px solid #A7F3D0;"
-                                "border-radius:13px;")
+        hero_icon.setPixmap(
+            line_icon("settings", self._pal['title'], 30).pixmap(30, 30))
+        hero_icon.setStyleSheet(_icon_qss(self._pal, 13))
+        self._hero_icon = hero_icon
         hero_layout.addWidget(hero_icon)
         hero_text = QVBoxLayout()
         hero_text.setSpacing(2)
@@ -289,6 +299,11 @@ class SettingsMenu(QWidget):
             ttl.setStyleSheet(_title_qss(p))
         for caption in getattr(self, "_themed_captions", []):
             caption.setStyleSheet("font-size:12px;color:" + p['muted'] + ";")
+        from ui.icons import line_icon
+        for icon, icon_name, size in getattr(self, "_themed_icons", []):
+            icon.setPixmap(line_icon(icon_name, p['title'], size).pixmap(
+                size, size))
+            icon.setStyleSheet(_icon_qss(p))
         if hasattr(self, "_hero"):
             self._hero.setStyleSheet(
                 "QFrame#SettingsHero{background:" + p['card']
@@ -298,6 +313,9 @@ class SettingsMenu(QWidget):
                 "font-size:22px;font-weight:800;color:" + p['text'] + ";")
             self._hero_subtitle.setStyleSheet(
                 "font-size:12px;color:" + p['muted'] + ";")
+            self._hero_icon.setPixmap(
+                line_icon("settings", p['title'], 30).pixmap(30, 30))
+            self._hero_icon.setStyleSheet(_icon_qss(p, 13))
         if hasattr(self, "cov_label"):
             self.cov_label.setStyleSheet("color: " + p['muted'] + "; font-size: 12px;")
         if hasattr(self, "dl_lang_btn"):

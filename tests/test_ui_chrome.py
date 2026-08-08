@@ -88,6 +88,16 @@ class UiChromeTests(unittest.TestCase):
                      "steering"):
             self.assertFalse(line_icon(name).isNull())
 
+    def test_interactive_chrome_is_blue_and_dark_sidebar_is_theme_aware(self):
+        light = stylesheet("light")
+        dark = stylesheet("dark")
+        self.assertIn("#2563EB", light)
+        self.assertIn("background-color: #EFF6FF", light)
+        self.assertIn("background-color: #010409", dark)
+        self.assertIn("background-color: #172554", dark)
+        self.assertNotIn(
+            "QFrame#Sidebar { background-color: #FFFFFF", dark)
+
     def test_main_window_is_larger_rounded_and_has_no_bottom_status_bar(self):
         state = State({"ui_theme": "light", "ui_language_code": "sk"})
         with (mock.patch.object(app_module, "MapPage",
@@ -138,6 +148,9 @@ class UiChromeTests(unittest.TestCase):
                 self.assertEqual(row.code_badge.code, row.code)
                 self.assertEqual(row.code_badge.accessibleName(), "flag-" + row.code)
                 self.assertGreaterEqual(row.minimumHeight(), 116)
+            wizard.lang_rows[0].mark_selected(True)
+            self.assertIn("#2563EB", wizard.lang_rows[0].styleSheet())
+            self.assertIn("#2563EB", wizard.next_btn.styleSheet())
         finally:
             wizard.close()
 

@@ -737,8 +737,11 @@ class UltraPilotApp(QMainWindow):
         brand_txt = QVBoxLayout()
         brand_txt.setSpacing(0)
         word = QLabel("UltraPilot")
+        self.brand_word = word
         word.setObjectName("BrandWordmark")
-        word.setStyleSheet("font-size:21px;font-weight:750;color:#20242A;border:none;")
+        word.setStyleSheet(
+            "font-size:21px;font-weight:750;color:" + self._pal["text"]
+            + ";border:none;")
         brand_txt.addWidget(word)
         brand_row.addLayout(brand_txt)
         brand_row.addStretch()
@@ -1036,6 +1039,10 @@ class UltraPilotApp(QMainWindow):
             self._pal = palette(new_theme)
             self.setStyleSheet(stylesheet(new_theme))
             self.title_bar.set_palette(self._pal)
+            self.brand_word.setStyleSheet(
+                "font-size:21px;font-weight:750;color:"
+                + self._pal["text"] + ";border:none;")
+            self.update_checker.restyle(new_theme)
             # Re-render the chrome widgets that cache colours from the palette
             # (brand wordmark, hamburger, sidebar footer, start button).
             self._render_start_btn()

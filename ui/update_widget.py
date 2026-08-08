@@ -23,7 +23,24 @@ from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel,
 from PyQt6.QtCore import QThread, pyqtSignal
 
 
-ACCENT = "#10B981"
+ACCENT = "#2563EB"
+ACCENT_HOVER = "#1D4ED8"
+ACCENT_SOFT = "#DBEAFE"
+ACCENT_LIGHT = "#60A5FA"
+
+
+def _ui_palette(source=None):
+    """Resolve the live app palette without requiring a specific state type."""
+    state = getattr(source, "state", source)
+    mode = "light"
+    getter = getattr(state, "get", None)
+    if callable(getter):
+        try:
+            mode = getter("ui_theme", "light") or "light"
+        except Exception:
+            pass
+    from core.theme import palette
+    return palette(mode)
 
 
 class Spinner(QWidget):
@@ -115,29 +132,45 @@ class UpdateChangesPopover(QFrame):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setObjectName("UpdateChangesPopover")
         self.setFixedWidth(310)
+        self._labels = []
+        p = _ui_palette(parent)
         self.setStyleSheet(
-            "QFrame#UpdateChangesPopover{background:#FFFFFF;border:1px solid #D1D5DB;"
-            "border-radius:10px;}"
-            "QLabel{background:transparent;border:none;color:#374151;}")
+            "QFrame#UpdateChangesPopover{background:" + p["surface"]
+            + ";border:1px solid " + p["border"] + ";border-radius:12px;}"
+            "QLabel{background:transparent;border:none;color:" + p["text"] + ";}")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(14, 12, 14, 12)
         lay.setSpacing(5)
         heading = QLabel("Čo je nové")
-        heading.setStyleSheet("font-size:11px;font-weight:800;color:#047857;")
+        heading.setObjectName("UpdatePopoverHeading")
+        heading.setStyleSheet("font-size:11px;font-weight:800;color:" + ACCENT + ";")
         lay.addWidget(heading)
         self.release_title = QLabel("")
+        self.release_title.setObjectName("UpdatePopoverTitle")
         self.release_title.setTextFormat(Qt.TextFormat.PlainText)
         self.release_title.setWordWrap(True)
         self.release_title.setStyleSheet(
-            "font-size:13px;font-weight:800;color:#111827;")
+            "font-size:13px;font-weight:800;color:" + p["text"] + ";")
         lay.addWidget(self.release_title)
         self.release_description = QLabel("")
+        self.release_description.setObjectName("UpdatePopoverDescription")
         self.release_description.setTextFormat(Qt.TextFormat.PlainText)
         self.release_description.setWordWrap(True)
         self.release_description.setStyleSheet(
-            "font-size:12px;color:#4B5563;line-height:1.25;")
+            "font-size:12px;color:" + p["muted"] + ";line-height:1.25;")
         lay.addWidget(self.release_description)
         self.hide()
+
+    def restyle(self, theme):
+        p = _ui_palette({"ui_theme": theme})
+        self.setStyleSheet(
+            "QFrame#UpdateChangesPopover{background:" + p["surface"]
+            + ";border:1px solid " + p["border"] + ";border-radius:12px;}"
+            "QLabel{background:transparent;border:none;color:" + p["text"] + ";}")
+        self.release_title.setStyleSheet(
+            "font-size:13px;font-weight:800;color:" + p["text"] + ";")
+        self.release_description.setStyleSheet(
+            "font-size:12px;color:" + p["muted"] + ";line-height:1.25;")
 
     def set_changes(self, title, description):
         title = str(title or "Nová verzia UltraPilot").strip()
@@ -221,15 +254,16 @@ class UpdateConfirmDialog(QDialog):
 
     def __init__(self, latest_tag, title="", description="", parent=None):
         super().__init__(parent)
+        p = _ui_palette(parent)
+        self._palette = p
         from core.update_check import _display_commit
         latest_tag = _display_commit(str(latest_tag)) or str(latest_tag)
         self.setWindowTitle("Aktualizovať UltraPilot")
         self.setModal(True)
-        self.setFixedSize(500, 340)
-        # Match the application's default white ETS2LA-style surfaces.
+        self.setFixedSize(520, 370)
         self.setStyleSheet(
-            "UpdateConfirmDialog{background:#FFFFFF;}"
-            "QLabel{color:#111827;background:transparent;}")
+            "UpdateConfirmDialog{background:" + p["bg"] + ";}"
+            "QLabel{color:" + p["text"] + ";background:transparent;}")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(28, 24, 28, 20)
         lay.setSpacing(12)
@@ -240,7 +274,8 @@ class UpdateConfirmDialog(QDialog):
         self.brand_logo.setFixedSize(52, 52)
         self.brand_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.brand_logo.setStyleSheet(
-            "background:#F9FAFB;border:1px solid #E5E7EB;border-radius:14px;")
+            "background:" + p["card"] + ";border:1px solid "
+            + p["border"] + ";border-radius:14px;")
         try:
             from core.paths import resource
             logo_path = resource("assets", "favicon.ico")
@@ -253,11 +288,16 @@ class UpdateConfirmDialog(QDialog):
         col = QVBoxLayout()
         col.setSpacing(2)
         self.title_lbl = QLabel("Dostupná aktualizácia")
-        self.title_lbl.setStyleSheet("font-size:18px;font-weight:800;color:#111827;")
+        self.title_lbl.setStyleSheet(
+            "font-size:18px;font-weight:800;color:" + p["text"] + ";")
         col.addWidget(self.title_lbl)
         ver = QLabel("Commit: " + str(latest_tag))
-        ver.setStyleSheet("font-size:12px;color:#047857;font-weight:700;")
+        ver.setStyleSheet("font-size:12px;color:" + ACCENT + ";font-weight:700;")
         col.addWidget(ver)
+        self.phase_badge = QLabel("Bezpečná aktualizácia")
+        self.phase_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._set_phase_badge("Bezpečná aktualizácia", "active")
+        col.addWidget(self.phase_badge, alignment=Qt.AlignmentFlag.AlignLeft)
         head.addLayout(col, stretch=1)
         lay.addLayout(head)
 
@@ -267,21 +307,36 @@ class UpdateConfirmDialog(QDialog):
             "Najprv sa aktualizácia bezpečne stiahne a overí. Aplikácia sa "
             "zmení až po potvrdení inštalácie.")
         self.note.setWordWrap(True)
-        self.note.setStyleSheet("font-size:13px;color:#4B5563;background:#F9FAFB;border:1px solid #E5E7EB;border-radius:10px;padding:12px;")
+        self.note.setStyleSheet(
+            "font-size:13px;color:" + p["muted"] + ";background:"
+            + p["card"] + ";border:1px solid " + p["border"]
+            + ";border-radius:12px;padding:12px;")
         lay.addWidget(self.note)
 
         self.progress_text = QLabel("")
         self.progress_text.setStyleSheet(
-            "font-size:12px;color:#374151;font-weight:700;")
+            "font-size:12px;color:" + p["text"] + ";font-weight:700;")
         self.progress_text.setVisible(False)
-        lay.addWidget(self.progress_text)
+        progress_header = QHBoxLayout()
+        progress_header.setContentsMargins(0, 0, 0, 0)
+        progress_header.addWidget(self.progress_text, 1)
+        self.progress_percent = QLabel("0 %")
+        self.progress_percent.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.progress_percent.setStyleSheet(
+            "font-size:11px;color:" + ACCENT + ";font-weight:800;")
+        self.progress_percent.setVisible(False)
+        progress_header.addWidget(self.progress_percent)
+        lay.addLayout(progress_header)
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
-        self.progress.setFixedHeight(14)
+        self.progress.setFixedHeight(12)
         self.progress.setTextVisible(False)
         self.progress.setStyleSheet(
-            "QProgressBar{background:#E5E7EB;border:none;border-radius:7px;}"
-            "QProgressBar::chunk{background:#10B981;border-radius:7px;}")
+            "QProgressBar{background:" + p["border"]
+            + ";border:none;border-radius:6px;}"
+            "QProgressBar::chunk{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #2563EB,stop:0.58 #3B82F6,stop:1 #60A5FA);"
+            "border-radius:6px;}")
         self.progress.setVisible(False)
         lay.addWidget(self.progress)
         lay.addStretch()
@@ -292,9 +347,11 @@ class UpdateConfirmDialog(QDialog):
         self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.cancel_btn.setFixedWidth(110)
         self.cancel_btn.setStyleSheet(
-            "QPushButton{background:#FFFFFF;color:#374151;border:1px solid #D1D5DB;"
-            "border-radius:8px;padding:9px;font-weight:600;}"
-            "QPushButton:hover{background:#F9FAFB;border-color:#9CA3AF;}")
+            "QPushButton{background:" + p["surface"] + ";color:" + p["text"]
+            + ";border:1px solid " + p["border"]
+            + ";border-radius:9px;padding:9px;font-weight:600;}"
+            "QPushButton:hover{background:" + p["card2"]
+            + ";border-color:#93C5FD;color:" + ACCENT + ";}")
         self.cancel_btn.clicked.connect(self.reject)
         row.addWidget(self.cancel_btn)
         self.primary_btn = QPushButton("Stiahnuť")
@@ -302,21 +359,41 @@ class UpdateConfirmDialog(QDialog):
         self.primary_btn.setMinimumWidth(150)
         self.primary_btn.setStyleSheet(
             "QPushButton{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            "stop:0 #10B981, stop:1 #059669);color:#FFFFFF;border:none;"
-            "border-radius:8px;padding:9px;font-weight:700;}"
-            "QPushButton:disabled{background:#A7F3D0;color:#ECFDF5;}"
+            "stop:0 #3B82F6,stop:1 #2563EB);color:#FFFFFF;border:1px solid #1D4ED8;"
+            "border-radius:9px;padding:9px;font-weight:700;}"
+            "QPushButton:disabled{background:#BFDBFE;color:#EFF6FF;border-color:#BFDBFE;}"
             "QPushButton:hover{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            "stop:0 #34D399, stop:1 #059669);}")
+            "stop:0 #60A5FA,stop:1 #2563EB);}")
         self.primary_btn.clicked.connect(self.download_requested.emit)
         self.primary_btn.setDefault(True)
         row.addWidget(self.primary_btn)
         lay.addLayout(row)
 
+    def _set_phase_badge(self, text, state):
+        dark = self._palette["bg"] == "#0D1117"
+        colours = {
+            "active": (("#BFDBFE", "#172554", "#1E3A8A") if dark else
+                       ("#1D4ED8", "#EFF6FF", "#DBEAFE")),
+            "success": (("#86EFAC", "#052E16", "#166534") if dark else
+                        ("#047857", "#ECFDF5", "#A7F3D0")),
+            "error": (("#FDA4AF", "#3F0A0A", "#7F1D1D") if dark else
+                      ("#B42318", "#FEF3F2", "#FECDCA")),
+        }
+        foreground, background, border = colours[state]
+        self.phase_badge.setText(text)
+        self.phase_badge.setStyleSheet(
+            "font-size:10px;font-weight:750;color:" + foreground
+            + ";background:" + background + ";border:1px solid " + border
+            + ";border-radius:7px;padding:3px 8px;")
+
     def set_downloading(self):
         self.title_lbl.setText("Sťahujem aktualizáciu")
+        self._set_phase_badge("Sťahovanie a overenie", "active")
         self.progress.setVisible(True)
         self.progress_text.setVisible(True)
+        self.progress_percent.setVisible(True)
         self.progress.setValue(0)
+        self.progress_percent.setText("0 %")
         self.progress_text.setText(
             "Stiahnuté 0.00 MB • celkovú veľkosť zisťujem")
         self.primary_btn.setEnabled(False)
@@ -324,15 +401,21 @@ class UpdateConfirmDialog(QDialog):
         self.cancel_btn.setEnabled(False)
 
     def set_progress(self, fraction, text):
-        self.progress.setValue(max(0, min(100, int(float(fraction) * 100))))
+        value = max(0, min(100, int(float(fraction) * 100)))
+        self.progress.setValue(value)
+        self.progress_percent.setVisible(True)
+        self.progress_percent.setText(f"{value} %")
         self.progress_text.setText(str(text))
 
     def set_ready(self, size_text=None):
         self.title_lbl.setText("Aktualizácia je pripravená na inštaláciu")
+        self._set_phase_badge("Overené a pripravené", "success")
         self.note.setText(
             "Balík bol úplne stiahnutý a overený. Kliknutím na tlačidlo "
             "sa aktualizácia nainštaluje a UltraPilot sa reštartuje.")
         self.progress.setValue(100)
+        self.progress_percent.setVisible(True)
+        self.progress_percent.setText("100 %")
         if size_text:
             self.progress_text.setVisible(True)
             self.progress_text.setText(str(size_text))
@@ -347,6 +430,7 @@ class UpdateConfirmDialog(QDialog):
 
     def set_installing(self):
         self.title_lbl.setText("Inštalácia aktualizácie")
+        self._set_phase_badge("Inštalácia", "active")
         self.progress_text.setText("Inštalujem pripravené súbory…")
         self.primary_btn.setText("Inštalujem…")
         self.primary_btn.setEnabled(False)
@@ -354,6 +438,7 @@ class UpdateConfirmDialog(QDialog):
 
     def set_failed(self, text="Aktualizácia zlyhala — skús znova."):
         self.title_lbl.setText("Aktualizácia sa nepodarila")
+        self._set_phase_badge("Vyžaduje pozornosť", "error")
         self.progress_text.setVisible(True)
         self.progress_text.setText(text)
         self.primary_btn.setText("Skúsiť znova")
@@ -405,7 +490,6 @@ class UpdateCheckerWidget(QWidget):
         top.setContentsMargins(0, 0, 0, 0)
         top.setSpacing(6)
         self.version_lbl = QLabel(self._version_text())
-        self.version_lbl.setStyleSheet("font-size:11px;font-weight:700;color:#6B7280;border:none;")
         self.version_lbl.setWordWrap(True)
         top.addWidget(self.version_lbl)
         # A separate status line (check result / progress) so the version is
@@ -416,7 +500,6 @@ class UpdateCheckerWidget(QWidget):
         top.addWidget(self.spinner)
         lay.addLayout(top)
         self.status_lbl = QLabel("")
-        self.status_lbl.setStyleSheet("font-size:10px;color:#6B7280;border:none;")
         self.status_lbl.setWordWrap(True)
         lay.addWidget(self.status_lbl)
         # Button (full width, short label so it fits the narrow sidebar).
@@ -430,21 +513,49 @@ class UpdateCheckerWidget(QWidget):
         # Progress bar on its own row below the button.
         self.progress = QProgressBar()
         self.progress.setFixedHeight(8)
+        self.progress.setTextVisible(False)
+        p = _ui_palette(self.state)
+        self.progress.setStyleSheet(
+            "QProgressBar{background:" + p["border"]
+            + ";border:none;border-radius:4px;}"
+            "QProgressBar::chunk{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #2563EB,stop:1 #60A5FA);border-radius:4px;}")
         self.progress.setVisible(False)
         lay.addWidget(self.progress)
+        self.restyle(getattr(self.state, "get", lambda *_: "light")(
+            "ui_theme", "light") if self.state is not None else "light")
+
+    def restyle(self, theme):
+        p = _ui_palette({"ui_theme": theme})
+        self.version_lbl.setStyleSheet(
+            "font-size:11px;font-weight:700;color:" + p["muted"]
+            + ";border:none;")
+        self.status_lbl.setStyleSheet(
+            "font-size:10px;color:" + p["muted"] + ";border:none;")
+        self.progress.setStyleSheet(
+            "QProgressBar{background:" + p["border"]
+            + ";border:none;border-radius:4px;}"
+            "QProgressBar::chunk{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #2563EB,stop:1 #60A5FA);border-radius:4px;}")
+        self._apply_btn_style(self._update_available)
+        self.changes_popover.restyle(theme)
 
     def _apply_btn_style(self, update_available=False):
-        """Neutral 'check' look, or green 'update' look when one is available."""
+        """Neutral check look, or blue primary action when one is available."""
+        p = _ui_palette(self.state)
         if update_available:
             self.btn.setStyleSheet(
-                "QPushButton{background:" + ACCENT + ";color:#FFFFFF;border:none;"
-                "border-radius:6px;padding:4px 10px;font-size:11px;font-weight:700;}"
-                "QPushButton:hover{background:#059669;}")
+                "QPushButton{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+                "stop:0 #2563EB,stop:1 #3B82F6);color:#FFFFFF;border:1px solid #1D4ED8;"
+                "border-radius:7px;padding:5px 10px;font-size:11px;font-weight:700;}"
+                "QPushButton:hover{background:#1D4ED8;}")
         else:
             self.btn.setStyleSheet(
-                "QPushButton{background:#FFFFFF;color:#4B5563;border:1px solid #D1D5DB;"
-                "border-radius:6px;padding:4px 10px;font-size:11px;font-weight:600;}"
-                "QPushButton:hover{background:#F0FDF4;color:" + ACCENT + ";border-color:" + ACCENT + ";}")
+                "QPushButton{background:" + p["surface"] + ";color:" + p["muted"]
+                + ";border:1px solid " + p["border"]
+                + ";border-radius:7px;padding:5px 10px;font-size:11px;font-weight:600;}"
+                "QPushButton:hover{background:" + p["card2"] + ";color:"
+                + ACCENT + ";border-color:#93C5FD;}")
 
     def _version_text(self):
         t = "v" + self._version

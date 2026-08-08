@@ -124,7 +124,8 @@ class DynamicIsland(QWidget):
         self.progress.setFixedHeight(4)
         self.progress.setStyleSheet(
             "QProgressBar{background:#E5E7EB;border:none;border-radius:2px;}"
-            "QProgressBar::chunk{background:#10B981;border-radius:2px;}")
+            "QProgressBar::chunk{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #2563EB,stop:1 #60A5FA);border-radius:2px;}")
         self.progress.hide()
         content.addWidget(self.progress)
         outer.addWidget(self.frame)
