@@ -132,8 +132,17 @@ def _make_console_handler():
     try:
         from rich.console import Console
         from rich.logging import RichHandler
+        from rich.theme import Theme
+        console_theme = Theme({
+            "logging.level.debug": "cyan",
+            "logging.level.info": "bright_green",
+            "logging.level.warning": "yellow",
+            "logging.level.error": "bright_red",
+            "logging.level.critical": "bold white on red",
+        })
         handler = RichHandler(
-            console=Console(), rich_tracebacks=True, markup=False,
+            console=Console(theme=console_theme), rich_tracebacks=True,
+            markup=False,
             show_time=True, show_level=True, show_path=True,
             log_time_format="%H:%M:%S",
         )
