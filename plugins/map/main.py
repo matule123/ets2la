@@ -8,7 +8,7 @@ from core.navigation.lane_trajectory import build_lane_trajectory
 from core.navigation.route_diagnostics import (
     RouteBuildDiagnostics, classify_failure, dataset_fingerprint,
     export_anonymized_failure, friendly_failure_message,
-    safe_diagnostic_call,
+    lane_change_payload, safe_diagnostic_call,
 )
 from core.navigation.runtime_preflight import CONFIDENCE_THRESHOLD
 from core.navigation.navigation_intent import (
@@ -208,6 +208,7 @@ class Plugin(BasePlugin):
                 "lane_width_m": float(segment.width_m),
                 "start_uid": int(segment.start_uid),
                 "end_uid": int(segment.end_uid),
+                "lane_change": lane_change_payload(segment.lane_change),
             })
         return result
 
@@ -271,6 +272,10 @@ class Plugin(BasePlugin):
             "navigation_buffer_classification": self.sdk.get(
                 "navigation_buffer_classification"),
             "route_distance_m": route_distance_m,
+            "truck_speed_mps": float(abs(
+                self.sdk.get("truck_speed_ms", 0.0) or 0.0)),
+            "road_speed_cap_kmh": float(
+                self.sdk.get("road_speed_cap", 0.0) or 0.0),
         }
 
     def _route_build_input_key(self, build_uids, match):
@@ -1115,9 +1120,13 @@ class Plugin(BasePlugin):
 
         self.sdk.set("navigation_status", "Vyberám jazdné pruhy")
         try:
+            design_speed_mps = max(
+                abs(float(self.sdk.get("truck_speed_ms", 0.0) or 0.0)),
+                float(self.sdk.get("road_speed_cap", 0.0) or 0.0) / 3.6,
+            )
             lane_path, _ = self.road_net.build_lane_path(
                 build_uids, pos, heading, altitude=altitude, start_match=match,
-                diagnostics=diagnostic)
+                diagnostics=diagnostic, speed_mps=design_speed_mps)
         except Exception as exc:
             failure_time = time.monotonic()
             technical_reason = (

@@ -33,12 +33,21 @@ FAILURE_CODES = (
     "GEOMETRY_GAP",
     "GEOMETRY_HEADING_JUMP",
     "GEOMETRY_ELEVATION_JUMP",
+    "LANE_CHANGE_INSUFFICIENT_APPROACH",
+    "LANE_CHANGE_TOPOLOGY_REJECTED",
+    "LANE_CHANGE_GEOMETRY_REJECTED",
     "TRAJECTORY_VALIDATION_FAILED",
     "STALE_REVISION",
     "INTERNAL_ERROR",
 )
 
 FRIENDLY_FAILURE_MESSAGES = {
+    "LANE_CHANGE_INSUFFICIENT_APPROACH": (
+        "Pred križovatkou nie je dosť priestoru na bezpečnú zmenu pruhu."),
+    "LANE_CHANGE_TOPOLOGY_REJECTED": (
+        "Požadovaná zmena pruhu nemá jednoznačný mapový dôkaz."),
+    "LANE_CHANGE_GEOMETRY_REJECTED": (
+        "Geometria zmeny pruhu nespĺňa bezpečnostné podmienky."),
     "DATASET_MISSING_PREFAB": "Mapové dáta pre túto križovatku nie sú úplné.",
     "DATASET_VERSION_MISMATCH": "Zvolená mapa nezodpovedá verzii hry.",
     "DATASET_MISSING_UID": "GPS trasa nie je v zvolenej mape úplná.",
@@ -83,6 +92,15 @@ def classify_failure(phase: str, reason: str, details=None) -> str:
 
     if phase == "stale_revision" or "stale revision" in reason:
         return "STALE_REVISION"
+    if "lane_change_insufficient_approach" in reason:
+        return "LANE_CHANGE_INSUFFICIENT_APPROACH"
+    if "lane_change_" in reason and any(word in reason for word in (
+            "ambiguous", "not_adjacent", "opposing_direction",
+            "different_road", "gps_identity", "no_target_connector",
+            "not_road", "topology")):
+        return "LANE_CHANGE_TOPOLOGY_REJECTED"
+    if "lane_change_" in reason:
+        return "LANE_CHANGE_GEOMETRY_REJECTED"
     if "version" in phase or ("dataset" in reason and "version" in reason):
         return "DATASET_VERSION_MISMATCH"
     if "locator" in phase or "localization" in phase:
@@ -137,6 +155,36 @@ def lane_id_payload(lane_id):
         "prefab_token": lane_id.prefab_token,
         "connector_index": lane_id.connector_index,
         "connector_path": list(lane_id.connector_path),
+    }
+
+
+def lane_change_payload(proof):
+    """Serialize proof metrics without duplicating its source centrelines."""
+    if proof is None:
+        return None
+    return {
+        "accepted": True,
+        "source_lane_id": lane_id_payload(proof.source_lane_id),
+        "target_lane_id": lane_id_payload(proof.target_lane_id),
+        "source_raw_lane_index": int(proof.source_raw_lane_index),
+        "target_raw_lane_index": int(proof.target_raw_lane_index),
+        "elevation_layer": int(proof.elevation_layer),
+        "gps_pair_index": int(proof.gps_pair_index),
+        "gps_pair": [int(proof.gps_start_uid), int(proof.gps_end_uid)],
+        "prefab_token": proof.prefab_token,
+        "direction": proof.direction,
+        "design_speed_mps": float(proof.design_speed_mps),
+        "available_length_m": float(proof.available_length_m),
+        "required_length_m": float(proof.required_length_m),
+        "maneuver_length_m": float(proof.maneuver_length_m),
+        "settle_length_m": float(proof.settle_length_m),
+        "lateral_shift_m": float(proof.lateral_shift_m),
+        "max_lateral_accel_mps2": float(proof.max_lateral_accel_mps2),
+        "max_curvature": float(proof.max_curvature),
+        "max_curvature_slew": float(proof.max_curvature_slew),
+        "heading_residual_deg": float(proof.heading_residual_deg),
+        "vertical_residual_m": float(proof.vertical_residual_m),
+        "failure_reason": "",
     }
 
 
@@ -216,6 +264,7 @@ class RouteBuildDiagnostics:
                 "planned_lane_connection": {
                     "type": None, "source": None, "target": None,
                 },
+                "lane_changes": [],
                 "geometry": {
                     "gap_m": None,
                     "heading_jump_deg": None,
@@ -336,6 +385,10 @@ class RouteBuildDiagnostics:
     def observe_lane_path(self, lane_path):
         context = self.record["context"]
         segments = tuple(getattr(lane_path, "segments", ()) or ())
+        for segment in segments:
+            proof = lane_change_payload(getattr(segment, "lane_change", None))
+            if proof is not None and proof not in context["lane_changes"]:
+                context["lane_changes"].append(proof)
         if segments:
             boundaries = []
             for first, second in zip(segments, segments[1:]):
@@ -384,6 +437,14 @@ class RouteBuildDiagnostics:
         confidence = getattr(lane_path, "confidence", None)
         if confidence is not None:
             context["confidence"]["components"]["lane_path"] = float(confidence)
+
+    def observe_lane_change(self, details):
+        if not details:
+            return
+        payload = copy.deepcopy(details)
+        changes = self.record["context"].setdefault("lane_changes", [])
+        if payload not in changes:
+            changes.append(payload)
 
     def observe_validation(self, validation):
         metrics = {

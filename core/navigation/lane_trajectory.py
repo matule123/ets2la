@@ -35,6 +35,12 @@ class TrajectoryValidation:
     first_gps_pair_index: int = -1
     last_gps_pair_index: int = -1
     gps_pair_count: int = 0
+    lane_change_count: int = 0
+    max_lane_change_lateral_shift_m: float = 0.0
+    max_lane_change_curvature: float = 0.0
+    max_lane_change_curvature_slew: float = 0.0
+    max_lane_change_heading_residual_deg: float = 0.0
+    max_lane_change_vertical_residual_m: float = 0.0
 
 
 MAX_CONTROL_GAP_M = 3.25
@@ -47,6 +53,9 @@ MAX_LENGTH_CHANGE_RATIO = 0.035
 MAX_PROVEN_BOUNDARY_GAP_M = 0.75
 MAX_PROVEN_BOUNDARY_VERTICAL_M = 0.50
 MAX_PROVEN_BOUNDARY_HEADING_DEG = 15.0
+MAX_LANE_CHANGE_LATERAL_ACCEL_MPS2 = 0.90
+MAX_LANE_CHANGE_CURVATURE_SLEW = 0.020
+MAX_LANE_CHANGE_VERTICAL_RESIDUAL_M = 0.35
 
 
 def _xyz(point):
@@ -142,7 +151,7 @@ def _fair_ordinary_segment(segment):
     """
     original = tuple(segment.centerline)
     if (len(original) < 4 or segment.lane_type in
-            ("prefab", "roundabout", "graph")):
+            ("prefab", "roundabout", "graph", "lane_change")):
         return original
     limit = min(0.75, segment.width_m * 0.20)
     points = original
@@ -401,6 +410,101 @@ def build_lane_trajectory(lane_path: LanePath, spacing_m: float = 2.0,
     return result
 
 
+def _validate_lane_change_segment(segment, following=None):
+    """Validate a route-only lane change against both immutable map lanes."""
+    proof = segment.lane_change
+    if segment.lane_type != "lane_change" or proof is None:
+        return "Lane-change segment is missing its immutable proof", {}
+    if segment.lane_id != proof.source_lane_id:
+        return "Lane-change segment changed its source LaneId", {}
+    if (proof.source_lane_id.prefab_token is not None
+            or proof.target_lane_id.prefab_token is not None
+            or proof.source_lane_id.road_uid != proof.target_lane_id.road_uid):
+        return "Lane change does not reference two lanes of one road", {}
+    if (proof.source_lane_id.direction != proof.target_lane_id.direction
+            or proof.source_lane_id.direction != segment.direction):
+        return "Lane change crosses into an opposing direction", {}
+    if (abs(proof.source_raw_lane_index-proof.target_raw_lane_index) != 1
+            or proof.elevation_layer != segment.elevation_layer):
+        return "Lane change is non-adjacent or changes elevation layer", {}
+    if (proof.gps_pair_index != segment.gps_pair_index
+            or proof.gps_start_uid != segment.start_uid
+            or proof.gps_end_uid != segment.end_uid):
+        return "Lane change lost its GPS-pair identity", {}
+    if (len(proof.source_centerline) < 2
+            or len(proof.target_centerline) < 2):
+        return "Lane-change proof has incomplete source geometry", {}
+    if proof.available_length_m + 1e-6 < proof.required_length_m:
+        return (
+            f"Lane change has only {proof.available_length_m:.2f} m but "
+            f"requires {proof.required_length_m:.2f} m", {})
+    if proof.max_lateral_accel_mps2 > (
+            MAX_LANE_CHANGE_LATERAL_ACCEL_MPS2+1e-6):
+        return "Lane change exceeds the heavy-vehicle lateral acceleration", {}
+    if proof.max_curvature_slew > MAX_LANE_CHANGE_CURVATURE_SLEW+1e-6:
+        return "Lane change exceeds its curvature-slew limit", {}
+    if proof.vertical_residual_m > MAX_LANE_CHANGE_VERTICAL_RESIDUAL_M:
+        return "Lane change crosses an unproven vertical residual", {}
+    if following is None:
+        return "Lane change has no confirmed downstream segment", {}
+    if (proof.prefab_token is not None
+            and following.lane_id.prefab_token != proof.prefab_token):
+        return "Lane change targets a different prefab connector", {}
+
+    start_residual = _distance_to_centerline(
+        segment.centerline[0], type("ProofLine", (), {
+            "centerline": proof.source_centerline,
+        })())
+    end_residual = math.dist(
+        _xyz(segment.centerline[-1]), _xyz(proof.target_centerline[-1]))
+    if start_residual > 0.05:
+        return (
+            f"Lane change starts {start_residual:.2f} m outside source lane",
+            {})
+    if end_residual > 0.05:
+        return (
+            f"Lane change ends {end_residual:.2f} m outside target lane",
+            {})
+
+    source_proxy = type("ProofLine", (), {
+        "centerline": proof.source_centerline,
+    })()
+    target_proxy = type("ProofLine", (), {
+        "centerline": proof.target_centerline,
+    })()
+    corridor_residual = max((min(
+        _distance_to_centerline(point, source_proxy),
+        _distance_to_centerline(point, target_proxy),
+    ) for point in segment.centerline), default=0.0)
+    if corridor_residual > segment.width_m*0.5+0.10:
+        return (
+            f"Lane change leaves its proven road corridor by "
+            f"{corridor_residual:.2f} m", {})
+
+    curvatures = [abs(point.curvature) for point in segment.centerline]
+    curvature_slews = []
+    for first, second in zip(segment.centerline, segment.centerline[1:]):
+        distance = math.dist(_xyz(first), _xyz(second))
+        if distance > 1e-8:
+            curvature_slews.append(
+                abs(second.curvature-first.curvature)/distance)
+    actual_curvature = max(curvatures, default=0.0)
+    actual_slew = max(curvature_slews, default=0.0)
+    if actual_slew > MAX_LANE_CHANGE_CURVATURE_SLEW+1e-6:
+        return (
+            f"Lane-change curvature slew {actual_slew:.4f} 1/m2 exceeds "
+            "its dedicated limit", {})
+    metrics = {
+        "lateral_shift_m": float(proof.lateral_shift_m),
+        "max_curvature": float(actual_curvature),
+        "max_curvature_slew": float(actual_slew),
+        "heading_residual_deg": float(proof.heading_residual_deg),
+        "vertical_residual_m": float(proof.vertical_residual_m),
+        "corridor_residual_m": float(corridor_residual),
+    }
+    return "", metrics
+
+
 def validate_lane_trajectory(lane_path: LanePath) -> TrajectoryValidation:
     """Numerically validate geometry, topology, density and lane containment."""
     if not isinstance(lane_path, LanePath) or not lane_path.valid:
@@ -417,6 +521,16 @@ def validate_lane_trajectory(lane_path: LanePath) -> TrajectoryValidation:
     if any(not _finite_point(point) for point in points):
         return TrajectoryValidation(False, "trajectory contains non-finite geometry",
                                     output_points=len(points))
+
+    lane_change_metrics = []
+    for index, segment in enumerate(segments):
+        if segment.lane_change is None and segment.lane_type != "lane_change":
+            continue
+        reason, metrics = _validate_lane_change_segment(
+            segment, segments[index+1] if index+1 < len(segments) else None)
+        if reason:
+            return TrajectoryValidation(False, reason)
+        lane_change_metrics.append(metrics)
 
     for index, (first, second) in enumerate(zip(segments, segments[1:])):
         if first.end_uid != second.start_uid:
@@ -571,6 +685,22 @@ def validate_lane_trajectory(lane_path: LanePath) -> TrajectoryValidation:
         first_gps_pair_index=first_gps_pair,
         last_gps_pair_index=last_gps_pair,
         gps_pair_count=len(unique_gps_pairs),
+        lane_change_count=len(lane_change_metrics),
+        max_lane_change_lateral_shift_m=max((
+            item["lateral_shift_m"] for item in lane_change_metrics),
+            default=0.0),
+        max_lane_change_curvature=max((
+            item["max_curvature"] for item in lane_change_metrics),
+            default=0.0),
+        max_lane_change_curvature_slew=max((
+            item["max_curvature_slew"] for item in lane_change_metrics),
+            default=0.0),
+        max_lane_change_heading_residual_deg=max((
+            item["heading_residual_deg"] for item in lane_change_metrics),
+            default=0.0),
+        max_lane_change_vertical_residual_m=max((
+            item["vertical_residual_m"] for item in lane_change_metrics),
+            default=0.0),
     )
     if max_spacing > MAX_CONTROL_GAP_M:
         return TrajectoryValidation(False,

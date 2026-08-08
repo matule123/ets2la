@@ -1,6 +1,7 @@
 import os
 import math
 import unittest
+from dataclasses import replace
 
 from core.navigation.lane_model import LaneLocator, wrap_angle
 from core.navigation.lane_trajectory import (
@@ -119,8 +120,9 @@ class RealMapLaneDataTests(unittest.TestCase):
         self.assertEqual(returned.lane_id, match.lane_id)
         self.assertFalse(path.valid)
         self.assertEqual(len(path.points), 0)
-        self.assertIn("adjacent lane", path.failure_reason)
-        self.assertIn("4.50 m lateral transition", path.failure_reason)
+        self.assertEqual(path.failure_reason,
+            "LANE_CHANGE_INSUFFICIENT_APPROACH: available approach 8.73 m "
+            "is shorter than required 42.75 m")
         # A rejected transition must not reach trajectory resampling, where
         # the old one-sample chord appeared as a 52.16-degree heading jump.
         trajectory = build_lane_trajectory(path)
@@ -212,12 +214,12 @@ class RealMapLaneDataTests(unittest.TestCase):
         self.assertTrue(path.valid, path.failure_reason)
         self.assertTrue(trajectory.valid, trajectory.failure_reason)
 
-    def test_2026_07_31_adjacent_prefab_lane_remains_fail_closed(self):
+    def test_2026_07_31_adjacent_prefab_lane_uses_proven_approach_changes(self):
         """Replay the real 4.50 m/49.8 degree failure without a chord.
 
-        The GPS order proves the ``dlc_blkw_83`` arm but does not prove a
-        directed lane-change edge from raw road lane 1 to the adjacent prefab
-        input.  Moving that road centreline used to hide the missing topology.
+        Two long ordinary-road approaches prove reciprocal adjacent lanes and
+        exact PPD target connectors.  Phase 3 may plan on those roads while
+        retaining both original map centrelines and every GPS pair identity.
         """
         gps = (
             5337536181112822720, 5337536178877240122,
@@ -236,29 +238,35 @@ class RealMapLaneDataTests(unittest.TestCase):
         failure_details = {}
         segments, reason = self.net.select_lane_sequence(
             corridor, match, failure_details=failure_details)
-        self.assertEqual(len(segments), 1)
+        self.assertEqual(reason, "")
+        self.assertEqual(len(segments), 17)
         self.assertEqual(segments[0].gps_pair_index, 0)
         self.assertEqual(segments[0].raw_lane_index, 1)
         self.assertEqual(corridor.edges[1].prefab_instance[0][0],
                          "dlc_blkw_83")
-        self.assertEqual(reason,
-            "road-to-prefab lane identity mismatch at UID "
-            "5337536178877240122: geometry gap 4.50 m; no GPS-proven "
-            "adjacent-lane approach")
-        self.assertEqual(failure_details["gps_uid_index"], 1)
-        self.assertEqual(failure_details["gps_uid"], 5337536178877240122)
-        self.assertEqual(failure_details["prefab_token"], "dlc_blkw_83")
-        self.assertEqual(failure_details["lane_id_before"]["lane_index"], 1)
-        self.assertEqual(failure_details["lane_id_after"]["prefab_token"],
-                         "dlc_blkw_83")
-        self.assertAlmostEqual(failure_details["geometry"]["gap_m"],
-                               4.50, places=2)
-        self.assertLess(failure_details["geometry"]["vertical_gap_m"], .01)
-        self.assertLess(failure_details["geometry"]["heading_jump_deg"], .01)
-        cached = next(lane for lane in self.net._build_lane_segments(
-            corridor.edges[0].segment_index)
-            if lane.lane_id == segments[0].lane_id)
-        self.assertEqual(segments[0].centerline, cached.centerline)
+        changes = [segment for segment in segments if segment.lane_change]
+        self.assertEqual(len(changes), 2)
+        self.assertEqual(len(failure_details["lane_changes"]), 2)
+        self.assertEqual(
+            {change.lane_change.prefab_token for change in changes},
+            {"dlc_blkw_83", "dlc_blkw_80"})
+        for change in changes:
+            proof = change.lane_change
+            self.assertNotEqual(proof.source_lane_id, proof.target_lane_id)
+            self.assertEqual(abs(proof.source_raw_lane_index
+                                 - proof.target_raw_lane_index), 1)
+            self.assertGreaterEqual(proof.available_length_m,
+                                    proof.required_length_m)
+            cached = self.net._lane_id_index[proof.source_lane_id]
+            self.assertNotEqual(change.centerline, cached.centerline)
+            self.assertEqual(proof.source_centerline, cached.centerline)
+        path = self.net.connect_lane_sequence(segments, gps)
+        trajectory = build_lane_trajectory(path)
+        validation = validate_lane_trajectory(trajectory)
+        self.assertTrue(path.valid, path.failure_reason)
+        self.assertTrue(trajectory.valid, trajectory.failure_reason)
+        self.assertTrue(validation.valid, validation.failure_reason)
+        self.assertEqual(validation.lane_change_count, 2)
 
     def test_phase1_prefab_diagnostic_replay_does_not_mutate_lane_cache(self):
         gps = (
@@ -338,7 +346,7 @@ class RealMapLaneDataTests(unittest.TestCase):
             for first, second in zip(path.segments, path.segments[1:])]
         self.assertLess(max(gaps, default=0.0), 6.0)
 
-    def test_phase1_adjacent_prefab_lane_shift_remains_fail_closed(self):
+    def test_phase3_exact_prefab_sibling_removes_phase1_lane_shift_failure(self):
         gps = (
             5962819255727992656, 5962819266683514703,
             5962819254075415764, 5962819251944709334,
@@ -353,9 +361,145 @@ class RealMapLaneDataTests(unittest.TestCase):
         path, _ = self.net.build_lane_path(
             gps, (position[0], position[2]), heading,
             altitude=position[1], start_match=match)
-        self.assertFalse(path.valid)
-        self.assertIn("prefab lane identity mismatch", path.failure_reason)
-        self.assertIn("4.50 m", path.failure_reason)
+        trajectory = build_lane_trajectory(path)
+        validation = validate_lane_trajectory(trajectory)
+        self.assertTrue(path.valid, path.failure_reason)
+        self.assertTrue(trajectory.valid, trajectory.failure_reason)
+        self.assertTrue(validation.valid, validation.failure_reason)
+        self.assertEqual(validation.lane_change_count, 0)
+        prefabs = [segment for segment in path.segments
+                   if segment.lane_id.prefab_token]
+        self.assertEqual(prefabs[0].lane_id.connector_path,
+                         (12, 36, 1, 60))
+        self.assertEqual(prefabs[1].lane_id.connector_path, (6, 1, 7))
+
+    def test_phase3_replays_624f89_with_exact_prefab_continuation(self):
+        gps = (
+            5962819250946497307, 5962819255744781085,
+            5962819252305451794, 5962819259024692285,
+            5962819252766829126, 5962819255425996029,
+            5962819251760174334, 5962819264049468519,
+            5962819263453877369, 5962819262229155909,
+            5962819263655219268, 5962819280986057213,
+            5962819266725450992, 5962819262178825461,
+            5962819255350497429, 5962819270986837516,
+            5962819251021962418, 5962819277395732982,
+            5962819264393417967, 5962819257825124179,
+            5962819261197344539, 5962819264745725766,
+            5962819256013183871, 5962819260727582455,
+            5962819266272472931, 5962819260870209380,
+            5962819259855187862, 5962819264846409621,
+            5962819270055709408, 5962819273662810836,
+            5962819260803100519, 5962819254058659704,
+            5962819259569975345, 5962819266264084346,
+            5962819254041882580, 5962819257288273893,
+            5962819257816756200, 5962819265030959063,
+            5962819253681172399, 5962819261264473948,
+            5962819264712191947, 5962819264636694476,
+            5962819258999549903, 5962819258538176462,
+            5962819256021594061, 5962819251122646873,
+            5962819253597286226, 5962819260593385297,
+            5962819260786301797, 5962819255727992656,
+            5962819266683514703, 5962819254075415764,
+            5962819251944709334, 5962819252473191639,
+            5962819266733850743, 5962819280843480628,
+            5962819250728386678,
+        )
+        position = (40970.454233169556, 34.807640075683594,
+                    60294.166259765625)
+        heading = -1.201390458734874
+        path, trajectory = self.assert_captured_route_valid(
+            gps, position, heading)
+        validation = validate_lane_trajectory(trajectory)
+        self.assertEqual(validation.lane_change_count, 0)
+        first = next(segment for segment in path.segments
+                     if segment.lane_id.prefab_token == "dlc_blkw_81"
+                     and segment.end_uid == 5962819251944709334)
+        second = next(segment for segment in path.segments
+                      if segment.start_uid == 5962819251944709334
+                      and segment.lane_id.prefab_token == "dlc_blkw_105")
+        self.assertEqual(first.lane_id.connector_path, (12, 36, 1, 60))
+        self.assertEqual(second.lane_id.connector_path, (6, 1, 7))
+        self.assertLess(math.dist(
+            (first.centerline[-1].x, first.centerline[-1].y,
+             first.centerline[-1].z),
+            (second.centerline[0].x, second.centerline[0].y,
+             second.centerline[0].z)), 0.01)
+        self.assertAlmostEqual(path.distance_m, 3607.65, delta=0.5)
+
+    def test_phase3_replays_e54cd4_prefab_pair_without_4_5m_chord(self):
+        previous_edge = self.net._classify_corridor_edge(
+            5337536180030676173, 5337536182018777762, 0)
+        target_edge = self.net._classify_corridor_edge(
+            5337536182018777762, 5337536178692692820, 1)
+        self.assertEqual((previous_edge.kind, target_edge.kind),
+                         ("prefab", "prefab"))
+        previous_instance = previous_edge.prefab_instance[0]
+        previous_points = self.net._prefab_curve_chain_3d(
+            previous_instance, (7, 1, 5, 9, 10))
+        previous = self.net._make_prefab_lane_segment(
+            previous_edge, previous_instance, (7, 1, 5, 9, 10),
+            previous_points, 1)
+
+        representative_instance = target_edge.prefab_instance[0]
+        representative_points = self.net._prefab_curve_chain_3d(
+            representative_instance, (2,))
+        self.assertAlmostEqual(math.dist(
+            (previous.centerline[-1].x, previous.centerline[-1].y,
+             previous.centerline[-1].z),
+            (representative_points[0].x, representative_points[0].y,
+             representative_points[0].z)), 4.498488, places=3)
+        selected, reason = self.net._prefab_lane_segment(
+            target_edge, previous.lane_index, previous.centerline[-1],
+            register=False, allow_parallel_sibling=True)
+        self.assertEqual(reason, "")
+        self.assertEqual(selected.lane_id.connector_path, (1,))
+        self.assertLess(math.dist(
+            (previous.centerline[-1].x, previous.centerline[-1].y,
+             previous.centerline[-1].z),
+            (selected.centerline[0].x, selected.centerline[0].y,
+             selected.centerline[0].z)), 0.01)
+        previous = replace(
+            previous,
+            successors=(self.net._lane_connection(previous, selected),))
+        path = self.net.connect_lane_sequence(
+            (previous, selected),
+            (5337536180030676173, 5337536182018777762,
+             5337536178692692820))
+        trajectory = build_lane_trajectory(path)
+        self.assertTrue(path.valid, path.failure_reason)
+        self.assertTrue(trajectory.valid, trajectory.failure_reason)
+
+    def test_phase3_e54cd4_later_dual_output_stays_fail_closed(self):
+        previous_edge = self.net._classify_corridor_edge(
+            5337536180831803664, 5337536180890523938, 196)
+        ambiguous_edge = self.net._classify_corridor_edge(
+            5337536180890523938, 5337536181700024638, 197)
+        previous_instance = previous_edge.prefab_instance[0]
+        previous_points = self.net._prefab_curve_chain_3d(
+            previous_instance, (1,))
+        previous = self.net._make_prefab_lane_segment(
+            previous_edge, previous_instance, (1,), previous_points, 0)
+        instance = ambiguous_edge.prefab_instance[0]
+        options = self.net._prefab_connector_options(
+            instance, ambiguous_edge.start_uid, ambiguous_edge.end_uid)
+        self.assertEqual(options, [
+            (0, 27, 2, 3, 18, 24, 22),
+            (0, 27, 2, 3, 19, 34),
+        ])
+        self.assertEqual({option[0] for option in options}, {0})
+        self.assertEqual({option[-1] for option in options}, {22, 34})
+        for option in options:
+            points = self.net._prefab_curve_chain_3d(instance, option)
+            self.assertLess(math.dist(
+                (previous.centerline[-1].x, previous.centerline[-1].y,
+                 previous.centerline[-1].z),
+                (points[0].x, points[0].y, points[0].z)), 0.01)
+        selected, reason = self.net._prefab_lane_segment(
+            ambiguous_edge, previous.lane_index, previous.centerline[-1],
+            register=False, allow_parallel_sibling=True)
+        self.assertIsNone(selected)
+        self.assertEqual(reason, "ambiguous prefab lane connector")
 
     def test_real_lane_change_capture_keeps_pitched_prefab_continuous(self):
         # route_build_id=c500b655c6624ffe9b73fcf317071dad:
@@ -574,13 +718,6 @@ class RealMapLaneDataTests(unittest.TestCase):
                 path, match = self.net.build_lane_path(
                     gps, (truck.x, truck.z), truck.heading, truck.y)
                 self.assertIsNotNone(match)
-                if gps[2] == 5962819254436125907:
-                    self.assertFalse(path.valid)
-                    self.assertEqual(path.failure_reason,
-                        "road-to-prefab lane identity mismatch at UID "
-                        "5962819253060394194: geometry gap 4.50 m; no "
-                        "GPS-proven adjacent-lane approach")
-                    continue
                 self.assertTrue(path.valid, path.failure_reason)
                 self.assertEqual(path.segments[1].lane_id.prefab_token,
                                  "dlc_blkw_81")
@@ -640,13 +777,6 @@ class RealMapLaneDataTests(unittest.TestCase):
                 path, match = self.net.build_lane_path(
                     gps, (truck.x, truck.z), truck.heading, truck.y)
                 self.assertIsNotNone(match)
-                if gps[-2] == 5962819254436125907:
-                    self.assertFalse(path.valid)
-                    self.assertEqual(path.failure_reason,
-                        "road-to-prefab lane identity mismatch at UID "
-                        "5962819253060394194: geometry gap 4.50 m; no "
-                        "GPS-proven adjacent-lane approach")
-                    continue
                 self.assertTrue(path.valid, path.failure_reason)
                 gaps = [math.dist(
                     (first.centerline[-1].x, first.centerline[-1].y,
@@ -662,12 +792,13 @@ class RealMapLaneDataTests(unittest.TestCase):
                 self.assertEqual(path.segments[-1].raw_lane_index,
                                  expected_exit_lane[gps[-2]])
 
-    def test_live_ioannina_adjacent_exit_never_synthesizes_lane_change(self):
+    def test_live_ioannina_uses_proven_road_lane_change_before_exit(self):
         """Regression for the reported 54.2 degree sub-kilometre failure.
 
         The selected ``dlc_blkw_81`` exit begins one lane beside the occupied
-        raw lane 1.  No inputLane/prevLine edge proves where the truck may
-        change lane, so the captured route must remain fail-closed.
+        raw lane 1. The captured approach contains a long common road segment
+        whose adjacent raw lane leads exactly to the PPD input, so phase 3
+        plans there without moving either map centreline.
         """
         gps = (
             5962819263713953727, 5962819268579312546,
@@ -685,13 +816,23 @@ class RealMapLaneDataTests(unittest.TestCase):
         self.assertEqual(match.lane_id.road_uid, 5962819243967164376)
         self.assertEqual(match.lane_id.lane_index, 1)
         self.assertAlmostEqual(match.lateral_error_m, -1.0537, places=3)
-        self.assertFalse(path.valid)
-        self.assertEqual(path.failure_reason,
-            "road-to-prefab lane identity mismatch at UID "
-            "5962819253060394194: geometry gap 4.50 m; no GPS-proven "
-            "adjacent-lane approach")
-        self.assertEqual(path.segments[-1].end_uid, 5962819253060394194)
-        self.assertEqual(path.segments[-1].raw_lane_index, 1)
+        trajectory = build_lane_trajectory(path)
+        validation = validate_lane_trajectory(trajectory)
+        self.assertTrue(path.valid, path.failure_reason)
+        self.assertTrue(trajectory.valid, trajectory.failure_reason)
+        self.assertTrue(validation.valid, validation.failure_reason)
+        self.assertEqual(validation.lane_change_count, 1)
+        transition = next(segment for segment in path.segments
+                          if segment.lane_change)
+        proof = transition.lane_change
+        self.assertEqual(proof.prefab_token, "dlc_blkw_81")
+        self.assertEqual((proof.source_raw_lane_index,
+                          proof.target_raw_lane_index), (1, 0))
+        self.assertEqual(proof.gps_pair_index, 3)
+        self.assertGreaterEqual(proof.available_length_m,
+                                proof.required_length_m)
+        self.assertIs(self.net._lane_id_index[proof.source_lane_id]
+                      .lane_change, None)
 
     def test_roundabout_selects_authoritative_exit(self):
         start = 5462850010004422086

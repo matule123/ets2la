@@ -63,9 +63,44 @@ class LanePoint:
 
 
 @dataclass(frozen=True, slots=True)
+class LaneChangeProof:
+    """Immutable evidence for one planned transition between real road lanes.
+
+    The source and target centrelines remain the map-derived geometry.  A
+    ``LaneSegment`` carrying this proof owns only the separately generated
+    transition trajectory; it never replaces either source in the map cache.
+    """
+    source_lane_id: LaneId
+    target_lane_id: LaneId
+    source_raw_lane_index: int
+    target_raw_lane_index: int
+    elevation_layer: int
+    gps_pair_index: int
+    gps_start_uid: int
+    gps_end_uid: int
+    prefab_token: Optional[str]
+    direction: Literal["left", "right"]
+    design_speed_mps: float
+    available_length_m: float
+    required_length_m: float
+    maneuver_length_m: float
+    settle_length_m: float
+    lateral_shift_m: float
+    max_lateral_accel_mps2: float
+    max_curvature: float
+    max_curvature_slew: float
+    heading_residual_deg: float
+    vertical_residual_m: float
+    source_centerline: tuple[LanePoint, ...]
+    target_centerline: tuple[LanePoint, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class LaneConnection:
     target: LaneId
-    kind: Literal["road", "merge", "split", "prefab", "roundabout"]
+    kind: Literal[
+        "road", "merge", "split", "prefab", "roundabout", "lane_change"
+    ]
     curve_indices: tuple[int, ...] = ()
     gps_exit_uid: Optional[int] = None
 
@@ -98,6 +133,9 @@ class LaneSegment:
     # SDK corridor needs a topological bridge.  ``-1`` is reserved for a
     # proven rolling-prefix segment which starts at the live truck position.
     gps_pair_index: int = -1
+    # Present only on a separately planned transition between the two
+    # immutable, map-derived road lanes named by the proof.
+    lane_change: Optional[LaneChangeProof] = None
 
 
 @dataclass(frozen=True, slots=True)

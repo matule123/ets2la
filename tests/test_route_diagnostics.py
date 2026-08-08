@@ -41,6 +41,12 @@ class RouteDiagnosticFormatTests(unittest.TestCase):
                 "validate_lane_trajectory", "heading jump is 80 degrees", {}),
             "GEOMETRY_ELEVATION_JUMP": (
                 "validate_lane_trajectory", "height jump is 8 metres", {}),
+            "LANE_CHANGE_INSUFFICIENT_APPROACH": (
+                "LanePath", "LANE_CHANGE_INSUFFICIENT_APPROACH: 8 m < 42 m", {}),
+            "LANE_CHANGE_TOPOLOGY_REJECTED": (
+                "select_lane_sequence", "LANE_CHANGE_NOT_ADJACENT", {}),
+            "LANE_CHANGE_GEOMETRY_REJECTED": (
+                "validate_lane_trajectory", "LANE_CHANGE_CURVATURE_SLEW", {}),
             "TRAJECTORY_VALIDATION_FAILED": (
                 "validate_lane_trajectory", "trajectory has a self-intersection", {}),
             "STALE_REVISION": (
@@ -63,6 +69,21 @@ class RouteDiagnosticFormatTests(unittest.TestCase):
                 "dataset_fingerprint": "abc123",
             }, route_build_id="build-format")
         diagnostic.start_phase("LaneLocator")
+        diagnostic.observe_lane_change({
+            "accepted": False,
+            "source_lane_id": {"road_uid": 999, "lane_index": 1},
+            "target_lane_id": {"road_uid": 999, "lane_index": 0},
+            "gps_pair": [10, 20],
+            "prefab_token": "prefab.secret",
+            "available_length_m": 8.73,
+            "required_length_m": 42.75,
+            "lateral_shift_m": 4.5,
+            "max_curvature": 0.0,
+            "max_curvature_slew": 0.0,
+            "heading_residual_deg": 0.01,
+            "vertical_residual_m": 0.0,
+            "failure_reason": "LANE_CHANGE_INSUFFICIENT_APPROACH",
+        })
         diagnostic.fail_phase("LaneLocator", "no matching lane", {
             "outcome": "no_match",
             "gps_uid": 20,
@@ -97,8 +118,12 @@ class RouteDiagnosticFormatTests(unittest.TestCase):
                 "truck_heading_rad", "lane_heading_rad",
                 "elevation_difference_m", "candidate_lanes",
                 "planned_lane_connection", "geometry", "confidence",
-                "environment"):
+                "environment", "lane_changes"):
             self.assertIn(key, context)
+        self.assertEqual(context["lane_changes"][0]["available_length_m"],
+                         8.73)
+        self.assertEqual(context["lane_changes"][0]["required_length_m"],
+                         42.75)
         self.assertEqual(record["phases"][0]["name"], "LaneLocator")
         self.assertEqual(record["phases"][0]["status"], "failed")
 

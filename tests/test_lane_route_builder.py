@@ -250,14 +250,30 @@ class LaneRouteBuilderTests(unittest.TestCase):
         match = m.match_on(first, 2, (1, 2, 3, 4))
         corridor = m.net.resolve_gps_corridor((1, 2, 3, 4))
         segments, reason = m.net.select_lane_sequence(corridor, match)
+        self.assertEqual(reason,
+            "LANE_CHANGE_INSUFFICIENT_APPROACH: available approach 40.00 m "
+            "is shorter than required 42.75 m")
+        self.assertEqual(len(segments), 1)
+
+        # The same directed merge is accepted only when the common road is
+        # long enough for the separately validated transition.
+        long = SyntheticMap()
+        for uid, z in enumerate((0, 80, 160, 240), 1):
+            long.node(uid, 0, z)
+        long_first = long.road(1, 2, 3)
+        long.road(2, 3, 2)
+        long.road(3, 4, 3)
+        long_match = long.match_on(long_first, 2, (1, 2, 3, 4))
+        long_corridor = long.net.resolve_gps_corridor((1, 2, 3, 4))
+        planned, reason = long.net.select_lane_sequence(
+            long_corridor, long_match)
         self.assertEqual(reason, "")
-        self.assertEqual([lane.lane_index for lane in segments], [2, 1, 1])
-        self.assertEqual(segments[0].successors[0].kind, "merge")
-        self.assertEqual(segments[1].successors[0].kind, "split")
-        path = m.net.connect_lane_sequence(segments, corridor.gps_uids)
-        self.assertFalse(path.valid)
-        self.assertIn("4.50 m geometry gap", path.failure_reason)
-        self.assertIn("no chord", path.failure_reason)
+        self.assertEqual([lane.lane_index for lane in planned], [2, 1, 1])
+        self.assertIsNotNone(planned[0].lane_change)
+        self.assertEqual(planned[0].successors[0].kind, "merge")
+        self.assertEqual(planned[1].successors[0].kind, "split")
+        self.assertTrue(long.net.connect_lane_sequence(
+            planned, long_corridor.gps_uids).valid)
 
         # The middle lane remains physically continuous through the same
         # explicit merge/split topology and therefore is safe to publish.

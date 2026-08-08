@@ -23,8 +23,8 @@ import time
 from dataclasses import replace
 
 from core.navigation.lane_model import (
-    GpsCorridor, GpsCorridorEdge, LaneConnection, LaneId, LaneLocator,
-    LanePath, LanePoint, LaneSegment,
+    GpsCorridor, GpsCorridorEdge, LaneChangeProof, LaneConnection, LaneId,
+    LaneLocator, LanePath, LanePoint, LaneSegment,
 )
 from core.navigation.route_diagnostics import (
     lane_id_payload, safe_diagnostic_call,
@@ -35,6 +35,15 @@ CACHE_VERSION = 12  # adds explicit GPS-pair identity to lane segments
 MAX_PROVEN_LANE_BOUNDARY_GAP_M = 0.75
 MAX_PROVEN_LANE_BOUNDARY_VERTICAL_M = 0.50
 MAX_PROVEN_LANE_BOUNDARY_HEADING_DEG = 15.0
+
+# Lane changes have their own heavy-vehicle comfort/safety envelope.  These
+# constants do not relax any LanePath or trajectory validation gate.
+LANE_CHANGE_MAX_LATERAL_ACCEL_MPS2 = 0.90
+LANE_CHANGE_MAX_CURVATURE_SLEW = 0.020
+LANE_CHANGE_MAX_HEADING_RESIDUAL_DEG = 5.0
+LANE_CHANGE_MAX_VERTICAL_RESIDUAL_M = 0.35
+LANE_CHANGE_MIN_WIDTH_MULTIPLIER = 8.0
+LANE_CHANGE_SETTLE_WIDTH_MULTIPLIER = 1.5
 
 
 def _uid(value):
@@ -1832,7 +1841,11 @@ class RoadNetwork:
             return None
         if first.lane_type == "roundabout" or second.lane_type == "roundabout":
             kind = "roundabout"
-        elif first.lane_id.prefab_token or second.lane_id.prefab_token:
+        elif second.lane_id.prefab_token:
+            kind = "prefab"
+        elif second.lane_type == "lane_change":
+            kind = "lane_change"
+        elif first.lane_id.prefab_token:
             kind = "prefab"
         elif second.lane_count > first.lane_count:
             kind = "split"
@@ -1899,8 +1912,358 @@ class RoadNetwork:
                 result.append(segment)
         return tuple(result)
 
+    @staticmethod
+    def _centerline_length(points):
+        return sum(math.dist(
+            (first.x, first.y, first.z),
+            (second.x, second.y, second.z),
+        ) for first, second in zip(points, points[1:]))
+
+    @staticmethod
+    def _centerline_sample(points, distance_m):
+        """Interpolate one immutable centreline by directed arc distance."""
+        points = tuple(points)
+        if not points:
+            return None
+        if len(points) == 1:
+            return points[0]
+        remaining = max(0.0, float(distance_m))
+        for first, second in zip(points, points[1:]):
+            length = math.dist(
+                (first.x, first.y, first.z),
+                (second.x, second.y, second.z))
+            if remaining <= length or second is points[-1]:
+                fraction = 0.0 if length <= 1e-9 else min(
+                    1.0, remaining / length)
+                heading_delta = (
+                    second.heading-first.heading+math.pi
+                ) % (2.0*math.pi)-math.pi
+                return LanePoint(
+                    first.x + (second.x-first.x)*fraction,
+                    first.y + (second.y-first.y)*fraction,
+                    first.z + (second.z-first.z)*fraction,
+                    heading=first.heading + heading_delta*fraction,
+                )
+            remaining -= length
+        return points[-1]
+
+    @staticmethod
+    def _centerline_progress(points, position):
+        """Return the directed 3-D projection distance of ``position``."""
+        points = tuple(points)
+        if len(points) < 2 or position is None:
+            return 0.0
+        best_distance = float("inf")
+        best_progress = 0.0
+        cumulative = 0.0
+        for first, second in zip(points, points[1:]):
+            vx, vy, vz = (second.x-first.x, second.y-first.y,
+                          second.z-first.z)
+            length2 = vx*vx + vy*vy + vz*vz
+            length = math.sqrt(length2)
+            fraction = (max(0.0, min(1.0, (
+                (position.x-first.x)*vx
+                + (position.y-first.y)*vy
+                + (position.z-first.z)*vz
+            ) / length2)) if length2 > 1e-10 else 0.0)
+            projected = (
+                first.x + vx*fraction,
+                first.y + vy*fraction,
+                first.z + vz*fraction,
+            )
+            distance = math.dist(
+                (position.x, position.y, position.z), projected)
+            if distance < best_distance:
+                best_distance = distance
+                best_progress = cumulative + length*fraction
+            cumulative += length
+        return best_progress
+
+    @staticmethod
+    def _lane_change_kinematics(points):
+        points = tuple(points)
+        if not points:
+            return ()
+        cumulative = [0.0]
+        for first, second in zip(points, points[1:]):
+            cumulative.append(cumulative[-1] + math.dist(
+                (first.x, first.y, first.z),
+                (second.x, second.y, second.z)))
+        headings = []
+        for index, point in enumerate(points):
+            before = points[max(0, index-1)]
+            after = points[min(len(points)-1, index+1)]
+            dx, dz = after.x-before.x, after.z-before.z
+            headings.append(
+                math.atan2(-dx, -dz) if math.hypot(dx, dz) > 1e-9
+                else (headings[-1] if headings else point.heading))
+        curvatures = []
+        for index in range(len(points)):
+            if index in (0, len(points)-1):
+                curvatures.append(0.0)
+                continue
+            distance = cumulative[index+1]-cumulative[index-1]
+            change = (headings[index+1]-headings[index-1]+math.pi) % (
+                2.0*math.pi)-math.pi
+            curvatures.append(change/distance if distance > 1e-8 else 0.0)
+        return tuple(replace(
+            point, s=cumulative[index], heading=headings[index],
+            curvature=curvatures[index])
+            for index, point in enumerate(points))
+
+    def _build_lane_change_segment(self, source, target, downstream,
+                                   speed_mps=0.0, start_progress_m=0.0):
+        """Create one bounded quintic transition on a proven road lane pair.
+
+        ``source`` and ``target`` are never modified or registered under a new
+        identity.  The returned segment is a route-only copy carrying the two
+        immutable centrelines as its proof.
+        """
+        prefab_token = (downstream.lane_id.prefab_token
+                        if downstream is not None else None)
+        details = {
+            "accepted": False,
+            "source_lane_id": lane_id_payload(source.lane_id),
+            "target_lane_id": lane_id_payload(target.lane_id),
+            "gps_pair_index": int(source.gps_pair_index),
+            "gps_pair": [int(source.start_uid), int(source.end_uid)],
+            "prefab_token": prefab_token,
+            "design_speed_mps": max(0.0, abs(float(speed_mps or 0.0))),
+        }
+
+        def reject(code, message, **measurements):
+            details.update(measurements)
+            reason = f"{code}: {message}"
+            details["failure_reason"] = reason
+            return None, reason, details
+
+        if (source.lane_id.prefab_token is not None
+                or target.lane_id.prefab_token is not None
+                or source.lane_type in ("prefab", "roundabout", "graph")
+                or target.lane_type in ("prefab", "roundabout", "graph")):
+            return reject(
+                "LANE_CHANGE_NOT_ROAD",
+                "source and target must be real ordinary-road lanes")
+        if (source.start_uid != target.start_uid
+                or source.end_uid != target.end_uid
+                or source.lane_id.road_uid != target.lane_id.road_uid
+                or source.road_look_token != target.road_look_token):
+            return reject(
+                "LANE_CHANGE_DIFFERENT_ROAD",
+                "source and target are not lanes of the same directed road")
+        if source.direction != target.direction:
+            return reject(
+                "LANE_CHANGE_OPPOSING_DIRECTION",
+                "source and target lanes have opposite travel direction")
+        if source.elevation_layer != target.elevation_layer:
+            return reject(
+                "LANE_CHANGE_ELEVATION_LAYER",
+                "source and target lanes are on different elevation layers",
+                source_elevation_layer=int(source.elevation_layer),
+                target_elevation_layer=int(target.elevation_layer))
+        if (source.raw_lane_index < 0 or target.raw_lane_index < 0
+                or abs(source.raw_lane_index-target.raw_lane_index) != 1
+                or target.lane_id not in (
+                    source.left_neighbor, source.right_neighbor)
+                or source.lane_id not in (
+                    target.left_neighbor, target.right_neighbor)):
+            return reject(
+                "LANE_CHANGE_NOT_ADJACENT",
+                "source and target are not reciprocal adjacent lanes")
+        if (source.gps_pair_index != target.gps_pair_index
+                or source.gps_uids != target.gps_uids):
+            return reject(
+                "LANE_CHANGE_GPS_IDENTITY",
+                "source and target do not carry the same GPS-pair proof")
+        if (downstream is None
+                or downstream.lane_id.prefab_token == "graph"
+                or not self._lane_boundary_is_continuous(target, downstream)
+                or self._lane_connection(target, downstream) is None):
+            return reject(
+                "LANE_CHANGE_NO_TARGET_CONNECTOR",
+                "target lane does not lead to the confirmed downstream connector")
+
+        source_length = self._centerline_length(source.centerline)
+        target_length = self._centerline_length(target.centerline)
+        common_length = min(source_length, target_length)
+        start_progress_m = max(0.0, min(float(start_progress_m), source_length))
+        start_fraction = (start_progress_m/source_length
+                          if source_length > 1e-8 else 1.0)
+        available_length = max(0.0, common_length*(1.0-start_fraction))
+        samples = []
+        for index in range(21):
+            fraction = index/20.0
+            first = self._centerline_sample(
+                source.centerline, source_length*fraction)
+            second = self._centerline_sample(
+                target.centerline, target_length*fraction)
+            separation = math.hypot(second.x-first.x, second.z-first.z)
+            heading = abs(math.degrees((
+                second.heading-first.heading+math.pi
+            ) % (2.0*math.pi)-math.pi))
+            samples.append((first, second, separation, heading,
+                            abs(second.y-first.y)))
+        lateral_shift = max(item[2] for item in samples)
+        heading_residual = max(item[3] for item in samples)
+        vertical_residual = max(item[4] for item in samples)
+        width = min(float(source.width_m), float(target.width_m))
+        details.update({
+            "available_length_m": float(available_length),
+            "lateral_shift_m": float(lateral_shift),
+            "heading_residual_deg": float(heading_residual),
+            "vertical_residual_m": float(vertical_residual),
+            "source_elevation_layer": int(source.elevation_layer),
+            "target_elevation_layer": int(target.elevation_layer),
+        })
+        if (lateral_shift < width*0.65
+                or any(item[2] > width*1.35 for item in samples)):
+            return reject(
+                "LANE_CHANGE_LATERAL_GEOMETRY",
+                "adjacent lane separation is inconsistent with lane width",
+                **details)
+        if heading_residual > LANE_CHANGE_MAX_HEADING_RESIDUAL_DEG:
+            return reject(
+                "LANE_CHANGE_HEADING_RESIDUAL",
+                f"parallel-lane heading residual {heading_residual:.2f} deg "
+                f"exceeds {LANE_CHANGE_MAX_HEADING_RESIDUAL_DEG:.2f} deg",
+                **details)
+        if vertical_residual > LANE_CHANGE_MAX_VERTICAL_RESIDUAL_M:
+            return reject(
+                "LANE_CHANGE_VERTICAL_RESIDUAL",
+                f"parallel-lane vertical residual {vertical_residual:.2f} m "
+                f"exceeds {LANE_CHANGE_MAX_VERTICAL_RESIDUAL_M:.2f} m",
+                **details)
+
+        speed = details["design_speed_mps"]
+        peak_second_derivative = 10.0/math.sqrt(3.0)
+        peak_third_derivative = 60.0
+        acceleration_length = speed*math.sqrt(
+            peak_second_derivative*lateral_shift
+            / LANE_CHANGE_MAX_LATERAL_ACCEL_MPS2)
+        slew_length = (
+            peak_third_derivative*lateral_shift
+            / LANE_CHANGE_MAX_CURVATURE_SLEW) ** (1.0/3.0)
+        maneuver_length = max(
+            width*LANE_CHANGE_MIN_WIDTH_MULTIPLIER,
+            acceleration_length, slew_length)
+        settle_length = max(
+            width*LANE_CHANGE_SETTLE_WIDTH_MULTIPLIER, speed*0.5)
+        required_length = maneuver_length + settle_length
+        details.update({
+            "required_length_m": float(required_length),
+            "maneuver_length_m": float(maneuver_length),
+            "settle_length_m": float(settle_length),
+            "max_allowed_lateral_accel_mps2": (
+                LANE_CHANGE_MAX_LATERAL_ACCEL_MPS2),
+            "max_allowed_curvature_slew": LANE_CHANGE_MAX_CURVATURE_SLEW,
+        })
+        if available_length + 1e-6 < required_length:
+            return reject(
+                "LANE_CHANGE_INSUFFICIENT_APPROACH",
+                f"available approach {available_length:.2f} m is shorter "
+                f"than required {required_length:.2f} m",
+                **details)
+
+        transition_start = common_length-required_length
+        transition_end = transition_start+maneuver_length
+        point_count = max(2, int(math.ceil(
+            max(source_length, target_length)/1.5)) + 1)
+        generated = []
+        corridor_residual = 0.0
+        for index in range(point_count):
+            fraction = index/(point_count-1)
+            route_distance = common_length*fraction
+            first = self._centerline_sample(
+                source.centerline, source_length*fraction)
+            second = self._centerline_sample(
+                target.centerline, target_length*fraction)
+            if route_distance <= transition_start:
+                blend = 0.0
+            elif route_distance >= transition_end:
+                blend = 1.0
+            else:
+                u = (route_distance-transition_start)/maneuver_length
+                blend = 10.0*u**3 - 15.0*u**4 + 6.0*u**5
+            point = LanePoint(
+                first.x + (second.x-first.x)*blend,
+                first.y + (second.y-first.y)*blend,
+                first.z + (second.z-first.z)*blend,
+                lane_id=source.lane_id,
+            )
+            corridor_residual = max(corridor_residual, min(
+                math.dist((point.x, point.y, point.z),
+                          (first.x, first.y, first.z)),
+                math.dist((point.x, point.y, point.z),
+                          (second.x, second.y, second.z))))
+            generated.append(point)
+        # The quintic has zero lateral slope/curvature at both ends. Preserve
+        # the exact map endpoints as a hard acceptance condition.
+        generated[0] = replace(source.centerline[0], lane_id=source.lane_id)
+        generated[-1] = replace(target.centerline[-1], lane_id=source.lane_id)
+        generated = self._lane_change_kinematics(generated)
+        curvatures = [abs(point.curvature) for point in generated]
+        curvature_slews = []
+        for first, second in zip(generated, generated[1:]):
+            distance = math.dist(
+                (first.x, first.y, first.z),
+                (second.x, second.y, second.z))
+            if distance > 1e-8:
+                curvature_slews.append(
+                    abs(second.curvature-first.curvature)/distance)
+        max_curvature = max(curvatures, default=0.0)
+        max_curvature_slew = max(curvature_slews, default=0.0)
+        planned_shift_curvature = (
+            peak_second_derivative*lateral_shift/maneuver_length**2)
+        max_lateral_accel = speed*speed*planned_shift_curvature
+        details.update({
+            "max_curvature": float(max_curvature),
+            "max_curvature_slew": float(max_curvature_slew),
+            "max_lateral_accel_mps2": float(max_lateral_accel),
+            "corridor_residual_m": float(corridor_residual),
+        })
+        if corridor_residual > width*0.5 + 0.10:
+            return reject(
+                "LANE_CHANGE_OUTSIDE_CORRIDOR",
+                f"transition leaves the adjacent-lane corridor by "
+                f"{corridor_residual:.2f} m",
+                **details)
+        if max_lateral_accel > LANE_CHANGE_MAX_LATERAL_ACCEL_MPS2 + 1e-6:
+            return reject(
+                "LANE_CHANGE_LATERAL_ACCELERATION",
+                f"planned lateral acceleration {max_lateral_accel:.2f} m/s2 "
+                "exceeds the heavy-vehicle limit",
+                **details)
+        if max_curvature_slew > LANE_CHANGE_MAX_CURVATURE_SLEW + 1e-6:
+            return reject(
+                "LANE_CHANGE_CURVATURE_SLEW",
+                f"curvature slew {max_curvature_slew:.4f} 1/m2 exceeds "
+                "the lane-change limit",
+                **details)
+
+        proof = LaneChangeProof(
+            source.lane_id, target.lane_id,
+            int(source.raw_lane_index), int(target.raw_lane_index),
+            int(source.elevation_layer), int(source.gps_pair_index),
+            int(source.start_uid), int(source.end_uid), prefab_token,
+            "left" if target.lane_id == source.left_neighbor else "right",
+            float(speed), float(available_length), float(required_length),
+            float(maneuver_length), float(settle_length),
+            float(lateral_shift), float(max_lateral_accel),
+            float(max_curvature), float(max_curvature_slew),
+            float(heading_residual), float(vertical_residual),
+            tuple(source.centerline), tuple(target.centerline),
+        )
+        details.update({
+            "accepted": True,
+            "direction": proof.direction,
+            "failure_reason": "",
+        })
+        return replace(
+            source, lane_type="lane_change", centerline=tuple(generated),
+            successors=(), lane_change=proof), "", details
+
     def _backtrack_confirmed_lane_change(self, corridor, selected, current,
-                                         edge_number):
+                                         edge_number, speed_mps=0.0):
         """Move a required adjacent-lane transition onto a safe earlier road.
 
         The normal selector follows the currently occupied lane greedily. A
@@ -1908,15 +2271,16 @@ class RoadNetwork:
         GPS-confirmed input starts on the adjacent lane. Never bridge that
         boundary. Walk the already selected GPS edges backwards using only
         real directed road lanes and reciprocal PPD input/output chains. The
-        alternative is accepted only if an earlier real merge/split or prefab
-        boundary anchors it without moving a centreline. Every intermediate
-        boundary must remain an exact endpoint match.
+        alternative is accepted only if an earlier real merge/split/prefab
+        boundary anchors it, or one ordinary road edge proves enough common
+        length for a separately marked lane-change trajectory. Every other
+        intermediate boundary must remain an exact endpoint match.
         """
         if (not selected or edge_number <= 0
-                or current.lane_id.prefab_token in (None, "graph")
+                or current.lane_id.prefab_token == "graph"
                 or selected[-1].lane_id.prefab_token is not None
                 or selected[-1].end_uid != current.start_uid):
-            return None
+            return None, None, ""
         source = selected[-1].centerline[-1]
         target = current.centerline[0]
         dx, dy, dz = target.x-source.x, target.y-source.y, target.z-source.z
@@ -1932,10 +2296,11 @@ class RoadNetwork:
                 or heading > math.radians(10.0)
                 or abs(longitudinal) > 1.5
                 or abs(lateral) > width*1.05):
-            return None
+            return None, None, ""
 
         explored = 0
         search_truncated = False
+        rejected_attempts = []
 
         def search(index, downstream):
             nonlocal explored, search_truncated
@@ -1959,13 +2324,27 @@ class RoadNetwork:
                 anchored = False
                 if previous is not None and self._lane_boundary_is_continuous(
                         previous, candidate):
-                    solutions.append((index, {index: candidate}))
+                    solutions.append((index, {index: candidate}, None))
                     anchored = True
+                elif (edge.kind == "road"
+                        and candidate.lane_id != original.lane_id):
+                    transition, _reason, attempt = (
+                        self._build_lane_change_segment(
+                            original,
+                            replace(candidate,
+                                    gps_pair_index=edge.gps_pair_index),
+                            downstream, speed_mps=speed_mps))
+                    if transition is not None:
+                        solutions.append((
+                            index, {index: transition}, attempt))
+                        anchored = True
+                    elif attempt:
+                        rejected_attempts.append(attempt)
                 if not anchored:
-                    for start, upstream in search(index-1, candidate):
+                    for start, upstream, proof in search(index-1, candidate):
                         combined = dict(upstream)
                         combined[index] = candidate
-                        solutions.append((start, combined))
+                        solutions.append((start, combined, proof))
                         if len(solutions) >= 16:
                             search_truncated = True
                             return solutions
@@ -1976,7 +2355,14 @@ class RoadNetwork:
 
         solutions = search(edge_number-1, current)
         if search_truncated or not solutions:
-            return None
+            rejection = (min(
+                rejected_attempts,
+                key=lambda item: float(item.get(
+                    "required_length_m", float("inf"))))
+                if rejected_attempts else None)
+            reason = (rejection.get("failure_reason", "")
+                      if rejection else "")
+            return None, rejection, reason
         # Preserve the occupied lane for as long as topology permits. A path
         # that anchors later is a proven merge/split or a shorter safe lane
         # change, while an earlier alternative would move the truck without
@@ -1985,8 +2371,14 @@ class RoadNetwork:
         latest = [solution for solution in solutions
                   if solution[0] == latest_start]
         if len(latest) != 1:
-            return None
-        start_index, replacements = latest[0]
+            return None, {
+                "accepted": False,
+                "failure_reason": (
+                    "LANE_CHANGE_AMBIGUOUS: multiple equally late proven "
+                    "lane-change approaches lead to the connector"),
+            }, "LANE_CHANGE_AMBIGUOUS: multiple equally late proven " \
+               "lane-change approaches lead to the connector"
+        start_index, replacements, lane_change_details = latest[0]
 
         rebuilt = list(selected)
         for index, segment in replacements.items():
@@ -1996,21 +2388,28 @@ class RoadNetwork:
         for index in range(boundary_start, len(chain)-1):
             if not self._lane_boundary_is_continuous(
                     chain[index], chain[index+1]):
-                return None
+                return None, lane_change_details, (
+                    "LANE_CHANGE_BOUNDARY_RESIDUAL: planned transition lost "
+                    "endpoint continuity")
         for index in range(boundary_start, len(rebuilt)):
             connection = self._lane_connection(
                 chain[index], chain[index+1])
             if connection is None:
-                return None
+                return None, lane_change_details, (
+                    "LANE_CHANGE_TOPOLOGY: planned transition has no "
+                    "LaneConnection")
             rebuilt[index] = replace(rebuilt[index],
                                      successors=(connection,))
         for index in replacements:
             segment = rebuilt[index]
-            self._lane_id_index[segment.lane_id] = segment
-        return rebuilt
+            # A lane-change segment is route geometry, never the map geometry
+            # indexed by its immutable source LaneId.
+            if segment.lane_change is None:
+                self._lane_id_index[segment.lane_id] = segment
+        return rebuilt, lane_change_details, ""
 
     def select_lane_sequence(self, corridor, start_match,
-                             failure_details=None):
+                             failure_details=None, speed_mps=0.0):
         """Select one continuous lane for every authoritative corridor edge."""
         def observe_failure(**details):
             # This is an internal plain dict owned by build_lane_path().  It is
@@ -2131,10 +2530,7 @@ class RoadNetwork:
                     edge, lane_index, incoming_point,
                     allow_parallel_sibling=(
                         not selected
-                        or selected[-1].lane_id.prefab_token is None
-                        or (selected[-1].end_uid == edge.start_uid
-                            and self._segment_uses_parallel_prefab_sibling(
-                                selected[-1]))))
+                        or selected[-1].end_uid == edge.start_uid))
                 if current is None:
                     observe_failure(
                         gps_uid_index=edge.gps_pair_index,
@@ -2153,8 +2549,14 @@ class RoadNetwork:
                         (source.x, source.y, source.z),
                         (target.x, target.y, target.z))
                     if boundary_gap > MAX_PROVEN_LANE_BOUNDARY_GAP_M:
-                        recovered = self._backtrack_confirmed_lane_change(
-                            corridor, selected, current, edge_number)
+                        recovered, lane_change, lane_change_reason = (
+                            self._backtrack_confirmed_lane_change(
+                                corridor, selected, current, edge_number,
+                                speed_mps=speed_mps))
+                        if (lane_change is not None
+                                and isinstance(failure_details, dict)):
+                            failure_details.setdefault(
+                                "lane_changes", []).append(lane_change)
                         if recovered is None:
                             heading_jump = abs((
                                 target.heading-source.heading+math.pi
@@ -2193,6 +2595,8 @@ class RoadNetwork:
                                     "heading_jump_deg": float(math.degrees(
                                         heading_jump)),
                                 })
+                            if lane_change_reason:
+                                return tuple(selected), lane_change_reason
                             return tuple(selected), (
                                 "road-to-prefab lane identity mismatch at UID "
                                 f"{current.start_uid}: geometry gap "
@@ -2206,6 +2610,37 @@ class RoadNetwork:
                     f"graph-only edge {edge.start_uid} -> {edge.end_uid} "
                     "has no lane-confirmed geometry")
             current = replace(current, gps_pair_index=edge.gps_pair_index)
+            if (edge.kind == "road" and selected
+                    and selected[-1].lane_id.prefab_token is None
+                    and current.lane_id.prefab_token is None):
+                boundary_gap = math.dist(
+                    (selected[-1].centerline[-1].x,
+                     selected[-1].centerline[-1].y,
+                     selected[-1].centerline[-1].z),
+                    (current.centerline[0].x, current.centerline[0].y,
+                     current.centerline[0].z))
+                if boundary_gap > MAX_PROVEN_LANE_BOUNDARY_GAP_M:
+                    recovered, lane_change, lane_change_reason = (
+                        self._backtrack_confirmed_lane_change(
+                            corridor, selected, current, edge_number,
+                            speed_mps=speed_mps))
+                    if (lane_change is not None
+                            and isinstance(failure_details, dict)):
+                        failure_details.setdefault(
+                            "lane_changes", []).append(lane_change)
+                    if recovered is None:
+                        observe_failure(
+                            gps_uid_index=edge.gps_pair_index,
+                            gps_uid=current.start_uid,
+                            lane_id_before=lane_id_payload(
+                                selected[-1].lane_id),
+                            lane_id_after=lane_id_payload(current.lane_id),
+                            geometry={"gap_m": float(boundary_gap)})
+                        return tuple(selected), (lane_change_reason or (
+                            "LANE_CHANGE_NO_ROAD_APPROACH: road merge/split "
+                            f"changes lane by {boundary_gap:.2f} m without "
+                            "a proven safe approach"))
+                    selected = recovered
             if selected:
                 if (selected[-1].lane_id.prefab_token not in (None, "graph")
                         and current.lane_id.prefab_token not in (None, "graph")):
@@ -2433,7 +2868,7 @@ class RoadNetwork:
 
     def build_lane_path(self, gps_uids, position, heading, altitude=None,
                         previous_match=None, start_match=None,
-                        diagnostics=None):
+                        diagnostics=None, speed_mps=0.0):
         """Convenience pipeline used by tests and the future map-plugin switch."""
         if diagnostics is not None:
             safe_diagnostic_call(diagnostics, "start_phase",
@@ -2512,7 +2947,8 @@ class RoadNetwork:
                                  "select_lane_sequence")
         selection_failure = {}
         segments, reason = self.select_lane_sequence(
-            corridor, match, failure_details=selection_failure)
+            corridor, match, failure_details=selection_failure,
+            speed_mps=speed_mps)
         if reason:
             if diagnostics is not None:
                 edge_index = min(len(segments), max(0, len(corridor.edges) - 1))
@@ -2553,6 +2989,8 @@ class RoadNetwork:
                                  "select_lane_sequence", details={
                 "segment_count": len(segments),
                 "lane_ids": [str(segment.lane_id) for segment in segments],
+                "lane_changes": selection_failure.get(
+                    "lane_changes", ()),
             })
         # The rolling SDK route begins at the next GPS anchor. The truck may
         # still be on the confirmed incoming lane leading to that anchor. Add
@@ -2628,30 +3066,109 @@ class RoadNetwork:
                         if (entry_gap > MAX_PROVEN_LANE_BOUNDARY_GAP_M
                                 or not self._lane_boundary_is_continuous(
                                     active, segments[0])):
-                            failed = LanePath(
-                                tuple(segments), (), corridor.gps_uids,
-                                valid=False,
-                                failure_reason=(
+                            target_candidates = []
+                            segment_index = self._road_segment_by_uid.get(
+                                active.lane_id.road_uid)
+                            if segment_index is not None:
+                                for candidate in self._build_lane_segments(
+                                        segment_index):
+                                    if (candidate.start_uid == active.start_uid
+                                            and candidate.end_uid
+                                                == active.end_uid
+                                            and candidate.direction
+                                                == active.direction
+                                            and candidate.lane_id
+                                                != active.lane_id
+                                            and self._lane_boundary_is_continuous(
+                                                candidate, segments[0])):
+                                        target_candidates.append(replace(
+                                            candidate, gps_pair_index=-1))
+                            lane_change = None
+                            lane_change_reason = ""
+                            lane_change_details = None
+                            if len(target_candidates) == 1:
+                                progress = self._centerline_progress(
+                                    active.centerline, match.point)
+                                lane_change, lane_change_reason, \
+                                    lane_change_details = (
+                                        self._build_lane_change_segment(
+                                            active, target_candidates[0],
+                                            segments[0], speed_mps=speed_mps,
+                                            start_progress_m=progress))
+                            elif len(target_candidates) > 1:
+                                lane_change_reason = (
+                                    "LANE_CHANGE_AMBIGUOUS_TARGET: multiple "
+                                    "adjacent road lanes reach the first GPS "
+                                    "connector")
+                                lane_change_details = {
+                                    "accepted": False,
+                                    "failure_reason": lane_change_reason,
+                                    "source_lane_id": lane_id_payload(
+                                        active.lane_id),
+                                    "target_lane_ids": [lane_id_payload(
+                                        candidate.lane_id) for candidate in
+                                        target_candidates],
+                                    "gps_pair_index": -1,
+                                    "gps_pair": [int(active.start_uid),
+                                                 int(active.end_uid)],
+                                    "prefab_token": segments[0].lane_id.
+                                        prefab_token,
+                                }
+                            else:
+                                lane_change_reason = (
+                                    "LANE_CHANGE_NO_TARGET_CONNECTOR: no "
+                                    "adjacent road lane reaches the first GPS "
+                                    "connector")
+                                lane_change_details = {
+                                    "accepted": False,
+                                    "failure_reason": lane_change_reason,
+                                    "source_lane_id": lane_id_payload(
+                                        active.lane_id),
+                                    "gps_pair_index": -1,
+                                    "gps_pair": [int(active.start_uid),
+                                                 int(active.end_uid)],
+                                    "prefab_token": segments[0].lane_id.
+                                        prefab_token,
+                                }
+                            safe_diagnostic_call(
+                                diagnostics, "observe_lane_change",
+                                lane_change_details)
+                            if lane_change is not None:
+                                active = lane_change
+                                connection = self._lane_connection(
+                                    active, segments[0])
+                            else:
+                                failure_reason = (lane_change_reason or (
                                     "GPS turn begins in an adjacent lane; "
                                     f"{lateral_gap:.2f} m lateral transition "
                                     "cannot be completed safely before the "
                                     "junction"))
-                            if diagnostics is not None:
-                                safe_diagnostic_call(
-                                    diagnostics, "observe_lane_path", failed)
-                                safe_diagnostic_call(
-                                    diagnostics, "fail_phase", "LanePath",
-                                    failed.failure_reason, {
-                                        "geometry": {
-                                            "gap_m": float(entry_gap),
-                                            "lateral_gap_m": float(
-                                                lateral_gap),
-                                        },
-                                    })
-                            return failed, match
-                    connection = (self._lane_connection(active, segments[0])
-                                  if active.end_uid == segments[0].start_uid
-                                  else None)
+                                failed = LanePath(
+                                    tuple(segments), (), corridor.gps_uids,
+                                    valid=False,
+                                    failure_reason=failure_reason)
+                                if diagnostics is not None:
+                                    safe_diagnostic_call(
+                                        diagnostics, "observe_lane_path", failed)
+                                    safe_diagnostic_call(
+                                        diagnostics, "fail_phase", "LanePath",
+                                        failed.failure_reason, {
+                                            "geometry": {
+                                                "gap_m": float(entry_gap),
+                                                "lateral_gap_m": float(
+                                                    lateral_gap),
+                                            },
+                                            "lane_change": lane_change_details,
+                                        })
+                                return failed, match
+                        else:
+                            connection = self._lane_connection(
+                                active, segments[0])
+                    else:
+                        connection = (
+                            self._lane_connection(active, segments[0])
+                            if active.end_uid == segments[0].start_uid
+                            else None)
                 if connection is None:
                     # The GPS buffer may start at the next anchor, but it may
                     # not start on an unrelated parallel arm.
@@ -2686,7 +3203,16 @@ class RoadNetwork:
                 # LaneLocator.segment_index identifies the source edge on
                 # which ``projected`` lies. Only its end and later samples are
                 # forward along this directed LaneSegment.
-                following = line[max(0, match.segment_index + 1):]
+                if first.lane_change is not None:
+                    # The route-only lane-change sampling is independent of
+                    # the immutable source lane sampling used by LaneLocator.
+                    # Project onto the planned curve instead of reusing the
+                    # source segment index.
+                    progress = self._centerline_progress(line, match.point)
+                    following = tuple(
+                        point for point in line if point.s > progress+1e-6)
+                else:
+                    following = line[max(0, match.segment_index + 1):]
                 trimmed = [projected]
                 trimmed.extend(point for point in following if math.dist(
                     (point.x, point.y, point.z),
