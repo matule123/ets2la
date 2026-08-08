@@ -1,13 +1,8 @@
-"""
-Rich console logging for UltraPilot (ETS2LA-style startup log).
+"""Deterministic ETS2LA-style colour console logging for UltraPilot.
 
-Uses the ``rich`` library to print colourised, panel-style log lines in the
-terminal — like the ETS2LA reference dashboard. Falls back to a plain ANSI
-formatter if ``rich`` is not installed so logging never breaks.
-
-    12:01:03 | INFO     | Engine started
-    12:01:03 | WARNING  | Telemetry not found
-    12:01:04 | ERROR    | Plugin crashed
+    [INF] 12:01:03  Engine started
+    [WRN] 12:01:03  Telemetry not found
+    [ERR] 12:01:04  Plugin crashed
 """
 import logging
 import os
@@ -21,24 +16,73 @@ except Exception:
     pass
 
 
+def _configure_windows_console(kernel32, hwnd):
+    """Apply the larger, dark ETS2LA-like console geometry on Windows."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class COORD(ctypes.Structure):
+            _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
+
+        class SMALL_RECT(ctypes.Structure):
+            _fields_ = [("Left", ctypes.c_short), ("Top", ctypes.c_short),
+                        ("Right", ctypes.c_short), ("Bottom", ctypes.c_short)]
+
+        class CONSOLE_FONT_INFOEX(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.ULONG), ("nFont", wintypes.DWORD),
+                        ("dwFontSize", COORD), ("FontFamily", wintypes.UINT),
+                        ("FontWeight", wintypes.UINT),
+                        ("FaceName", wintypes.WCHAR * 32)]
+
+        output = kernel32.GetStdHandle(-11)
+        # A larger monospace font and a wider/taller window match the visual
+        # density of ETS2LA while retaining a generous scrollback buffer.
+        font = CONSOLE_FONT_INFOEX()
+        font.cbSize = ctypes.sizeof(CONSOLE_FONT_INFOEX)
+        font.dwFontSize = COORD(0, 18)
+        font.FontFamily = 54
+        font.FontWeight = 400
+        font.FaceName = "Consolas"
+        kernel32.SetCurrentConsoleFontEx(output, False, ctypes.byref(font))
+        kernel32.SetConsoleScreenBufferSize(output, COORD(132, 2000))
+        rect = SMALL_RECT(0, 0, 119, 30)
+        kernel32.SetConsoleWindowInfo(output, True, ctypes.byref(rect))
+        kernel32.SetConsoleTextAttribute(output, 0x0007)
+
+        # Give classic conhost the same dark frame as Windows Terminal.
+        dark = ctypes.c_int(1)
+        for attribute in (20, 19):  # Win11, then older Win10 fallback
+            try:
+                if ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                        hwnd, attribute, ctypes.byref(dark),
+                        ctypes.sizeof(dark)) == 0:
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
 def ensure_windows_console():
-    """Create the one main runtime console for a frozen GUI build."""
+    """Create/configure the one main runtime console."""
     # Installed source builds launch through pythonw.exe (stdout=None), while
     # frozen builds use a GUI executable. Both need an allocated console. A
     # developer running from an existing terminal already has stdout, so no
     # second window is created there.
     needs_console = getattr(sys, "frozen", False) or sys.stdout is None
-    if os.name != "nt" or not needs_console:
+    if os.name != "nt":
         return
     try:
         import ctypes
         from multiprocessing import current_process
         k32 = ctypes.windll.kernel32
         # Only the parent owns the console. Spawned processes inherit it.
-        if current_process().name == "MainProcess" and not k32.GetConsoleWindow():
+        if (needs_console and current_process().name == "MainProcess"
+                and not k32.GetConsoleWindow()):
             k32.AllocConsole()
             k32.SetConsoleTitleW("UltraPilot · Runtime log")
-        if k32.GetConsoleWindow():
+        if needs_console and k32.GetConsoleWindow():
             # GUI executables and their multiprocessing children start with
             # sys.stdout/sys.stderr=None even though the console is inherited.
             # Bind every process to that same console explicitly.
@@ -46,11 +90,24 @@ def ensure_windows_console():
             sys.stderr = open("CONOUT$", "w", encoding="utf-8", buffering=1)
             if current_process().name == "MainProcess":
                 sys.stdin = open("CONIN$", "r", encoding="utf-8")
+        if k32.GetConsoleWindow():
+            k32.SetConsoleOutputCP(65001)
+            k32.SetConsoleCP(65001)
+            for stream in (sys.stdout, sys.stderr):
+                try:
+                    stream.reconfigure(encoding="utf-8", errors="replace")
+                except (AttributeError, OSError):
+                    pass
         # Enable ANSI colours in the inherited/new console.
         handle = k32.GetStdHandle(-11)
         mode = ctypes.c_uint32()
         if k32.GetConsoleMode(handle, ctypes.byref(mode)):
             k32.SetConsoleMode(handle, mode.value | 0x0004)
+        hwnd = k32.GetConsoleWindow()
+        if (hwnd and current_process().name == "MainProcess"
+                and getattr(sys.stdout, "isatty", lambda: False)()):
+            k32.SetConsoleTitleW("UltraPilot")
+            _configure_windows_console(k32, hwnd)
     except Exception:
         pass
 
@@ -116,40 +173,19 @@ class _ETS2LAFormatter(logging.Formatter):
         tag = self.TAGS.get(record.levelno, "LOG")
         ts = self.formatTime(record, "%H:%M:%S")
         msg = record.getMessage()
-        source = f"{record.filename}:{record.lineno}"
-        # Aim the source column at 96, while allowing long messages to remain
-        # intact instead of truncating useful diagnostics.
-        visible = 6 + 9 + len(msg)
-        gap = " " * max(2, 96 - visible)
+        # ETS2LA keeps a clear two-space gutter between timestamp and message.
+        # Source/line details remain in ultrapilot.log instead of crowding the
+        # live console.
         line = (f"{color}[{tag}]{self.RESET} {self.GREY}{ts}{self.RESET}  "
-                f"{self.WHITE}{msg}{self.RESET}{gap}{self.GREY}{source}{self.RESET}")
+                f"{self.WHITE}{msg}{self.RESET}")
         if record.exc_info:
             line += "\n" + self.formatException(record.exc_info)
         return line
 
 
 def _make_console_handler():
-    try:
-        from rich.console import Console
-        from rich.logging import RichHandler
-        from rich.theme import Theme
-        console_theme = Theme({
-            "logging.level.debug": "cyan",
-            "logging.level.info": "bright_green",
-            "logging.level.warning": "yellow",
-            "logging.level.error": "bright_red",
-            "logging.level.critical": "bold white on red",
-        })
-        handler = RichHandler(
-            console=Console(theme=console_theme), rich_tracebacks=True,
-            markup=False,
-            show_time=True, show_level=True, show_path=True,
-            log_time_format="%H:%M:%S",
-        )
-        handler.setFormatter(logging.Formatter("%(message)s"))
-        return handler
-    except ImportError:
-        pass
+    # A deterministic formatter matches ETS2LA's [INF] / [WRN] / [ERR]
+    # alignment exactly. Rich's default columns differ by terminal/version.
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(_ETS2LAFormatter())
     return handler
@@ -230,44 +266,36 @@ def collect_plugin_issues(offset=0, lines=None):
     return issues
 
 
-def _issue_frame(title, rows, colour=""):
+def _issue_frame(plugin, item, colour=True):
+    """Render one compact ETS2LA log-file box for a plugin."""
+    width = 34
     reset = "\033[0m" if colour else ""
-    width = 64
-    output = [colour + "┌─ " + title + " " + "─" * max(
-        1, width-len(title)-4) + "┐" + reset]
-    for plugin, count, sample in rows:
-        count_text = f"{count}×"
-        output.append(colour + "│ " + (plugin + "  " + count_text)[:width-2].ljust(
-            width-2) + " │" + reset)
-        if sample:
-            clean = " ".join(sample.split())
-            output.append(colour + "│   " + clean[:width-5].ljust(width-5)
-                          + " │" + reset)
-    output.append(colour + "└" + "─" * width + "┘" + reset)
+    grey = "\033[90m" if colour else ""
+    red = "\033[91m" if colour else ""
+    yellow = "\033[93m" if colour else ""
+    title = str(plugin)[:width - 2]
+    title_pad = max(0, width - len(title))
+    left = title_pad // 2
+    right = title_pad - left
+    output = [grey + "┌" + "─" * width + "┐" + reset,
+              grey + "│" + " " * left + title + " " * right + "│" + reset]
+
+    def count_row(label, value, color):
+        text = f"{label}: {int(value or 0)}"
+        return (grey + "│ " + reset + color + text
+                + reset + " " * max(0, width - len(text) - 1)
+                + grey + "│" + reset)
+
+    output.append(count_row("Errors", item.get("errors", 0), red))
+    output.append(count_row("Warnings", item.get("warnings", 0), yellow))
+    output.append(grey + "└" + "─" * width + "┘" + reset)
     return "\n".join(output)
 
 
 def format_plugin_issue_summary(issues, colour=True):
-    """Return ETS2LA-style amber/red frames for affected plugins."""
-    warning_rows, error_rows = [], []
-    for plugin in sorted(issues):
-        item = issues[plugin]
-        if item.get("warnings"):
-            warning_rows.append((plugin, item["warnings"],
-                                 (item.get("warning_messages") or [""])[0]))
-        if item.get("errors"):
-            error_rows.append((plugin, item["errors"],
-                               (item.get("error_messages") or [""])[0]))
-    frames = []
-    if warning_rows:
-        frames.append(_issue_frame(
-            "PLUGINY S UPOZORNENÍM", warning_rows,
-            "\033[38;5;214m" if colour else ""))
-    if error_rows:
-        frames.append(_issue_frame(
-            "PLUGINY S CHYBOU", error_rows,
-            "\033[91m" if colour else ""))
-    return "\n\n".join(frames)
+    """Return the same compact per-log count boxes used by ETS2LA."""
+    return "\n".join(_issue_frame(plugin, issues[plugin], colour=colour)
+                     for plugin in sorted(issues))
 
 
 def finish_session_log(offset=0, input_fn=None, colour=True):
@@ -276,7 +304,7 @@ def finish_session_log(offset=0, input_fn=None, colour=True):
     summary = format_plugin_issue_summary(issues, colour=colour)
     if not summary:
         return issues
-    print("\nKontrola pluginov za toto spustenie:\n")
+    print("\nErrors and warnings in the log files:\n")
     print(summary)
     try:
         (input_fn or input)(
@@ -287,14 +315,14 @@ def finish_session_log(offset=0, input_fn=None, colour=True):
 
 
 def setup(level=logging.INFO):
-    """Install the rich console handler on the root logger + a shared log file."""
+    """Install the ETS2LA console handler and shared plain log file."""
     ensure_windows_console()
     root = logging.getLogger()
     root.setLevel(level)
     for h in list(root.handlers):
         root.removeHandler(h)
 
-    # Rich colourised console output.
+    # Deterministic colourised console output.
     root.addHandler(_make_console_handler())
 
     # Plain log FILE so errors from every process are captured and can be shared.

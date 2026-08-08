@@ -1,4 +1,15 @@
+import logging
+
 from core import logger
+
+
+def test_console_line_matches_ets2la_tag_time_and_message_spacing():
+    record = logging.LogRecord("Engine", logging.INFO, "engine.py", 42,
+                               "Engine started", (), None)
+    output = logger._ETS2LAFormatter().format(record)
+    assert "\033[92m[INF]\033[0m " in output
+    assert "  \033[97mEngine started\033[0m" in output
+    assert "engine.py:42" not in output
 
 
 def test_plugin_summary_uses_only_identified_plugin_messages():
@@ -28,10 +39,11 @@ def test_plugin_summary_has_separate_warning_and_error_frames():
 
     output = logger.format_plugin_issue_summary(issues, colour=False)
 
-    assert "PLUGINY S UPOZORNENÍM" in output
-    assert "PLUGINY S CHYBOU" in output
-    assert "autopilot  2×" in output
-    assert "map  1×" in output
+    assert "autopilot" in output
+    assert "map" in output
+    assert "Errors: 1" in output
+    assert "Warnings: 2" in output
+    assert "PLUGINY S UPOZORNENÍM" not in output
 
 
 def test_runtime_log_waits_for_enter_only_when_plugin_has_issue(monkeypatch):
@@ -60,4 +72,3 @@ def test_startup_banner_is_not_a_regular_timestamped_log_line(capsys):
     assert "UltraPilot  v0.4.2  ·  abcdef1" in output
     assert "Pripravujem bezpečné jazdné systémy" in output
     assert "INFO" not in output
-
