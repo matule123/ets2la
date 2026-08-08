@@ -169,6 +169,16 @@ class UiChromeTests(unittest.TestCase):
         self.assertEqual(window.content_surface.y(), 0)
         self.assertEqual(window.title_bar.x() + window.title_bar.width(),
                          window.content_host.width())
+        # The generic top drag strip must stop before the complete expanded
+        # controls. Otherwise it sits above the buttons on Windows and all
+        # three dots show only a move cursor instead of receiving clicks.
+        window.title_bar.set_expanded(True)
+        title_origin = window.title_bar.mapTo(
+            window.centralWidget(), QPoint(0, 0))
+        self.assertLess(window.drag_area.geometry().right(), title_origin.x())
+        self.assertEqual(window.title_bar.cursor().shape(),
+                         Qt.CursorShape.ArrowCursor)
+        window.title_bar.set_expanded(False)
         word_origin = window.brand_word.mapTo(window.brand_container,
                                               QPoint(0, 0))
         word_center = word_origin.x() + window.brand_word.width() / 2.0

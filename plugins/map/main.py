@@ -65,6 +65,10 @@ class Plugin(BasePlugin):
         self._roads_pos = None
         self._roads_revision = int(self.sdk.get(
             "map_road_segments_revision", 0) or 0)
+        # Perspective-HUD geometry is presentation-only.  Its prefab scan can
+        # be expensive and must never own the navigation heartbeat tick.
+        self._roads_loading = False
+        self._roads_job_id = 0
         self._live_map_t = 0.0
         self._live_map_pos = None
         self._live_map_revision = int(self.sdk.get(
@@ -134,6 +138,8 @@ class Plugin(BasePlugin):
 
     def on_stop(self):
         logging.info("Map (navigation) plugin stopped.")
+        self._roads_job_id += 1
+        self._roads_loading = False
         self._live_map_job_id += 1
         self._live_map_loading = False
         self._deactivate_recorded_route(clear_outputs=True)
@@ -386,6 +392,8 @@ class Plugin(BasePlugin):
                 "navigation_status": friendly,
                 "navigation_failure_reason": str(reason),
             })
+            self._publish_preserved_snapshot_liveness(
+                current, self._lane_match)
             try:
                 logging.error(
                     "Navigation horizon refresh failed; preserving revision %s: %s",
@@ -406,6 +414,69 @@ class Plugin(BasePlugin):
         })
         self._remember_route_diagnostic(diagnostic, "failed")
         return snapshot
+
+    def _publish_preserved_snapshot_liveness(self, snapshot, match):
+        """Refresh a preserved revision only for its proven live LaneId.
+
+        A rolling-horizon rebuild may fail while the already published prefix
+        remains valid.  The old code preserved that snapshot but stopped
+        updating its heartbeat on duplicate failed inputs, causing a false
+        ``map plugin heartbeat is stale`` shutdown.  Liveness is renewed only
+        when the current LaneMatch is part of the immutable corridor; a match
+        outside it remains fail-closed with an identity-specific reason.
+        """
+        try:
+            revision = int(snapshot.get("revision", -1) or -1)
+            current_revision = int(self.sdk.get(
+                "lane_trajectory_revision", -2) or -2)
+            lane_payload = self._lane_id_payload(
+                match.lane_id if match is not None else None)
+            in_corridor = any(
+                entry.get("lane_id") == lane_payload
+                for entry in (snapshot.get("lane_corridor", ()) or ()))
+            accepted = bool(
+                snapshot.get("valid", False)
+                and revision == current_revision
+                and snapshot_matches_navigation_intent(
+                    self.sdk.shared_state, snapshot)
+                and match is not None
+                and in_corridor)
+        except (TypeError, ValueError, OverflowError):
+            accepted = False
+            revision = int(self.sdk.get(
+                "lane_trajectory_revision", -1) or -1)
+
+        heartbeat = time.monotonic()
+        if accepted:
+            self._lane_match = match
+            self._lane_localization_current = True
+            self.sdk.shared_state.update_batch({
+                "lane_match": self._lane_match_payload(match, revision),
+                "lane_trajectory_heartbeat": heartbeat,
+                "navigation_unreliable": False,
+            })
+            self._reset_lane_loss()
+            return True
+
+        reason = "live lane identity is outside the preserved GPS corridor"
+        self._lane_localization_current = False
+        self.sdk.shared_state.update_batch({
+            "lane_match": {
+                "revision": revision,
+                "valid": False,
+                "lateral_error_m": 0.0,
+                "heading_error_rad": 0.0,
+                "failure_reason": reason,
+            },
+            # The plugin is alive; authority is rejected by the invalid live
+            # match above, not misreported as a dead heartbeat.
+            "lane_trajectory_heartbeat": heartbeat,
+            "nav_active": False,
+            "nav_steering": 0.0,
+            "navigation_unreliable": True,
+            "navigation_failure_reason": reason,
+        })
+        return False
 
     def _finish_stale_route_build(self, diagnostic, reason,
                                   source_revision=None):
@@ -996,11 +1067,15 @@ class Plugin(BasePlugin):
                 )
             if self._build_guard.input_completed(
                     self.sdk.get("navigation_intent_id"), input_key):
+                if current.get("valid", False):
+                    self._publish_preserved_snapshot_liveness(current, match)
                 return self._lane_path if current.get("valid", False) else None
             diagnostic = self._new_route_diagnostics(
                 uids, pos, altitude, heading, locator_started,
                 input_key=input_key)
             if diagnostic is None:
+                if current.get("valid", False):
+                    self._publish_preserved_snapshot_liveness(current, match)
                 return self._lane_path if current.get("valid", False) else None
             safe_diagnostic_call(diagnostic, "start_phase", "LaneLocator")
         if match is None:
@@ -1103,11 +1178,15 @@ class Plugin(BasePlugin):
             input_key = self._route_build_input_key(build_uids, match)
             if self._build_guard.input_completed(
                     self.sdk.get("navigation_intent_id"), input_key):
+                if current.get("valid", False):
+                    self._publish_preserved_snapshot_liveness(current, match)
                 return self._lane_path if current.get("valid", False) else None
             diagnostic = self._new_route_diagnostics(
                 uids, pos, altitude, heading, locator_started,
                 input_key=input_key)
             if diagnostic is None:
+                if current.get("valid", False):
+                    self._publish_preserved_snapshot_liveness(current, match)
                 return self._lane_path if current.get("valid", False) else None
             safe_diagnostic_call(diagnostic, "start_phase", "LaneLocator")
             locator_capture = {}
@@ -1444,6 +1523,8 @@ class Plugin(BasePlugin):
             self._build_guard = NavigationBuildGuard()
             self._build_tokens = {}
             self._roads_pos = None
+            self._roads_job_id += 1
+            self._roads_loading = False
             self._live_map_pos = None
             self._live_map_job_id += 1
             self._live_map_loading = False
@@ -1555,6 +1636,54 @@ class Plugin(BasePlugin):
                     self._live_map_loading = False
 
         threading.Thread(target=_worker, name="LiveMapScene", daemon=True).start()
+        return True
+
+    def _schedule_hud_road_scene(self, pos, altitude, anchor_lane_id=None):
+        """Build the perspective road/prefab mesh off the navigation tick."""
+        if getattr(self, "_roads_loading", False):
+            return False
+        net = self.road_net
+        if net is None or not getattr(net, "loaded", False):
+            return False
+
+        import threading
+        request_pos = (float(pos[0]), float(pos[1]))
+        request_altitude = float(altitude)
+        generation = self._map_load_generation
+        self._roads_job_id = getattr(self, "_roads_job_id", 0) + 1
+        job_id = self._roads_job_id
+        self._roads_loading = True
+
+        def _worker():
+            try:
+                roads = net.hud_segments_3d_near(
+                    request_pos, radius=280.0, limit=950,
+                    altitude=request_altitude,
+                    anchor_lane_id=anchor_lane_id)
+                payload = [[list(a), list(b), kind, lanes, divided,
+                            dash_on, pillar, rail_post, half_width,
+                            suppress_markings, path_key, path_index]
+                           for a, b, kind, lanes, divided, dash_on,
+                           pillar, rail_post, half_width, suppress_markings,
+                           path_key, path_index in roads]
+                if (job_id != self._roads_job_id
+                        or generation != self._map_load_generation
+                        or self.road_net is not net):
+                    return
+                self._roads_revision += 1
+                self.sdk.shared_state.update_batch({
+                    "map_road_segments": payload,
+                    "map_road_segments_revision": self._roads_revision,
+                })
+                self._roads_pos = request_pos
+            except Exception as exc:
+                logging.debug("HUD road geometry error: %s", exc)
+            finally:
+                if job_id == self._roads_job_id:
+                    self._roads_loading = False
+
+        threading.Thread(target=_worker, name="HudRoadScene",
+                         daemon=True).start()
         return True
 
     def _load_road_net(self):
@@ -1850,28 +1979,13 @@ class Plugin(BasePlugin):
             float(pos[1]) - self._roads_pos[1]) >= 12.0)
         if (self._roads_t >= 0.75 and moved
                 and self.road_net is not None and self.road_net.loaded):
-            self._roads_t = 0.0
-            try:
-                altitude = float(self.sdk.get("truck_altitude", 0.0) or 0.0)
-                roads = self.road_net.hud_segments_3d_near(
-                    pos, radius=280.0, limit=950, altitude=altitude,
+            altitude = float(self.sdk.get("truck_altitude", 0.0) or 0.0)
+            if self._schedule_hud_road_scene(
+                    pos, altitude,
                     anchor_lane_id=(self._lane_match.lane_id
                                     if self._lane_localization_current
-                                    and self._lane_match is not None else None))
-                payload = [[list(a), list(b), kind, lanes, divided, dash_on,
-                            pillar, rail_post, half_width, suppress_markings,
-                            path_key, path_index]
-                           for a, b, kind, lanes, divided, dash_on, pillar,
-                           rail_post, half_width, suppress_markings, path_key,
-                           path_index in roads]
-                self._roads_revision += 1
-                self.sdk.shared_state.update_batch({
-                    "map_road_segments": payload,
-                    "map_road_segments_revision": self._roads_revision,
-                })
-                self._roads_pos = (float(pos[0]), float(pos[1]))
-            except Exception as e:
-                logging.debug("HUD road geometry error: %s", e)
+                                    and self._lane_match is not None else None)):
+                self._roads_t = 0.0
 
         # The top-down map needs a wider scene than the perspective HUD.  Keep
         # this presentation snapshot separate so nearby parallel streets and

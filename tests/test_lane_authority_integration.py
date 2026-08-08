@@ -123,6 +123,33 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
             and not batch["lane_trajectory"].get("valid", False)
             for batch in new_batches))
 
+    def test_failed_horizon_refresh_keeps_live_proven_prefix_heartbeat(self):
+        """15:16 regression: preserved revision must not look process-dead."""
+        plugin, sdk, _point = build_map_plugin()
+        snapshot = sdk.get("lane_trajectory")
+        sdk.set("lane_trajectory_heartbeat", 0.01)
+
+        self.assertTrue(plugin._publish_preserved_snapshot_liveness(
+            snapshot, plugin._lane_match))
+        live_heartbeat = sdk.get("lane_trajectory_heartbeat")
+        self.assertGreater(live_heartbeat, 0.01)
+        self.assertTrue(sdk.get("lane_match")["valid"])
+        self.assertFalse(sdk.get("navigation_unreliable"))
+
+        current_id = plugin._lane_match.lane_id
+        foreign_match = replace(
+            plugin._lane_match,
+            lane_id=LaneId(current_id.road_uid, current_id.direction,
+                           current_id.lane_index + 10))
+        self.assertFalse(plugin._publish_preserved_snapshot_liveness(
+            snapshot, foreign_match))
+        self.assertGreaterEqual(
+            sdk.get("lane_trajectory_heartbeat"), live_heartbeat)
+        self.assertFalse(sdk.get("lane_match")["valid"])
+        self.assertIn("outside the preserved GPS corridor",
+                      sdk.get("navigation_failure_reason"))
+        self.assertNotIn("heartbeat", sdk.get("navigation_failure_reason"))
+
     def test_normal_active_lane_segment_change_does_not_schedule_build(self):
         plugin, sdk, _point = build_map_plugin()
         snapshot = sdk.get("lane_trajectory")

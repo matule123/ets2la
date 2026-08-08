@@ -118,6 +118,42 @@ class LaneGeometryAuditTests(unittest.TestCase):
         self.assertEqual(sdk.get("live_map_scene_revision"), 1)
         self.assertEqual(len(sdk.get("live_map_road_segments")), 1)
 
+    def test_hud_prefab_scene_never_blocks_navigation_heartbeat(self):
+        """15:16 trace: the synchronous HUD prefab scan froze map ticks."""
+        started, release = threading.Event(), threading.Event()
+
+        class SlowHudNetwork:
+            loaded = True
+
+            def hud_segments_3d_near(self, *_args, **_kwargs):
+                started.set()
+                release.wait(2.0)
+                return [((0.0, 0.0, 0.0), (1.0, 0.0, 0.0),
+                         "lane", 1, False, False, False, False,
+                         3.05, False, "roundabout:4", 0)]
+
+        plugin, sdk, _point = build_map_plugin()
+        plugin.road_net = SlowHudNetwork()
+        heartbeat = time.monotonic()
+        sdk.set("lane_trajectory_heartbeat", heartbeat)
+        before = time.monotonic()
+        self.assertTrue(plugin._schedule_hud_road_scene(
+            (0.0, 0.0), 3.0))
+        elapsed = time.monotonic() - before
+        self.assertLess(elapsed, 0.20)
+        self.assertTrue(started.wait(0.5))
+        self.assertEqual(sdk.get("lane_trajectory_heartbeat"), heartbeat)
+
+        release.set()
+        deadline = time.monotonic() + 1.0
+        while plugin._roads_loading and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertFalse(plugin._roads_loading)
+        self.assertEqual(sdk.get("map_road_segments_revision"), 1)
+        payload = sdk.get("map_road_segments")
+        self.assertEqual(payload[0][2], "lane")
+        self.assertEqual(payload[0][10:], ["roundabout:4", 0])
+
     def test_straight_left_right_and_feedforward_units(self):
         straight = Route([(0.0, 0.0), (0.0, 50.0), (0.0, 100.0)])
         self.assertAlmostEqual(straight.steering(

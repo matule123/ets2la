@@ -29,11 +29,11 @@ class HudPoseStabilityTests(unittest.TestCase):
         self.assertTrue(_hud_segment_is_selected_context("lane", route))
         self.assertTrue(_hud_segment_is_selected_context("lane", []))
         self.assertFalse(_hud_segment_is_selected_context("unknown", route))
-        self.assertFalse(_hud_segment_has_bright_outline("lane", route))
+        self.assertTrue(_hud_segment_has_bright_outline("lane", route))
         self.assertTrue(_hud_segment_has_bright_outline("road", route))
-        # A prefab navCurve is never a painted road edge.  Showing all of
-        # these curves without GPS produced the real junction wireframe.
-        self.assertFalse(_hud_segment_has_bright_outline("lane", []))
+        # PPD path identity keeps each prefab envelope separate, so its subtle
+        # edges remain visible even without a selected GPS path.
+        self.assertTrue(_hud_segment_has_bright_outline("lane", []))
 
     def test_gps_line_has_distinct_glow_outline_and_blue_core(self):
         class Painter:
@@ -49,9 +49,9 @@ class HudPoseStabilityTests(unittest.TestCase):
         painter = Painter()
         _draw_hud_route_curve(painter, QPainterPath())
         self.assertEqual([pen.widthF() for pen in painter.pens],
-                         [16.0, 10.0, 6.0])
+                         [20.0, 12.0, 6.0])
         self.assertEqual([pen.color().name().upper() for pen in painter.pens],
-                         ["#3B82F6", "#0D3068", "#3B82F6"])
+                         ["#3B82F6", "#0F4899", "#3B82F6"])
 
     def test_stationary_sdk_chatter_does_not_move_scene(self):
         hud = self.make_hud()
@@ -376,10 +376,9 @@ class HudPoseStabilityTests(unittest.TestCase):
         }
         painter = Painter()
         hud._draw_driving_view(painter, View(), data)
-        # The road approach keeps its two genuine outer edges.  The prefab
-        # navCurve remains as overlapping asphalt polygons but contributes no
-        # pair of misleading white lines through the junction.
-        self.assertEqual(painter.paths, 2)
+        # The road approach and the topology-separated prefab lane each keep
+        # two visible outer edges; no direct chord is introduced.
+        self.assertEqual(painter.paths, 4)
         self.assertGreaterEqual(painter.polygons, 3)
 
     def test_traffic_light_is_world_anchored_and_never_uses_string_brush(self):

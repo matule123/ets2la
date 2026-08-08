@@ -209,6 +209,10 @@ class MacTitleBar(QFrame):
         self.setFixedSize(59, 24)
         self.setObjectName("MacTitleBar")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        # Never inherit the move cursor from the full-width drag strip below.
+        # The three dots are real buttons; only the revealed centre handle is
+        # a window-move target.
+        self.setCursor(Qt.CursorShape.ArrowCursor)
         self.setStyleSheet("#MacTitleBar{background:transparent;border:none;}")
         row = QHBoxLayout(self)
         row.setContentsMargins(7, 4, 7, 5)
@@ -905,7 +909,7 @@ class UltraPilotApp(QMainWindow):
         root_layout.addWidget(content, 1)
         # No title strip or title text: the dots float directly in the corner.
         self.drag_area = WindowDragArea(self)
-        self.drag_area.setGeometry(0, 0, central.width(), 34)
+        self._position_drag_area()
         self.drag_area.raise_()
         self.sidebar = QFrame()
         self.sidebar.setObjectName("Sidebar")
@@ -1171,10 +1175,26 @@ class UltraPilotApp(QMainWindow):
         else:
             self.setMask(rounded_window_region(self.width(), self.height()))
         if hasattr(self, "drag_area"):
-            self.drag_area.setGeometry(0, 0, self.centralWidget().width(), 34)
+            self._position_drag_area()
             self.drag_area.raise_()
         if hasattr(self, "title_bar"):
             self.content_host.position_title_bar()
+
+    def _position_drag_area(self):
+        """Keep the generic drag strip away from the interactive controls.
+
+        ``WindowDragArea`` is a direct child of the central window and is
+        therefore stacked above descendants of the content layout on Windows.
+        The former full-width geometry intercepted every click on the three
+        dots and exposed only its move cursor.  Reserve the complete expanded
+        control/drag-handle width at the right; that area is owned exclusively
+        by :class:`MacTitleBar`.
+        """
+        if not hasattr(self, "drag_area") or self.centralWidget() is None:
+            return
+        reserved_controls_width = 270
+        width = max(0, self.centralWidget().width() - reserved_controls_width)
+        self.drag_area.setGeometry(0, 0, width, 34)
 
     def showEvent(self, event):
         """The main window is up — let the HUD process know it can appear now."""

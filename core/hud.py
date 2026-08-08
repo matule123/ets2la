@@ -15,23 +15,22 @@ def _hud_segment_is_selected_context(kind, navigation_points):
 
     Dropping every prefab ``lane`` whenever a GPS path existed removed the
     actual road surface at junctions, roundabouts and road/prefab boundaries.
-    The renderer now keeps those topology-proven ribbons while suppressing
-    their individual bright outlines below, so they fill junctions without
-    recreating the former white-line tangle.
+    The renderer keeps those topology-proven ribbons and groups their subtle
+    boundaries by exact PPD path identity, so they fill junctions without
+    connecting unrelated arms.
     """
     return kind in {"road", "lane"}
 
 
 def _hud_segment_has_bright_outline(kind, navigation_points):
-    """Return whether a map path represents a real visible road boundary.
+    """Draw boundaries for roads and topology-proven prefab lane envelopes.
 
-    Prefab ``lane`` items are navigation curves through a junction, not road
-    edges or painted lane markings.  Outlining every one of them when GPS was
-    unavailable turned intersections into a dense wireframe.  They still
-    contribute their overlapping asphalt ribbons, while only actual road
-    carriageways receive the two bright outer boundaries below.
+    Each prefab path is kept separate by its PPD curve identity and consecutive
+    navCurve indices, so its two subtle edges cannot chord across another arm.
+    This restores readable lanes around roundabouts while the selected GPS lane
+    receives the stronger dedicated highlight below.
     """
-    return kind == "road"
+    return kind in {"road", "lane"}
 
 
 # Keep the road deck visibly separate from the near-black HUD background.
@@ -40,8 +39,8 @@ def _hud_segment_has_bright_outline(kind, navigation_points):
 # width remains readable underneath the blue centre guidance.
 HUD_ROAD_SURFACE = QColor(47, 50, 55, 255)
 HUD_SELECTED_LANE_SURFACE = QColor(54, 58, 64, 255)
-HUD_ROUTE_GLOW = QColor(59, 130, 246, 70)
-HUD_ROUTE_OUTLINE = QColor(13, 48, 104, 245)
+HUD_ROUTE_GLOW = QColor(59, 130, 246, 82)
+HUD_ROUTE_OUTLINE = QColor(15, 72, 153, 255)
 HUD_ROUTE_CORE = QColor(59, 130, 246, 255)
 
 # State → accent colour (left as-is; the whole HUD now lives on the left panel).
@@ -54,8 +53,8 @@ _STATE_COLORS = {
 
 def _draw_hud_route_curve(painter, route_curve):
     """Paint one GPS line with a separate dark-blue enclosing stripe."""
-    for colour, width in ((HUD_ROUTE_GLOW, 16.0),
-                          (HUD_ROUTE_OUTLINE, 10.0),
+    for colour, width in ((HUD_ROUTE_GLOW, 20.0),
+                          (HUD_ROUTE_OUTLINE, 12.0),
                           (HUD_ROUTE_CORE, 6.0)):
         painter.setPen(QPen(colour, width, Qt.PenStyle.SolidLine,
                             Qt.PenCapStyle.RoundCap,
@@ -1060,15 +1059,12 @@ class UltraPilotHUD(QWidget):
             for (kind, _path_key), segments in display_paths.items():
                 if not _hud_segment_has_bright_outline(
                         kind, d.get("nav_path", [])):
-                    # Prefab ribbons are useful as asphalt context, but their
-                    # many legal navCurve boundaries are not lane markings.
-                    # The selected revision is drawn immediately below with
-                    # its exact two boundaries.
+                    # Unknown presentation geometry never gets an outline.
                     continue
                 edge_pen = QPen(
                     QColor(205, 211, 220, 230) if kind == "road"
-                    else QColor(186, 199, 218, 215),
-                    3.0 if kind == "road" else 2.35,
+                    else QColor(158, 169, 185, 175),
+                    3.0 if kind == "road" else 1.65,
                     Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
                     Qt.PenJoinStyle.RoundJoin)
                 qp.setPen(edge_pen)
