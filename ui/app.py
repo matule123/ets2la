@@ -50,7 +50,8 @@ class WindowControlDot(QPushButton):
         self.setAccessibleName(tooltip)
         self.setToolTip(tooltip)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedSize(9, 9)
+        # ETS2LA frontend uses three identical 11 px circles.
+        self.setFixedSize(11, 11)
         self.setStyleSheet("QPushButton{background:transparent;border:none;"
                            "padding:0;margin:0;}")
         self.clicked.connect(action)
@@ -60,7 +61,7 @@ class WindowControlDot(QPushButton):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(self._color)
-        painter.drawEllipse(QRectF(0.5, 0.5, 8.0, 8.0))
+        painter.drawEllipse(QRectF(0.5, 0.5, 10.0, 10.0))
 
 
 class MacTitleBar(QFrame):
@@ -70,20 +71,21 @@ class MacTitleBar(QFrame):
         super().__init__()
         self.window = window
         self._palette = palette
-        self.setFixedSize(68, 31)
+        # Reference geometry: 59x24, 11 px dots and a 4 px gap.
+        self.setFixedSize(59, 24)
         self.setObjectName("MacTitleBar")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setStyleSheet("#MacTitleBar{background:transparent;border:none;}")
         row = QHBoxLayout(self)
-        row.setContentsMargins(17, 8, 10, 12)
-        row.setSpacing(5)
+        row.setContentsMargins(9, 6, 9, 7)
+        row.setSpacing(4)
         self.controls = {}
         for key, color, glyph, tip, action in (
-                ("maximize", "#00CA4E", "+", "Maximalizovať",
+                ("maximize", "#22C55E", "+", "Maximalizovať",
                  self._toggle_maximize),
-                ("minimize", "#FFBD44", "−", "Minimalizovať",
+                ("minimize", "#EAB308", "−", "Minimalizovať",
                  window.showMinimized),
-                ("close", "#FF5F57", "×", "Zavrieť", window.close)):
+                ("close", "#EF4444", "×", "Zavrieť", window.close)):
             dot = WindowControlDot(color, glyph, f"WindowControl-{key}",
                                    tip, action, self)
             row.addWidget(dot)
@@ -763,8 +765,7 @@ class UltraPilotApp(QMainWindow):
         sb.addWidget(update_card)
         sb.addSpacing(8)
 
-        # ETS2LA-style navigation. The glyphs come from Windows' monochrome
-        # Segoe MDL2 icon font (not emoji), so they stay crisp at every DPI.
+        # ETS2LA-style navigation with crisp monochrome Lucide-like line icons.
         nav = [
             ("HLAVNÉ", None, None),
             ("dashboard", "Dashboard", 0),

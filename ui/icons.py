@@ -20,30 +20,41 @@ def line_icon(name: str, color="#4B5563", size=22) -> QIcon:
     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
     p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
     if name == "dashboard":
+        # House — the reference dashboard icon.
         roof = QPainterPath()
-        roof.moveTo(3.5, 10.0); roof.lineTo(11.0, 3.8)
-        roof.lineTo(18.5, 10.0)
+        roof.moveTo(3.5, 10.5); roof.lineTo(11.0, 4.0)
+        roof.lineTo(18.5, 10.5)
         p.drawPath(roof)
-        p.drawRoundedRect(QRectF(5.5, 9.0, 11.0, 9.0), 1.8, 1.8)
+        p.drawLine(QPointF(5.5, 9.0), QPointF(5.5, 18.0))
+        p.drawLine(QPointF(16.5, 9.0), QPointF(16.5, 18.0))
+        p.drawLine(QPointF(5.5, 18.0), QPointF(16.5, 18.0))
         p.drawLine(QPointF(9.0, 18.0), QPointF(9.0, 13.5))
+        p.drawLine(QPointF(9.0, 13.5), QPointF(13.0, 13.5))
         p.drawLine(QPointF(13.0, 13.5), QPointF(13.0, 18.0))
     elif name == "navigation":
         p.drawPolygon(QPolygonF([QPointF(11,3), QPointF(18,18), QPointF(11,15), QPointF(4,18)]))
         p.drawLine(QPointF(11,15), QPointF(11,8))
     elif name == "visualization":
-        p.drawRoundedRect(QRectF(3,4,16,12),2,2); p.drawLine(7,19,15,19); p.drawLine(11,16,11,19)
+        # TvMinimal — thin monitor outline used by ETS2LA Visualization.
+        p.drawRoundedRect(QRectF(3.0, 4.0, 16.0, 12.0), 2.0, 2.0)
+        p.drawLine(QPointF(8.0, 19.0), QPointF(14.0, 19.0))
     elif name == "plugins":
-        for y, knob_x in ((6.0, 8.0), (11.0, 14.0), (16.0, 10.5)):
-            p.drawLine(QPointF(4.0, y), QPointF(18.0, y))
-            p.setBrush(QColor(color))
-            p.drawEllipse(QRectF(knob_x - 1.7, y - 1.7, 3.4, 3.4))
-            p.setBrush(Qt.BrushStyle.NoBrush)
+        # ChartNoAxesGantt — plugin manager in the reference sidebar.
+        p.drawLine(QPointF(4.0, 5.5), QPointF(15.0, 5.5))
+        p.drawLine(QPointF(7.0, 10.8), QPointF(18.0, 10.8))
+        p.drawLine(QPointF(4.0, 16.2), QPointF(13.5, 16.2))
+        p.drawLine(QPointF(4.0, 4.0), QPointF(4.0, 7.0))
+        p.drawLine(QPointF(18.0, 9.3), QPointF(18.0, 12.3))
+        p.drawLine(QPointF(13.5, 14.7), QPointF(13.5, 17.7))
     elif name == "performance":
-        p.drawLine(QPointF(4.0, 17.5), QPointF(4.0, 12.5))
-        p.drawLine(QPointF(8.5, 17.5), QPointF(8.5, 8.5))
-        p.drawLine(QPointF(13.0, 17.5), QPointF(13.0, 5.0))
-        p.drawLine(QPointF(17.5, 17.5), QPointF(17.5, 10.5))
-        p.drawLine(QPointF(3.0, 18.5), QPointF(19.0, 18.5))
+        # ChartArea — matching ETS2LA's performance entry.
+        p.drawLine(QPointF(3.5, 4.0), QPointF(3.5, 18.0))
+        p.drawLine(QPointF(3.5, 18.0), QPointF(19.0, 18.0))
+        graph = QPainterPath()
+        graph.moveTo(4.0, 14.5); graph.lineTo(8.0, 10.5)
+        graph.lineTo(11.0, 13.0); graph.lineTo(15.0, 7.0)
+        graph.lineTo(18.5, 9.5)
+        p.drawPath(graph)
     elif name == "autopilot":
         # Lane-assist mark: the master action is clearer as a road/heading
         # symbol than as a steering wheel (which looked like a settings dial).
@@ -60,15 +71,19 @@ def line_icon(name: str, color="#4B5563", size=22) -> QIcon:
         p.drawLine(QPointF(11.0, 12.0), QPointF(11.0, 17.2))
         p.drawEllipse(QRectF(9.2, 10.2, 3.6, 3.6))
     elif name == "settings":
-        # Three balanced tuning sliders avoid the generic gear icon and match
-        # the controls users actually find on the page.
-        for y, knob_x in ((5.5, 8.0), (11.0, 14.0), (16.5, 10.5)):
-            p.drawLine(QPointF(3.5, y), QPointF(18.5, y))
-            p.setBrush(QColor(color))
-            p.drawEllipse(QRectF(knob_x - 1.8, y - 1.8, 3.6, 3.6))
-            p.setBrush(Qt.BrushStyle.NoBrush)
+        # Bolt — the settings symbol used by the ETS2LA sidebar.
+        bolt = QPainterPath()
+        bolt.moveTo(12.5, 2.8); bolt.lineTo(5.5, 12.0)
+        bolt.lineTo(10.3, 12.0); bolt.lineTo(9.4, 19.2)
+        bolt.lineTo(16.7, 9.7); bolt.lineTo(11.8, 9.7)
+        bolt.closeSubpath()
+        p.drawPath(bolt)
     elif name == "about":
-        p.drawEllipse(QRectF(4,4,14,14)); p.drawLine(11,10,11,16); p.drawPoint(11,7)
+        # BookText — consistent with ETS2LA's help/about group.
+        p.drawRoundedRect(QRectF(4.0, 3.5, 14.0, 15.0), 1.8, 1.8)
+        p.drawLine(QPointF(7.0, 7.5), QPointF(15.0, 7.5))
+        p.drawLine(QPointF(7.0, 11.0), QPointF(14.0, 11.0))
+        p.drawLine(QPointF(7.0, 14.5), QPointF(11.5, 14.5))
     else:
         p.drawRoundedRect(QRectF(4, 4, 14, 14), 3, 3)
     p.end()

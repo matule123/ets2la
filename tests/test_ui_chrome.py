@@ -48,10 +48,11 @@ class UiChromeTests(unittest.TestCase):
         bar = MacTitleBar(host, palette("light"))
         self.assertEqual(list(bar.controls), ["maximize", "minimize", "close"])
         controls = list(bar.controls.values())
-        self.assertTrue(all(button.width() == 9 and button.height() == 9
+        self.assertEqual((bar.width(), bar.height()), (59, 24))
+        self.assertTrue(all(button.width() == 11 and button.height() == 11
                             for button in controls))
         self.assertEqual([button._color.name().upper() for button in controls],
-                         ["#00CA4E", "#FFBD44", "#FF5F57"])
+                         ["#22C55E", "#EAB308", "#EF4444"])
         self.assertTrue(all("border:none" in button.styleSheet()
                             for button in controls))
         self.assertTrue(all(not hasattr(button, "_glyph")
@@ -67,14 +68,14 @@ class UiChromeTests(unittest.TestCase):
                          ["Maximalizovať", "Minimalizovať", "Zavrieť"])
 
     def test_window_controls_are_seated_in_a_curved_notch(self):
-        path = window_control_notch_path(68, 31)
+        path = window_control_notch_path(59, 24)
         bounds = path.boundingRect()
-        self.assertEqual((bounds.width(), bounds.height()), (68.0, 31.0))
+        self.assertEqual((bounds.width(), bounds.height()), (59.0, 24.0))
         # The lower-left cutout is outside while all three control centres are
         # inside the painted surface.
         self.assertFalse(path.contains(bounds.bottomLeft()))
-        for x in (21.5, 35.5, 49.5):
-            self.assertTrue(path.contains(type(bounds.center())(x, 12.5)))
+        for x in (14.5, 29.5, 44.5):
+            self.assertTrue(path.contains(type(bounds.center())(x, 11.5)))
 
     def test_sidebar_uses_card_navigation_styles_and_original_line_icons(self):
         css = stylesheet("light")
