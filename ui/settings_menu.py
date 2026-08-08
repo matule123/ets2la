@@ -99,8 +99,81 @@ class SettingsMenu(QWidget):
             + ";color:" + self._pal['text'] + ";font-family:'Segoe UI';}")
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(16)
-        layout.setContentsMargins(30, 26, 30, 30)
+        layout.setSpacing(14)
+        layout.setContentsMargins(22, 22, 22, 24)
+
+        page_title = QLabel("Nastavenia")
+        page_title.setObjectName("SettingsPageTitle")
+        page_title.setStyleSheet("font-size:24px;font-weight:800;color:"
+                                 + self._pal['text'] + ";")
+        page_subtitle = QLabel(
+            "Globálne nastavenia, ovládanie a doplnky UltraPilotu")
+        page_subtitle.setObjectName("SettingsPageSubtitle")
+        page_subtitle.setStyleSheet("font-size:12px;color:"
+                                    + self._pal['muted'] + ";")
+        self._page_title = page_title
+        self._page_subtitle = page_subtitle
+        layout.addWidget(page_title)
+        layout.addWidget(page_subtitle)
+
+        workspace = QFrame()
+        workspace.setObjectName("SettingsWorkspace")
+        workspace.setStyleSheet(
+            "QFrame#SettingsWorkspace{background:" + self._pal['card']
+            + ";border:1px solid " + self._pal['border']
+            + ";border-radius:16px;}")
+        self._workspace = workspace
+        workspace_layout = QHBoxLayout(workspace)
+        workspace_layout.setContentsMargins(0, 0, 0, 0)
+        workspace_layout.setSpacing(0)
+
+        nav_panel = QFrame()
+        nav_panel.setObjectName("SettingsCategoryRail")
+        nav_panel.setFixedWidth(205)
+        nav_panel.setStyleSheet(
+            "QFrame#SettingsCategoryRail{background:" + self._pal['card2']
+            + ";border:none;border-right:1px solid " + self._pal['border']
+            + ";border-top-left-radius:16px;border-bottom-left-radius:16px;}")
+        self._nav_panel = nav_panel
+        nav_layout = QVBoxLayout(nav_panel)
+        nav_layout.setContentsMargins(12, 16, 12, 16)
+        nav_layout.setSpacing(5)
+        global_label = QLabel("APLIKÁCIA")
+        global_label.setObjectName("SettingsCategoryLabel")
+        nav_layout.addWidget(global_label)
+        self._settings_nav_buttons = []
+
+        def add_nav(text, section):
+            button = QPushButton(text)
+            button.setObjectName("SettingsCategoryButton")
+            button.setCheckable(True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.clicked.connect(
+                lambda _checked=False, key=section, target=button:
+                self._show_settings_section(key, target))
+            nav_layout.addWidget(button)
+            self._settings_nav_buttons.append(button)
+            return button
+
+        default_nav = add_nav("Globálne", "global")
+        add_nav("Ovládanie", "controls")
+        add_nav("SDK", "sdk")
+        plugins_label = QLabel("PLUGINY")
+        plugins_label.setObjectName("SettingsCategoryLabel")
+        nav_layout.addSpacing(13)
+        nav_layout.addWidget(plugins_label)
+        add_nav("Adaptívny tempomat", "controls")
+        add_nav("Lane Control", "controls")
+        nav_layout.addStretch()
+        self._settings_category_labels = (global_label, plugins_label)
+        workspace_layout.addWidget(nav_panel)
+
+        content_panel = QFrame()
+        content_panel.setObjectName("SettingsContentPanel")
+        content_layout = QVBoxLayout(content_panel)
+        content_layout.setContentsMargins(20, 18, 20, 20)
+        content_layout.setSpacing(15)
+        self._content_panel = content_panel
 
         hero = QFrame()
         hero.setObjectName("SettingsHero")
@@ -133,7 +206,7 @@ class SettingsMenu(QWidget):
         hero_text.addWidget(self._hero_title)
         hero_text.addWidget(self._hero_subtitle)
         hero_layout.addLayout(hero_text, 1)
-        layout.addWidget(hero)
+        content_layout.addWidget(hero)
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(16)
@@ -174,6 +247,7 @@ class SettingsMenu(QWidget):
         acc_layout.addWidget(self.limit_toggle)
 
         grid.addWidget(acc_frame, 0, 0)
+        self._acc_frame = acc_frame
 
         # --- Steering Section ---
         steer_frame, steer_layout = self._section_card(
@@ -196,6 +270,7 @@ class SettingsMenu(QWidget):
         steer_layout.addWidget(self.sens_slider)
         steer_layout.addStretch()
         grid.addWidget(steer_frame, 0, 1)
+        self._steer_frame = steer_frame
 
         # --- Appearance Section (theme + language) ---
         app_frame, app_layout = self._section_card(
@@ -249,6 +324,7 @@ class SettingsMenu(QWidget):
         app_layout.addWidget(self.cov_label)
 
         grid.addWidget(app_frame, 1, 0)
+        self._app_frame = app_frame
 
         # --- Sound (startup chime) ---
         sound_frame, snd_lay = self._section_card(
@@ -263,10 +339,30 @@ class SettingsMenu(QWidget):
         performance_hint.setWordWrap(True)
         snd_lay.addWidget(performance_hint)
         grid.addWidget(sound_frame, 1, 1)
+        self._sound_frame = sound_frame
+
+        sdk_frame, sdk_layout = self._section_card(
+            "plugins", "SCS SDK a runtime",
+            "Pripojenie telemetrie, virtuálneho ovládača a herných pluginov")
+        sdk_info = QLabel(
+            "UltraPilot kontroluje potrebné SDK knižnice pri štarte. Ak niektorá "
+            "súčasť chýba, aplikácia zostane bezpečne vypnutá a uvedie presný dôvod.")
+        sdk_info.setWordWrap(True)
+        sdk_info.setStyleSheet("font-size:12px;color:" + self._pal['muted'] + ";")
+        self._themed_captions.append(sdk_info)
+        sdk_layout.addWidget(sdk_info)
+        grid.addWidget(sdk_frame, 2, 0, 1, 2)
+        self._sdk_frame = sdk_frame
 
         self._perf_page = None
-        layout.addLayout(grid)
+        content_layout.addLayout(grid)
+        content_layout.addStretch()
+        workspace_layout.addWidget(content_panel, 1)
+        layout.addWidget(workspace)
         layout.addStretch()
+        default_nav.setChecked(True)
+        self._show_settings_section("global", default_nav)
+        self._restyle_workspace()
 
         # Publish initial values so plugins pick them up immediately.
         self.update_acc_speed(init_speed)
@@ -275,6 +371,51 @@ class SettingsMenu(QWidget):
         self.update_invert(self.invert_toggle.isChecked())
         self.update_sensitivity(init_sens)
         self.update_language(self.lang_combo.currentIndex())
+
+    def _show_settings_section(self, section, selected_button=None):
+        """Switch the nested settings board without rebuilding live controls."""
+        for button in getattr(self, "_settings_nav_buttons", []):
+            button.setChecked(button is selected_button)
+        groups = {
+            "global": (self._app_frame, self._sound_frame),
+            "controls": (self._acc_frame, self._steer_frame),
+            "sdk": (self._sdk_frame,),
+        }
+        visible = set(groups.get(section, groups["global"]))
+        for frame in (self._acc_frame, self._steer_frame, self._app_frame,
+                      self._sound_frame, self._sdk_frame):
+            frame.setVisible(frame in visible)
+        headings = {
+            "global": ("Globálne nastavenia",
+                       "Vzhľad, jazyk a správanie celej aplikácie."),
+            "controls": ("Nastavenia ovládania",
+                         "Adaptívny tempomat a výstup riadenia kamióna."),
+            "sdk": ("SDK a runtime",
+                    "Stav rozhraní potrebných na komunikáciu s ETS2."),
+        }
+        title, subtitle = headings.get(section, headings["global"])
+        self._hero_title.setText(title)
+        self._hero_subtitle.setText(subtitle)
+
+    def _restyle_workspace(self):
+        p = self._pal
+        self._workspace.setStyleSheet(
+            "QFrame#SettingsWorkspace{background:" + p['card']
+            + ";border:1px solid " + p['border'] + ";border-radius:16px;}"
+            "QLabel#SettingsCategoryLabel{color:" + p['muted']
+            + ";font-size:10px;font-weight:700;padding:5px 8px;border:none;}"
+            "QPushButton#SettingsCategoryButton{background:transparent;color:"
+            + p['text'] + ";border:1px solid transparent;border-radius:8px;"
+            "padding:8px 10px;text-align:left;font-size:12px;font-weight:550;}"
+            "QPushButton#SettingsCategoryButton:hover{background:" + p['card']
+            + ";border-color:" + p['border'] + ";}"
+            "QPushButton#SettingsCategoryButton:checked{background:" + p['card']
+            + ";border-color:" + p['border'] + ";font-weight:700;color:"
+            + p['text'] + ";}")
+        self._nav_panel.setStyleSheet(
+            "QFrame#SettingsCategoryRail{background:" + p['card2']
+            + ";border:none;border-right:1px solid " + p['border']
+            + ";border-top-left-radius:16px;border-bottom-left-radius:16px;}")
 
     def update_theme(self, name):
         self.state.set("ui_theme", name.lower())
@@ -293,6 +434,11 @@ class SettingsMenu(QWidget):
         self.setStyleSheet(
             "QWidget#SettingsPage{background-color:" + p['bg']
             + ";color:" + p['text'] + ";font-family:'Segoe UI';}")
+        self._page_title.setStyleSheet(
+            "font-size:24px;font-weight:800;color:" + p['text'] + ";")
+        self._page_subtitle.setStyleSheet(
+            "font-size:12px;color:" + p['muted'] + ";")
+        self._restyle_workspace()
         for fr in getattr(self, "_themed_frames", []):
             fr.setStyleSheet(_frame_qss(p))
         for ttl in getattr(self, "_themed_titles", []):

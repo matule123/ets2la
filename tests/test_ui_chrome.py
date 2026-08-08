@@ -122,13 +122,31 @@ class UiChromeTests(unittest.TestCase):
     def test_settings_use_responsive_cards_and_vector_header_icon(self):
         settings = SettingsMenu(State({"ui_theme": "light"}))
         cards = settings.findChildren(QFrame, "SettingsCard")
-        self.assertEqual(len(cards), 4)
+        self.assertEqual(len(cards), 5)
         labels = [label.text() for label in settings.findChildren(QLabel)]
         self.assertIn("Nastavenia", labels)
         self.assertNotIn("AR zobrazenie", labels)
         self.assertFalse(hasattr(settings, "ar_toggle"))
         self.assertFalse(any(text.startswith("⚙") for text in labels))
         self.assertIn("QWidget#SettingsPage", settings.styleSheet())
+        settings.close()
+
+    def test_settings_use_nested_reference_workspace_and_category_rail(self):
+        settings = SettingsMenu(State({"ui_theme": "light"}))
+        workspace = settings.findChild(QFrame, "SettingsWorkspace")
+        rail = settings.findChild(QFrame, "SettingsCategoryRail")
+        self.assertIsNotNone(workspace)
+        self.assertIsNotNone(rail)
+        self.assertEqual(rail.width(), 205)
+        buttons = settings.findChildren(QPushButton, "SettingsCategoryButton")
+        self.assertGreaterEqual(len(buttons), 5)
+        self.assertEqual(buttons[0].text(), "Globálne")
+        self.assertTrue(buttons[0].isChecked())
+        self.assertTrue(settings._app_frame.isVisibleTo(settings))
+        buttons[1].click()
+        self.app.processEvents()
+        self.assertTrue(settings._acc_frame.isVisibleTo(settings))
+        self.assertFalse(settings._app_frame.isVisibleTo(settings))
         settings.close()
 
     def test_onboarding_language_page_uses_two_column_status_cards(self):
@@ -363,6 +381,13 @@ class UiChromeTests(unittest.TestCase):
               mock.patch.object(app_module.os.path, "exists", return_value=True)):
             plugins = PluginsPage(state)
             self.assertEqual(len(plugins.findChildren(QFrame, "PluginCard")), 3)
+            self.assertIsNotNone(
+                plugins.findChild(QFrame, "PluginCatalogue"))
+            authors = plugins.findChildren(QLabel, "PluginAuthor")
+            self.assertEqual(len(authors), 3)
+            self.assertTrue(all(label.text() == "matu_le33" for label in authors))
+            self.assertEqual(
+                len(plugins.findChildren(QLabel, "PluginIcon")), 3)
             self.assertEqual(plugins.search.placeholderText(), "Hľadať plugin…")
             labels = [label.text() for label in plugins.findChildren(QLabel)]
             self.assertTrue(any(text.startswith("Aktívne pluginy") for text in labels))

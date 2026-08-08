@@ -279,11 +279,22 @@ class PluginsPage(Page):
         self.summary.setObjectName("PluginSummary")
         self.summary.setAlignment(Qt.AlignmentFlag.AlignCenter)
         toolbar.addWidget(self.summary)
-        self.layout.addLayout(toolbar)
+
+        self.catalog_shell = QFrame()
+        self.catalog_shell.setObjectName("PluginCatalogue")
+        self.catalog_shell.setStyleSheet(
+            "QFrame#PluginCatalogue{background:" + self._pal['card']
+            + ";border:1px solid " + self._pal['border']
+            + ";border-radius:16px;}")
+        self.cards_layout = QVBoxLayout(self.catalog_shell)
+        self.cards_layout.setContentsMargins(18, 17, 18, 19)
+        self.cards_layout.setSpacing(14)
+        self.cards_layout.addLayout(toolbar)
 
         self.cards_host = QWidget()
         self.cards_host.setObjectName("PluginCardsHost")
-        self.layout.addWidget(self.cards_host)
+        self.cards_layout.addWidget(self.cards_host)
+        self.layout.addWidget(self.catalog_shell)
         self.layout.addStretch()
         self.refresh_plugins()
 
@@ -294,6 +305,10 @@ class PluginsPage(Page):
             "font-size:24px;font-weight:800;color:" + self._pal['text'] + ";")
         self.subtitle.setStyleSheet(
             "font-size:12px;color:" + self._pal['muted'] + ";margin-bottom:5px;")
+        self.catalog_shell.setStyleSheet(
+            "QFrame#PluginCatalogue{background:" + self._pal['card']
+            + ";border:1px solid " + self._pal['border']
+            + ";border-radius:16px;}")
         self.refresh_plugins()
 
     def refresh_plugins(self):
@@ -347,7 +362,7 @@ class PluginsPage(Page):
             empty.setStyleSheet("padding:30px;color:" + self._pal['muted'] + ";")
             listing.addWidget(empty)
         old_host = self.cards_host
-        self.layout.replaceWidget(old_host, host)
+        self.cards_layout.replaceWidget(old_host, host)
         self.cards_host = host
         old_host.setParent(None)
         old_host.deleteLater()
@@ -358,34 +373,59 @@ class PluginsPage(Page):
                           + ";font-size:13px;font-weight:750;margin-top:5px;")
         return lbl
 
-    _DESC = {
-        "autopilot": "Steering + throttle/brake control",
-        "acc": "Adaptive cruise control",
-        "collision": "Emergency braking & collision avoidance",
-        "map": "Coordinate / map navigation",
-        "tts": "Voice announcements",
-        "discord": "Discord rich presence",
-        "ecodrive": "Fuel-saving throttle smoothing",
-        "hud": "On-screen HUD elements",
+    _PLUGIN_META = {
+        "acc": ("Adaptívny tempomat", "Automaticky prispôsobuje rýchlosť a bezpečný odstup od vozidla pred kamiónom.", "dashboard"),
+        "autopilot": ("Autopilot", "Spája navigačnú trajektóriu s riadením, plynom a brzdou počas asistovanej jazdy.", "navigation"),
+        "collision": ("Ochrana pred kolíziou", "Sleduje riziká pred vozidlom a pri bezprostrednom nebezpečenstve vyžiada núdzové brzdenie.", "about"),
+        "discord": ("Discord Rich Presence", "Zobrazuje aktuálny stav UltraPilotu a jazdy v používateľskom profile Discord.", "visualization"),
+        "drivepolicy": ("Jazdná politika", "Vyhodnocuje dopravnú situáciu a zjednocuje bezpečnostné rozhodnutia asistenčných systémov.", "plugins"),
+        "ecodrive": ("Eco Drive", "Vyhladzuje požiadavky na plyn a pomáha obmedziť zbytočnú spotrebu paliva.", "performance"),
+        "hud": ("HUD", "Zobrazuje stav jazdy, navigáciu a upozornenia priamo nad herným obrazom.", "visualization"),
+        "lanecontrol": ("Lane Control", "Udržiava kamión v potvrdenom jazdnom pruhu podľa autoritatívnej trajektórie.", "steering"),
+        "map": ("Mapová navigácia", "Načítava mapové dáta, lokalizuje pruh a publikuje spoločný navigačný snapshot.", "navigation"),
+        "toll": ("Mýto a brány", "Pomáha pri bezpečnom prejazde mýtnymi bránami a súvisiacimi cestnými obmedzeniami.", "dashboard"),
+        "tts": ("Hlasové upozornenia", "Číta dôležité navigačné a bezpečnostné oznámenia bez odvádzania pozornosti od jazdy.", "about"),
+        "turnsignals": ("Smerovky", "Ovláda smerovky podľa potvrdeného smeru trasy a rešpektuje aktívne výstražné svetlá.", "plugins"),
     }
+    _DESC = {name: values[1] for name, values in _PLUGIN_META.items()}
 
     def _plugin_card(self, name, enabled):
         card = QFrame()
         card.setObjectName("PluginCard")
-        card.setMinimumHeight(102)
+        card.setMinimumHeight(126)
         card.setStyleSheet(
             "QFrame#PluginCard{background:" + self._pal['card']
             + ";border:1px solid " + self._pal['border']
             + ";border-radius:12px;}QFrame#PluginCard:hover{border-color:#A7B0BA;}")
         box = QVBoxLayout(card)
-        box.setContentsMargins(15, 13, 15, 13)
-        box.setSpacing(6)
+        box.setContentsMargins(15, 14, 15, 14)
+        box.setSpacing(8)
         head = QHBoxLayout()
-        title = QLabel(name.replace("_", " ").title())
+        meta = self._PLUGIN_META.get(
+            name, (name.replace("_", " ").title(),
+                   "Doplnková funkcia UltraPilotu.", "plugins"))
+        from ui.icons import line_icon
+        icon = QLabel()
+        icon.setObjectName("PluginIcon")
+        icon.setFixedSize(34, 34)
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon.setPixmap(line_icon(meta[2], self._pal['title'], 21).pixmap(21, 21))
+        icon.setStyleSheet(
+            "background:" + self._pal['card2'] + ";border:1px solid "
+            + self._pal['border'] + ";border-radius:9px;")
+        head.addWidget(icon)
+        title = QLabel(meta[0])
         title.setStyleSheet("font-size:14px;font-weight:750;color:"
                             + self._pal['text'] + ";")
         head.addWidget(title)
         head.addStretch()
+        author = QLabel("matu_le33")
+        author.setObjectName("PluginAuthor")
+        author.setStyleSheet(
+            "background:" + self._pal['card2'] + ";color:" + self._pal['muted']
+            + ";border:1px solid " + self._pal['border']
+            + ";border-radius:7px;padding:4px 8px;font-size:10px;font-weight:650;")
+        head.addWidget(author)
         action = QPushButton("Vypnúť" if enabled else "Zapnúť")
         action.setObjectName("PluginAction")
         action.setFixedHeight(28)
@@ -403,7 +443,7 @@ class PluginsPage(Page):
                 "QPushButton:hover{border-color:#10B981;color:#059669;}")
         head.addWidget(action)
         box.addLayout(head)
-        desc = QLabel(self._DESC.get(name, "Doplnková funkcia UltraPilotu."))
+        desc = QLabel(meta[1])
         desc.setWordWrap(True)
         desc.setStyleSheet("font-size:11px;color:" + self._pal['muted'] + ";")
         box.addWidget(desc)
