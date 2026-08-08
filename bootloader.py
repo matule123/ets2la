@@ -213,12 +213,20 @@ def _ensure_vigembus():
 
 
 def main():
+    from core.logger import (finish_session_log, print_startup_banner,
+                             session_log_offset)
+    log_offset = session_log_offset()
     try:
         from core.logger import setup as _log_setup
         _log_setup()
     except Exception:
         logging.basicConfig(level=logging.INFO)
-    logging.info("UltraPilot Bootloader starting...")
+    try:
+        from core.update_check import VERSION, git_commit
+        print_startup_banner(VERSION, git_commit())
+    except Exception:
+        print_startup_banner()
+    logging.info("Inicializujem runtime komponenty UltraPilotu")
     _ensure_game_dlls()
     _ensure_vigembus()
 
@@ -290,6 +298,8 @@ def main():
                         processes.pop(name, None)
     except KeyboardInterrupt:
         shutdown()
+    finally:
+        finish_session_log(log_offset)
 
 
 if __name__ == "__main__":

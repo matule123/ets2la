@@ -11,6 +11,7 @@ formatter if ``rich`` is not installed so logging never breaks.
 """
 import logging
 import os
+import re
 import sys
 
 # Enable ANSI colours on Windows terminals (best effort).
@@ -20,7 +21,7 @@ except Exception:
     pass
 
 
-def _ensure_windows_console():
+def ensure_windows_console():
     """Create the one main runtime console for a frozen GUI build."""
     # Installed source builds launch through pythonw.exe (stdout=None), while
     # frozen builds use a GUI executable. Both need an allocated console. A
@@ -52,6 +53,48 @@ def _ensure_windows_console():
             k32.SetConsoleMode(handle, mode.value | 0x0004)
     except Exception:
         pass
+
+
+def is_elevated_windows_process():
+    """Return True only when the current Windows token is elevated."""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def print_elevated_runtime_warning(input_fn=None):
+    """Explain why an elevated runtime is refused and wait for acknowledgement."""
+    ensure_windows_console()
+    stream = sys.stdout
+    print("\n\033[91m┌─ UltraPilot sa nespustí ako administrátor ───────────────┐\033[0m",
+          file=stream)
+    print("\033[91m│\033[0m Aplikácia ani jej log nepotrebujú zvýšené oprávnenia.", file=stream)
+    print("\033[91m│\033[0m Spusť UltraPilot normálne cez jeho odkaz v ponuke Štart.", file=stream)
+    print("\033[91m└───────────────────────────────────────────────────────────┘\033[0m",
+          file=stream)
+    prompt = "\nStlač Enter pre zatvorenie…"
+    try:
+        (input_fn or input)(prompt)
+    except (EOFError, OSError):
+        pass
+
+
+def print_startup_banner(version="", commit=""):
+    """Render the human startup header outside the timestamped log stream."""
+    label = "UltraPilot"
+    if version:
+        label += "  v" + str(version).lstrip("v")
+    if commit:
+        label += "  ·  " + str(commit)[:7]
+    print("\n\033[94m╭──────────────────────────────────────────────────────────╮\033[0m")
+    print("\033[94m│\033[0m  " + label.ljust(56) + "\033[94m│\033[0m")
+    print("\033[94m│\033[0m  Pripravujem bezpečné jazdné systémy a pluginy…".ljust(58)
+          + "\033[94m│\033[0m")
+    print("\033[94m╰──────────────────────────────────────────────────────────╯\033[0m\n")
 
 
 class _ETS2LAFormatter(logging.Formatter):
@@ -86,14 +129,157 @@ class _ETS2LAFormatter(logging.Formatter):
 
 
 def _make_console_handler():
+    try:
+        from rich.console import Console
+        from rich.logging import RichHandler
+        handler = RichHandler(
+            console=Console(), rich_tracebacks=True, markup=False,
+            show_time=True, show_level=True, show_path=True,
+            log_time_format="%H:%M:%S",
+        )
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        return handler
+    except ImportError:
+        pass
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(_ETS2LAFormatter())
     return handler
 
 
+def session_log_offset():
+    """Capture a byte boundary so shutdown reports only this application run."""
+    try:
+        from core.paths import app_dir
+        path = os.path.join(app_dir(), "ultrapilot.log")
+        return os.path.getsize(path) if os.path.isfile(path) else 0
+    except OSError:
+        return 0
+
+
+_LEVEL_LINE = re.compile(
+    r"\s(?P<level>WARNING|ERROR|CRITICAL)\s+"
+    r"(?P<source>\S+)\s+(?P<message>.*)$")
+_LOADED_PLUGIN = re.compile(r"Loaded plugin:\s*([^\s(]+)", re.IGNORECASE)
+_MESSAGE_PLUGIN = re.compile(
+    r"\[plugin:([^\]]+)\]|plugin\s+['\"]?([A-Za-z0-9_.-]+)",
+    re.IGNORECASE)
+
+
+def _session_log_lines(offset):
+    for handler in logging.getLogger().handlers:
+        try:
+            handler.flush()
+        except Exception:
+            pass
+    try:
+        from core.paths import app_dir
+        path = os.path.join(app_dir(), "ultrapilot.log")
+        with open(path, "rb") as stream:
+            stream.seek(max(0, int(offset)))
+            return stream.read().decode("utf-8", errors="replace").splitlines()
+    except (OSError, ValueError):
+        return []
+
+
+def collect_plugin_issues(offset=0, lines=None):
+    """Collect per-plugin warning/error counts from only the current session."""
+    lines = list(_session_log_lines(offset) if lines is None else lines)
+    known_plugins = set()
+    for line in lines:
+        match = _LOADED_PLUGIN.search(line)
+        if match:
+            known_plugins.add(match.group(1).strip().lower())
+
+    issues = {}
+    for line in lines:
+        match = _LEVEL_LINE.search(line)
+        if not match:
+            continue
+        level = match.group("level")
+        source = match.group("source").strip()
+        message = match.group("message").strip()
+        plugin = None
+        named = _MESSAGE_PLUGIN.search(message)
+        if named:
+            plugin = (named.group(1) or named.group(2) or "").strip().lower()
+        elif source.lower().startswith("plugin-"):
+            plugin = source[7:].strip().lower()
+        elif source.lower() in known_plugins:
+            plugin = source.lower()
+        if not plugin:
+            continue
+        bucket = issues.setdefault(plugin, {
+            "warnings": 0, "errors": 0,
+            "warning_messages": [], "error_messages": [],
+        })
+        is_error = level in ("ERROR", "CRITICAL")
+        key = "errors" if is_error else "warnings"
+        messages_key = "error_messages" if is_error else "warning_messages"
+        bucket[key] += 1
+        if message not in bucket[messages_key] and len(bucket[messages_key]) < 2:
+            bucket[messages_key].append(message)
+    return issues
+
+
+def _issue_frame(title, rows, colour=""):
+    reset = "\033[0m" if colour else ""
+    width = 64
+    output = [colour + "┌─ " + title + " " + "─" * max(
+        1, width-len(title)-4) + "┐" + reset]
+    for plugin, count, sample in rows:
+        count_text = f"{count}×"
+        output.append(colour + "│ " + (plugin + "  " + count_text)[:width-2].ljust(
+            width-2) + " │" + reset)
+        if sample:
+            clean = " ".join(sample.split())
+            output.append(colour + "│   " + clean[:width-5].ljust(width-5)
+                          + " │" + reset)
+    output.append(colour + "└" + "─" * width + "┘" + reset)
+    return "\n".join(output)
+
+
+def format_plugin_issue_summary(issues, colour=True):
+    """Return ETS2LA-style amber/red frames for affected plugins."""
+    warning_rows, error_rows = [], []
+    for plugin in sorted(issues):
+        item = issues[plugin]
+        if item.get("warnings"):
+            warning_rows.append((plugin, item["warnings"],
+                                 (item.get("warning_messages") or [""])[0]))
+        if item.get("errors"):
+            error_rows.append((plugin, item["errors"],
+                               (item.get("error_messages") or [""])[0]))
+    frames = []
+    if warning_rows:
+        frames.append(_issue_frame(
+            "PLUGINY S UPOZORNENÍM", warning_rows,
+            "\033[38;5;214m" if colour else ""))
+    if error_rows:
+        frames.append(_issue_frame(
+            "PLUGINY S CHYBOU", error_rows,
+            "\033[91m" if colour else ""))
+    return "\n\n".join(frames)
+
+
+def finish_session_log(offset=0, input_fn=None, colour=True):
+    """Print the plugin summary and hold the console only when issues exist."""
+    issues = collect_plugin_issues(offset)
+    summary = format_plugin_issue_summary(issues, colour=colour)
+    if not summary:
+        return issues
+    print("\nKontrola pluginov za toto spustenie:\n")
+    print(summary)
+    try:
+        (input_fn or input)(
+            "\nLog zostáva otvorený kvôli problémom. Stlač Enter pre zatvorenie…")
+    except (EOFError, OSError):
+        pass
+    return issues
+
+
 def setup(level=logging.INFO):
     """Install the rich console handler on the root logger + a shared log file."""
-    _ensure_windows_console()
+    ensure_windows_console()
     root = logging.getLogger()
     root.setLevel(level)
     for h in list(root.handlers):

@@ -12,6 +12,28 @@ from PyQt6.QtTest import QTest
 import installer
 
 
+def test_launcher_keeps_runtime_console_attached_and_visible(tmp_path, monkeypatch):
+    root = tmp_path / "UltraPilot"
+    root.mkdir()
+    main_py = root / "main.py"
+    main_py.write_text("", encoding="utf-8")
+    worker = installer.InstallWorker(str(root), "sk")
+    calls = []
+    monkeypatch.setattr(installer.subprocess, "run",
+                        lambda command, **kwargs: calls.append((command, kwargs)))
+
+    worker._make_shortcuts(str(main_py), "source")
+
+    launcher = (root / "UltraPilot.bat").read_text(encoding="utf-8")
+    assert 'py -3 "main.py"' in launcher
+    assert "start \"\" /b" not in launcher
+    assert "exit /b %errorlevel%" in launcher
+    assert calls
+    powershell = calls[0][0][-1]
+    assert "$s.WindowStyle=1;" in powershell
+    assert "runas" not in powershell.lower()
+
+
 def test_release_version_is_042_everywhere():
     from core import update_check
     assert installer.APP_VERSION == "0.4.2"

@@ -1078,9 +1078,10 @@ class InstallWorker(QThread):
         try:
             with open(bat_path, "w", encoding="utf-8") as f:
                 f.write("@echo off\r\n")
+                f.write("title UltraPilot - Runtime log\r\n")
                 f.write("cd /d \"" + self.install_path + "\"\r\n")
-                f.write("start \"\" /b py -3 " + main_py + "\r\n")
-                f.write("exit\r\n")
+                f.write("py -3 \"" + main_py + "\"\r\n")
+                f.write("exit /b %errorlevel%\r\n")
         except Exception as e:
             self.log.emit("  launcher: " + str(e))
             bat_path = exe_path  # fall back to the script directly
@@ -1097,7 +1098,7 @@ class InstallWorker(QThread):
                     '$s=(New-Object -ComObject WScript.Shell).CreateShortcut("' + lnk + '");'
                     '$s.TargetPath="' + bat_path + '";'
                     '$s.WorkingDirectory="' + self.install_path + '";'
-                    '$s.WindowStyle=7;'
+                    '$s.WindowStyle=1;'
                     + ('$s.IconLocation="' + icon + '";' if os.path.exists(icon) else "")
                     + '$s.Save()'
                 )
@@ -2206,7 +2207,10 @@ class InstallerWindow(QWidget):
             if sys.platform == "win32":
                 if os.path.exists(bat):
                     # Use the launcher .bat — it sets cwd and runs py -3 main.py.
-                    os.startfile(bat)
+                    # Explorer acts as a normal-user launch broker, so an
+                    # elevated installer does not elevate the runtime console.
+                    subprocess.Popen(["explorer.exe", bat], cwd=install_dir,
+                                     creationflags=_NO_WIN)
                 else:
                     # No launcher (shortcuts failed) — run py directly with cwd.
                     subprocess.Popen(["py", "-3", "main.py"],
