@@ -21,9 +21,12 @@ def lane(road_uid, x, direction=1, height=0.0, gps=(10, 11), lane_index=0):
 
 def path_lane(road_uid, start_uid, end_uid, coordinates, *, lane_type="road",
               lane_index=0, prefab_token=None, connector_index=None,
-              elevation_layer=0):
+              connector_path=None, elevation_layer=0):
+    if connector_path is None:
+        connector_path = (() if connector_index is None
+                          else (connector_index,))
     lane_id = LaneId(road_uid, 1, lane_index, prefab_token, connector_index,
-                     (() if connector_index is None else (connector_index,)))
+                     tuple(connector_path))
     travelled = 0.0
     points = []
     for index, (x, y, z) in enumerate(coordinates):
@@ -379,6 +382,91 @@ class LaneLocatorTests(unittest.TestCase):
         self.assertEqual(first.lane_id, prefab.lane_id)
         self.assertEqual(still_prefab.lane_id, prefab.lane_id)
         self.assertEqual(on_road.lane_id, road_out.lane_id)
+
+    def test_real_shared_prefab_navcurve_uses_authoritative_exit_until_split(self):
+        """Reproduce the 21:13 blkw_1405i connector-3 LaneId tie.
+
+        Paths (3, 4) and (3, 5, 6) are exactly coincident on navCurve 3.
+        The latter belongs to revision 7; choosing the former by lane-index
+        order caused the false 4.50 m lane-change build and then an
+        outside-preserved-corridor shutdown.
+        """
+        placed_uid = 5337536179007298954
+        incoming = path_lane(
+            placed_uid, 5337536096207503952, placed_uid,
+            ((0.0, 0.0, 0.0), (0.0, 0.0, 20.0)),
+            lane_type="prefab", lane_index=0,
+            prefab_token="dlc_blkw_57", connector_index=16,
+            connector_path=(16, 9, 14, 5))
+        wrong_exit = path_lane(
+            placed_uid, placed_uid, 5337536179418340745,
+            ((0.0, 0.0, 20.0), (0.0, 0.0, 30.0),
+             (-8.0, 0.0, 42.0)),
+            lane_type="prefab", lane_index=0,
+            prefab_token="blkw_1405i", connector_index=3,
+            connector_path=(3, 4))
+        revision_exit = path_lane(
+            placed_uid, placed_uid, 5337536179418340745,
+            ((0.0, 0.0, 20.0), (0.0, 0.0, 30.0),
+             (8.0, 0.0, 42.0)),
+            lane_type="prefab", lane_index=1,
+            prefab_token="blkw_1405i", connector_index=3,
+            connector_path=(3, 5, 6))
+        network = TransitionNetwork(
+            (), (incoming, wrong_exit, revision_exit), connected=(
+                (incoming.lane_id, wrong_exit.lane_id),
+                (incoming.lane_id, revision_exit.lane_id),
+            ))
+        locator = LaneLocator(network)
+        first = locator.locate(
+            (0.0, 0.0, 10.0), math.pi,
+            (5337536096207503952, placed_uid, 5337536179418340745),
+            authoritative_segments=(incoming, revision_exit))
+        self.assertEqual(first.lane_id, incoming.lane_id)
+
+        diagnostics = {}
+        shared_curve = locator.locate(
+            (0.0, 0.0, 25.0), math.pi,
+            (placed_uid, 5337536179418340745),
+            authoritative_segments=(incoming, revision_exit),
+            diagnostics=diagnostics)
+        self.assertIsNotNone(shared_curve)
+        self.assertEqual(shared_curve.lane_id, revision_exit.lane_id)
+        self.assertEqual(
+            shared_curve.switch_reason,
+            "authoritative_shared_prefab_navcurve")
+        proof = diagnostics["authoritative_prefab_tie_break"]
+        self.assertEqual(proof["shared_navcurve_index"], 3)
+        self.assertEqual(proof["rejected_connector_path"], [3, 4])
+        self.assertEqual(proof["selected_connector_path"], [3, 5, 6])
+        self.assertLessEqual(proof["position_residual_m"], 0.05)
+
+        # Once the truck is physically on the wrong arm, the projections no
+        # longer coincide. The immutable revision is not bent or teleported
+        # across to rescue it; localisation closes instead.
+        self.assertIsNone(locator.locate(
+            (-6.0, 0.0, 39.0), math.atan2(8.0, -12.0),
+            (placed_uid, 5337536179418340745),
+            authoritative_segments=(incoming, revision_exit)))
+
+        # A repeated occurrence of the same authoritative connector cannot
+        # prove which lap is current. It must stay closed instead of silently
+        # reverting to the non-authoritative (3, 4) branch.
+        locator = LaneLocator(network)
+        locator.locate(
+            (0.0, 0.0, 10.0), math.pi,
+            (5337536096207503952, placed_uid, 5337536179418340745))
+        repeated_diagnostics = {}
+        self.assertIsNone(locator.locate(
+            (0.0, 0.0, 25.0), math.pi,
+            (placed_uid, 5337536179418340745),
+            authoritative_segments=(
+                incoming, revision_exit, revision_exit),
+            diagnostics=repeated_diagnostics))
+        self.assertEqual(repeated_diagnostics["outcome"], "ambiguous")
+        self.assertEqual(
+            repeated_diagnostics["authoritative_prefab_tie_break"]["reason"],
+            "ambiguous_authoritative_prefab_navcurve")
 
     def test_validated_path_transition_survives_trimmed_runtime_graph_edge(self):
         """A rolling prefix must not erase an already validated transition.

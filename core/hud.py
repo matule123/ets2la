@@ -275,6 +275,80 @@ def _continuous_lane_chunks(points, max_gap=8.0):
     return chunks
 
 
+def _route_surface_chunks(points, surface_chords, *, allowed_kinds=None,
+                          centreline_tolerance_m=None,
+                          horizontal_margin_m=0.35,
+                          max_vertical_m=0.75, max_gap=8.0):
+    """Keep existing route samples only where real HUD asphalt proves them.
+
+    ``surface_chords`` contains truck-space map chords as
+    ``(a, b, a_height, b_height, half_width, kind)``.  This function only
+    filters already validated LanePath samples; it never interpolates an
+    endpoint or draws a chord across missing map geometry.  A tighter
+    ``centreline_tolerance_m`` is used to identify the selected prefab
+    navCurve without accepting a neighbouring roundabout arm merely because
+    its wide asphalt ribbon overlaps on screen.
+    """
+    allowed = None if allowed_kinds is None else set(allowed_kinds)
+
+    def is_supported(point):
+        try:
+            pa, pl, ph = map(float, point[:3])
+        except (TypeError, ValueError, IndexError):
+            return False
+        if not all(math.isfinite(value) for value in (pa, pl, ph)):
+            return False
+        for chord in surface_chords or ():
+            try:
+                a, b, ah, bh, half_width, kind = chord
+                if allowed is not None and kind not in allowed:
+                    continue
+                da = float(b[0]) - float(a[0])
+                dl = float(b[1]) - float(a[1])
+                length2 = da * da + dl * dl
+                if length2 < 1e-8:
+                    continue
+                t = max(0.0, min(1.0, (
+                    (pa - float(a[0])) * da
+                    + (pl - float(a[1])) * dl) / length2))
+                qa = float(a[0]) + da * t
+                ql = float(a[1]) + dl * t
+                qh = float(ah) + (float(bh) - float(ah)) * t
+                horizontal = math.hypot(pa - qa, pl - ql)
+                limit = (float(centreline_tolerance_m)
+                         if centreline_tolerance_m is not None else
+                         max(0.0, float(half_width))
+                         + float(horizontal_margin_m))
+                if (horizontal <= limit
+                        and abs(ph - qh) <= float(max_vertical_m)):
+                    return True
+            except (TypeError, ValueError, IndexError, OverflowError):
+                continue
+        return False
+
+    chunks, current = [], []
+    for point in points or ():
+        supported = is_supported(point)
+        if supported and current:
+            # Endpoints on two separate pieces of asphalt are not proof for
+            # the chord between them. Checking its midpoint prevents the blue
+            # painter path from spanning even a small missing road section.
+            midpoint = tuple((float(first) + float(second)) * 0.5
+                             for first, second in zip(current[-1][:3],
+                                                      point[:3]))
+            supported = is_supported(midpoint)
+        if not supported:
+            if len(current) >= 2:
+                chunks.extend(_continuous_lane_chunks(
+                    current, max_gap=max_gap))
+            current = [point] if is_supported(point) else []
+            continue
+        current.append(point)
+    if len(current) >= 2:
+        chunks.extend(_continuous_lane_chunks(current, max_gap=max_gap))
+    return chunks
+
+
 def _selected_lane_context(points, behind_m=40.0, ahead_m=210.0,
                            max_join_m=40.0):
     """Return continuous selected-lane context around the ego position.
@@ -1069,16 +1143,22 @@ class UltraPilotHUD(QWidget):
             # identity + consecutive sample indices prevent any join between
             # unrelated arms, even if two projected curves cross on screen.
             display_paths = {}
+            surface_chords = []
             for (_, a, b, ah, bh, kind, segment_lanes, _divided, _dash_on,
                  _pillar, _rail_post, supplied_half, _suppress_markings,
                  path_key, path_index) in nearby:
                 if kind == "lane":
                     marking_half = 2.25
+                    surface_half = (supplied_half
+                                    if supplied_half is not None else 3.05)
                 else:
                     road_lanes = max(1, min(6, segment_lanes))
                     marking_half = (supplied_half
                                     if supplied_half is not None else
                                     road_lanes * 4.5 / 2.0 + .5)
+                    surface_half = marking_half
+                surface_chords.append((
+                    a, b, ah, bh, surface_half, kind))
                 display_paths.setdefault((kind, path_key), []).append((
                     path_index, (a[0], a[1], ah), (b[0], b[1], bh),
                     marking_half))
@@ -1119,9 +1199,11 @@ class UltraPilotHUD(QWidget):
                     float(point[0]), float(point[2]))
                 transformed.append((ahead, lateral,
                                     float(point[1]) - d["altitude"]))
-            # Keep a short, topology-validated tail behind the truck for the
-            # selected lane surface. The blue guidance remains forward-only.
-            # Never force a line to a distant/stale GPS point or bridge a gap.
+            # Keep a short, topology-validated tail behind the truck.  The
+            # broad road item already owns ordinary-road edges, so a second
+            # selected envelope is needed only on the exact prefab navCurve.
+            # Drawing it over the whole GPS route produced the visible "lane
+            # inside a lane" after every route calculation.
             lane_context, raw = _selected_lane_context(transformed)
             # Prefab routes are already densely sampled from their exact
             # Hermite curves.  Re-running Catmull-Rom here can overshoot the
@@ -1133,7 +1215,10 @@ class UltraPilotHUD(QWidget):
             lanes = max(1, d.get("lanes", 2))
             HALF = max(4.0, min(16.0, lanes * 3.6 / 2 + 1.5))
 
-            if len(lane_context) >= 2:
+            selected_prefab_chunks = _route_surface_chunks(
+                lane_context, surface_chords, allowed_kinds={"lane"},
+                centreline_tolerance_m=0.8, horizontal_margin_m=0.0)
+            if selected_prefab_chunks:
                 # 1) Filled asphalt ribbon (left edge → right edge), curving.
                 # Nearby map geometry already supplies the road boundaries.
                 # Keep the selected path as one clean blue line; a second
@@ -1147,7 +1232,7 @@ class UltraPilotHUD(QWidget):
                 half_lane = max(1.2, min(3.25,
                                         float(d.get("lane_width_m", 4.5)) * .5))
                 qp.setBrush(Qt.BrushStyle.NoBrush)
-                for chunk in _continuous_lane_chunks(lane_context):
+                for chunk in selected_prefab_chunks:
                     left, right = _lane_boundary_points(chunk, half_lane)
                     projected_pairs = [
                         (self._project(*left_point[:2], view, left_point[2]),
@@ -1176,8 +1261,14 @@ class UltraPilotHUD(QWidget):
                         if len(projected) >= 2:
                             qp.drawPath(_rounded_screen_path(projected))
 
-            if len(al) >= 2:
-                for chunk in _continuous_lane_chunks(al):
+            # Never let the blue line float through a part of the view for
+            # which the same HUD revision has no real road/prefab surface.
+            # This clips presentation only; the authoritative trajectory and
+            # every control consumer retain the complete immutable geometry.
+            route_chunks = ([al] if demo else _route_surface_chunks(
+                al, surface_chords))
+            if route_chunks:
+                for chunk in route_chunks:
                     projected = [self._project(a, l, view, height)
                                  for a, l, height in chunk]
                     projected = [p for p in projected if p is not None]

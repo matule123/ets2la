@@ -8,6 +8,7 @@ from core.navigation.lane_trajectory import (
     build_lane_trajectory, derive_display_points, validate_lane_trajectory,
 )
 from core.navigation.road_network import RoadNetwork
+from core.navigation.route import Route
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -670,6 +671,65 @@ class RealMapLaneDataTests(unittest.TestCase):
              first.centerline[-1].z),
             (second.centerline[0].x, second.centerline[0].y,
              second.centerline[0].z)), 1e-6)
+
+    def test_2026_08_08_real_r120_chain_keeps_curve_gain_out_of_straight_mode(self):
+        """Use the exact map items traversed during the 21:12 oscillation.
+
+        The 9.11 m road item between the two bends is genuine map geometry,
+        not a trajectory discontinuity to smooth away.  The adjacent R120
+        samples must therefore retain ordinary curve feedback instead of the
+        residual-error gain intended for a straight lane.
+        """
+        road_uids = (
+            5337536113609676589,
+            5337536130017842461,
+            5337536131288717604,
+            5337536096207503952,
+        )
+        lanes = [next(
+            lane for lane in self.net._build_lane_segments(
+                self.net._road_segment_by_uid[road_uid])
+            if lane.direction == 1 and lane.raw_lane_index == 0)
+            for road_uid in road_uids]
+        self.assertEqual(
+            [lane.centerline[-1].s for lane in lanes],
+            [35.36064611741185, 9.11056444890676,
+             66.73759020944699, 120.80795063702585])
+        for first, second in zip(lanes, lanes[1:]):
+            self.assertEqual(first.end_uid, second.start_uid)
+            self.assertLess(math.dist(
+                (first.centerline[-1].x, first.centerline[-1].y,
+                 first.centerline[-1].z),
+                (second.centerline[0].x, second.centerline[0].y,
+                 second.centerline[0].z)), 1e-6)
+
+        route_points = []
+        for lane in lanes:
+            route_points.extend(
+                (point.x, point.z)
+                for point in lane.centerline[bool(route_points):])
+        route = Route(route_points)
+        captured_radius_samples = []
+        for index in range(3, len(route.points) - 4):
+            position = route.points[index]
+            target = route.points[index + 3]
+            heading = math.atan2(
+                -(target[0] - position[0]),
+                -(target[1] - position[1]))
+            command = route.steering(
+                position, heading, 12.5,
+                cross_track_error_m=-1.258)
+            debug = route.last_steering_debug
+            curvature = abs(debug["local_curvature"])
+            radius = 1.0 / curvature if curvature > 1e-9 else 1e9
+            if 105.0 < radius < 140.0:
+                captured_radius_samples.append(radius)
+                self.assertAlmostEqual(
+                    debug["lane_recovery_multiplier"], 1.0, places=7)
+                self.assertFalse(debug["straight_recovery_active"])
+                self.assertLess(abs(debug["feedback"]), 0.20)
+                self.assertLess(abs(command), 0.32)
+        self.assertGreaterEqual(len(captured_radius_samples), 20)
 
     def test_known_prefab_pair_uses_full_lane_curve_chain(self):
         gps = (3764330771318505475, 3808790278165430272)

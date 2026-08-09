@@ -10,7 +10,8 @@ from core.hud import (UltraPilotHUD, _continuous_lane_chunks,
                       _hud_segment_has_bright_outline,
                       _hud_segment_is_selected_context,
                       _lane_boundary_points, _ordered_display_path_runs,
-                      _rounded_screen_path, _selected_lane_context,
+                      _rounded_screen_path, _route_surface_chunks,
+                      _selected_lane_context,
                       _traffic_light_truck_position,
                       _variable_lane_boundary_points)
 from core.sdk.scs_sdk import SCSTelemetry
@@ -125,7 +126,11 @@ class HudPoseStabilityTests(unittest.TestCase):
         painter = Painter()
         data = {
             "pos": (100.0, 200.0), "heading": 0.0, "speed_kmh": 20.0,
-            "altitude": 10.0, "road_segments": [], "traffic": [],
+            "altitude": 10.0, "road_segments": [[
+                [100.0, 200.0, 10.0], [104.0, 176.0, 10.0],
+                "road", 2, False, True, False, False, 5.0, False,
+                "r-real:0", 0,
+            ]], "traffic": [],
             "nav_path": [[100.0, 10.0, 200.0],
                          [100.0, 10.0, 194.0],
                          [101.0, 10.0, 188.0],
@@ -136,7 +141,10 @@ class HudPoseStabilityTests(unittest.TestCase):
         }
         hud._draw_driving_view(painter, View(), data)
         self.assertEqual(hud._road_scene_shift, 0.0)
-        self.assertGreaterEqual(painter.curves, 4)
+        # Two real road edges plus the three blue strokes.  The former full-
+        # route selected-lane envelope added two more white curves here and
+        # appeared as a narrower duplicate lane inside every ordinary road.
+        self.assertEqual(painter.curves, 5)
         self.assertEqual(painter.polylines, 0)
         self.assertEqual(UltraPilotHUD._matched_ego_lateral({
             "lane_revision": 2,
@@ -197,6 +205,45 @@ class HudPoseStabilityTests(unittest.TestCase):
         context, forward = _selected_lane_context(points)
         self.assertEqual(context, points[:3])
         self.assertEqual(forward, points[2:3])
+
+    def test_route_display_is_clipped_to_real_same_deck_asphalt(self):
+        road = (((0.0, 0.0), (20.0, 0.0), 0.0, 0.0, 4.5,
+                 "road"),)
+        points = [(0.0, 0.0, 0.0), (5.0, 0.0, 0.0),
+                  (10.0, 0.0, 0.0), (15.0, 0.0, 0.0),
+                  (20.0, 0.0, 0.0), (25.0, 0.0, 0.0),
+                  (30.0, 0.0, 0.0)]
+        self.assertEqual(_route_surface_chunks(points, road), [points[:5]])
+        # A visually crossing bridge is not support for a route on this deck.
+        upper = (((0.0, 0.0), (20.0, 0.0), 8.0, 8.0, 4.5,
+                  "road"),)
+        self.assertEqual(_route_surface_chunks(points, upper), [])
+
+        separated = (
+            ((0.0, 0.0), (1.0, 0.0), 0.0, 0.0, 0.1, "road"),
+            ((3.0, 0.0), (4.0, 0.0), 0.0, 0.0, 0.1, "road"),
+        )
+        self.assertEqual(_route_surface_chunks(
+            [(0.5, 0.0, 0.0), (3.5, 0.0, 0.0)], separated), [])
+
+    def test_selected_prefab_edges_exist_only_on_matching_navcurve(self):
+        surfaces = (
+            ((0.0, 0.0), (10.0, 0.0), 0.0, 0.0, 5.0, "road"),
+            ((10.0, 0.0), (20.0, 0.0), 0.0, 0.0, 3.05, "lane"),
+        )
+        points = [(float(value), 0.0, 0.0)
+                  for value in range(0, 21, 5)]
+        selected = _route_surface_chunks(
+            points, surfaces, allowed_kinds={"lane"},
+            centreline_tolerance_m=0.8, horizontal_margin_m=0.0)
+        self.assertEqual(selected, [points[2:]])
+        # An overlapping neighbouring prefab ribbon is not enough: its exact
+        # centreline is two metres away from the revision's LanePath.
+        offset = tuple(((a[0], 2.0), (b[0], 2.0), ah, bh, half, kind)
+                       for a, b, ah, bh, half, kind in surfaces[1:])
+        self.assertEqual(_route_surface_chunks(
+            points, offset, allowed_kinds={"lane"},
+            centreline_tolerance_m=0.8), [])
 
     def test_live_trailer_heading_drives_articulation_across_wrap(self):
         data = {

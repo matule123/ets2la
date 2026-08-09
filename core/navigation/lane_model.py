@@ -330,6 +330,96 @@ class LaneLocator:
         self._authoritative_path_signature = signature
         self._authoritative_segment_index = selected
 
+    @staticmethod
+    def _authoritative_prefab_tie(ranked, authoritative_window):
+        """Resolve only an exact shared-navCurve prefab tie.
+
+        Several legal connector paths can start on the same PPD navCurve and
+        diverge only later. Before that divergence their projection, tangent
+        and score are byte-for-byte equivalent, so ``LaneId.sort_key`` is not
+        evidence for choosing an exit. The already validated LanePath is. This
+        proof is deliberately narrow: same placed prefab/connector/deck,
+        common first navCurve and coincident 3-D projection. Once either arm
+        has diverged the geometric conditions fail and localisation remains
+        fail-closed.
+        """
+        if not ranked or not authoritative_window:
+            return None, None
+        live = ranked[0]
+        live_id = live[1].lane_id
+        if (live_id.prefab_token is None
+                or live_id.connector_index is None
+                or not live_id.connector_path):
+            return None, None
+        authoritative_occurrences = {}
+        for path_index, segment in authoritative_window:
+            authoritative_occurrences.setdefault(
+                segment.lane_id, []).append(path_index)
+        if live_id in authoritative_occurrences:
+            return None, None
+        proven = []
+        ambiguous_occurrences = 0
+        for candidate in ranked[1:]:
+            lane = candidate[1]
+            lane_id = lane.lane_id
+            occurrences = authoritative_occurrences.get(lane_id, ())
+            if not occurrences:
+                continue
+            if (lane_id.road_uid != live_id.road_uid
+                    or lane_id.direction != live_id.direction
+                    or lane_id.prefab_token != live_id.prefab_token
+                    or lane_id.connector_index != live_id.connector_index
+                    or lane.elevation_layer != live[1].elevation_layer
+                    or not lane_id.connector_path
+                    or lane_id.connector_path[0]
+                        != live_id.connector_path[0]
+                    or abs(float(candidate[0]) - float(live[0])) > 1e-4):
+                continue
+            live_point, authoritative_point = live[2], candidate[2]
+            position_residual = math.dist(
+                (live_point.x, live_point.y, live_point.z),
+                (authoritative_point.x, authoritative_point.y,
+                 authoritative_point.z))
+            heading_residual = abs(wrap_angle(
+                live_point.heading - authoritative_point.heading))
+            vertical_residual = abs(float(live[6]) - float(candidate[6]))
+            if (position_residual > 0.05
+                    or heading_residual > math.radians(0.25)
+                    or vertical_residual > 0.05):
+                continue
+            if len(occurrences) != 1:
+                ambiguous_occurrences += len(occurrences)
+                continue
+            proven.append((candidate, {
+                "reason": "authoritative_shared_prefab_navcurve",
+                "authoritative_path_index": int(
+                    occurrences[0]),
+                "shared_navcurve_index": int(
+                    lane_id.connector_path[0]),
+                "position_residual_m": float(position_residual),
+                "heading_residual_deg": float(math.degrees(
+                    heading_residual)),
+                "vertical_residual_m": float(vertical_residual),
+                "rejected_connector_path": list(
+                    live_id.connector_path),
+                "selected_connector_path": list(
+                    lane_id.connector_path),
+            }))
+        # Two authoritative occurrences which are still geometrically
+        # indistinguishable do not prove current progress. Never let list
+        # order choose a roundabout lap or repeated connector occurrence.
+        if len(proven) == 1 and not ambiguous_occurrences:
+            return proven[0]
+        if len(proven) > 1 or ambiguous_occurrences:
+            return None, {
+                "reason": "ambiguous_authoritative_prefab_navcurve",
+                "candidate_count": int(
+                    len(proven) + ambiguous_occurrences),
+                "rejected_connector_path": list(
+                    live_id.connector_path),
+            }
+        return None, None
+
     def _adjacent_road_lane_change(self, source: LaneId, target: LaneId):
         """Return lane segments only for a topology-proven adjacent change."""
         if (source.direction != target.direction
@@ -712,6 +802,25 @@ class LaneLocator:
                 self._lane_change_evidence = None
             return None
         ranked.sort(key=lambda item: (item[0], item[1].lane_id.sort_key()))
+        authoritative_tie, authoritative_tie_details = (
+            self._authoritative_prefab_tie(ranked, authoritative_window))
+        if (authoritative_tie is None
+                and authoritative_tie_details is not None):
+            if diagnostics is not None:
+                diagnostics["authoritative_prefab_tie_break"] = (
+                    authoritative_tie_details)
+                diagnostics["outcome"] = "ambiguous"
+            # Preserve the last confirmed internal match for a later sample,
+            # but publish no authority for an indistinguishable occurrence.
+            return None
+        if authoritative_tie is not None:
+            # Preserve every score for diagnostics/hysteresis; only replace
+            # the unsupported LaneId tie-break with the immutable path proof.
+            ranked = [authoritative_tie] + [
+                item for item in ranked if item is not authoritative_tie]
+            if diagnostics is not None:
+                diagnostics["authoritative_prefab_tie_break"] = (
+                    authoritative_tie_details)
         # An initial exact/near tie is not a reliable lane match. Silently
         # breaking it by LaneId can select a parallel road or carriageway.
         if (previous is None and len(ranked) > 1
@@ -727,7 +836,9 @@ class LaneLocator:
             return None
         best = ranked[0]
         chosen = best
-        reason = "best_score" if previous is None else "better_lane"
+        reason = ("authoritative_shared_prefab_navcurve"
+                  if authoritative_tie is not None else
+                  "best_score" if previous is None else "better_lane")
         if previous is not None:
             old = next((item for item in ranked
                         if item[1].lane_id == previous.lane_id), None)
@@ -761,7 +872,8 @@ class LaneLocator:
                     in authoritative_connections
                   or self.network.lanes_connected(previous.lane_id,
                                                   chosen[1].lane_id)):
-                reason = "topology_transition"
+                if authoritative_tie is None:
+                    reason = "topology_transition"
             if not adjacent_change and not diagnostic_mode:
                 self._lane_change_evidence = None
         score, lane, point, segment_index, point_index, signed, vertical, _, confidence, components = chosen

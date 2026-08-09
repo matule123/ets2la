@@ -1997,18 +1997,26 @@ class Plugin(BasePlugin):
                                     and self._lane_match is not None else None)):
                 self._roads_t = 0.0
 
-        # The top-down map needs a wider scene than the perspective HUD.  Keep
-        # this presentation snapshot separate so nearby parallel streets and
-        # POIs can be shown without entering HUD, LaneLocator or route inputs.
-        self._live_map_t += delta_time
-        live_map_moved = (self._live_map_pos is None or math.hypot(
-            float(pos[0]) - self._live_map_pos[0],
-            float(pos[1]) - self._live_map_pos[1]) >= 18.0)
-        if (self._live_map_t >= 1.0 and live_map_moved
-                and self.road_net is not None and self.road_net.loaded):
-            altitude = float(self.sdk.get("truck_altitude", 0.0) or 0.0)
-            if self._schedule_live_map_scene(pos, altitude):
-                self._live_map_t = 0.0
+        # The top-down map needs a much wider (1.2 km) scene than the HUD.
+        # Building it continuously while its UI page is hidden previously
+        # competed with this process's 100 Hz authority tick during the real
+        # 21:12 stale-heartbeat stops. It is presentation-only, so request it
+        # solely while MapPage has explicitly published visibility.
+        live_map_visible = bool(self.sdk.get(
+            "live_map_view_active", False))
+        if not live_map_visible:
+            self._live_map_t = 0.0
+        else:
+            self._live_map_t += delta_time
+            live_map_moved = (self._live_map_pos is None or math.hypot(
+                float(pos[0]) - self._live_map_pos[0],
+                float(pos[1]) - self._live_map_pos[1]) >= 18.0)
+            if (self._live_map_t >= 1.0 and live_map_moved
+                    and self.road_net is not None and self.road_net.loaded):
+                altitude = float(self.sdk.get(
+                    "truck_altitude", 0.0) or 0.0)
+                if self._schedule_live_map_scene(pos, altitude):
+                    self._live_map_t = 0.0
 
         # Localization diagnostics: every ~2 s, log where the truck is and where
         # the map thinks the nearest road is. If the distance is huge (hundreds

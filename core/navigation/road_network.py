@@ -811,6 +811,7 @@ class RoadNetwork:
         rings = int(radius // self.GRID) + 1
         seen, result = set(), []
         display_instance_index = 0
+        visited_instances = 0
         for dx in range(-rings, rings + 1):
             for dz in range(-rings, rings + 1):
                 for instance in self._prefab_grid.get((cx + dx, cz + dz), ()):
@@ -818,6 +819,13 @@ class RoadNetwork:
                     if marker in seen:
                         continue
                     seen.add(marker)
+                    visited_instances += 1
+                    if visited_instances % 24 == 0:
+                        # Presentation workers share this process with the
+                        # authority tick. Cooperatively release the GIL during
+                        # dense roundabout scans without changing result order
+                        # or any navigation geometry.
+                        time.sleep(0)
                     if (allowed_node_uids is not None
                             and not any(uid in allowed_node_uids
                                         for uid in instance[1])):
@@ -975,7 +983,13 @@ class RoadNetwork:
                             queue.append(neighbour)
 
         ranked = []
-        for index in connected_indices:
+        for candidate_position, index in enumerate(connected_indices):
+            if candidate_position and candidate_position % 24 == 0:
+                # ``hud_segments_3d_near`` runs on a display-only thread, but
+                # building hundreds of lane ribbons is CPU-bound Python. A
+                # bounded cooperative yield keeps LaneLocator/heartbeat ticks
+                # schedulable while preserving this exact candidate set.
+                time.sleep(0)
             first, second = self._seg_uids[index]
             # Use the exact road item's look. Node-level compatibility lookup
             # is ambiguous at junctions and can select a neighbouring arm's
@@ -4236,6 +4250,7 @@ class RoadNetwork:
         rings = int(radius // self.GRID) + 1
         seen = set()
         ranked = []
+        visited_instances = 0
         for dx in range(-rings, rings + 1):
             for dz in range(-rings, rings + 1):
                 for instance in self._prefab_grid.get((cx+dx, cz+dz), ()):
@@ -4243,6 +4258,9 @@ class RoadNetwork:
                     if marker in seen:
                         continue
                     seen.add(marker)
+                    visited_instances += 1
+                    if visited_instances % 24 == 0:
+                        time.sleep(0)
                     for local_points, colour, z_index in \
                             self._prefab_map_polygons.get(instance[0], ()):
                         points = self._transform_prefab_points(instance, local_points)
@@ -4342,8 +4360,12 @@ class RoadNetwork:
         rings = int(radius // self.GRID) + 1
         radius2 = radius * radius
         ranked = []
+        visited_cells = 0
         for dx in range(-rings, rings + 1):
             for dz in range(-rings, rings + 1):
+                visited_cells += 1
+                if visited_cells % 32 == 0:
+                    time.sleep(0)
                 for feature in self._map_feature_grid.get((cx+dx, cz+dz), ()):
                     distance2 = ((feature[0]-px) ** 2
                                  + (feature[1]-pz) ** 2)

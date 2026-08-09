@@ -311,6 +311,19 @@ class UiChromeTests(unittest.TestCase):
         self.assertTrue(page.view.empty_state.isVisibleTo(page.view))
         page.close()
 
+    def test_wide_live_map_scene_is_requested_only_while_page_is_visible(self):
+        state = State({"ui_theme": "light"})
+        with mock.patch.object(MapPage, "_populate_maps", autospec=True):
+            page = MapPage(state)
+        self.assertFalse(state.get("live_map_view_active", False))
+        page.show()
+        QApplication.processEvents()
+        self.assertTrue(state.get("live_map_view_active"))
+        page.hide()
+        QApplication.processEvents()
+        self.assertFalse(state.get("live_map_view_active"))
+        page.close()
+
     def test_live_map_preserves_road_style_metadata_and_load_progress(self):
         state = State({
             "ui_theme": "light",

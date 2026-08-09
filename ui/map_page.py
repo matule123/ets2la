@@ -884,6 +884,18 @@ class MapPage(QWidget):
         self._last_diag_export_result = None
         self._last_map_load_generation = None
 
+    def showEvent(self, event):
+        # Wide 1.2 km map geometry is presentation-only and relatively
+        # expensive. Let the map plugin build it only while this page is
+        # actually visible; a hidden navigation page must never compete with
+        # the 100 Hz lane-authority heartbeat used by the autopilot.
+        self.state.set("live_map_view_active", True)
+        super().showEvent(event)
+
+    def hideEvent(self, event):
+        self.state.set("live_map_view_active", False)
+        super().hideEvent(event)
+
     def restyle(self, theme):
         """Re-apply palette colours when the theme switches (dark ↔ light)."""
         from core.theme import palette

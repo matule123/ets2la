@@ -535,6 +535,9 @@ class Route:
             "feed_forward": 0.0, "feedback": 0.0,
             "local_curvature": 0.0, "raw": 0.0, "output": 0.0,
             "curve_direction_hold": False,
+            "straight_recovery_active": False,
+            "cte_gain": 0.0,
+            "lane_recovery_multiplier": 1.0,
         }
         if len(self.points) < 2:
             return 0.0
@@ -598,15 +601,30 @@ class Route:
         local_radius = (1e6 if abs(local_curvature) < 1e-9
                         else 1.0 / abs(local_curvature))
         cte_gain = curve_cte_gain(local_radius, cte)
-        if (has_confirmed_lane_error
-                and abs(local_curvature) < 1.0 / 100.0):
-            # On the straight immediately after a bend the old ±0.16 guard and
-            # base Stanley gain could preserve a 1–1.7 m residual offset for
-            # tens of metres. Scale recovery by *measured* displacement while
-            # leaving sub-35 cm localisation noise and tight curves untouched.
-            recovery_weight = _clamp(
+        straight_recovery_active = False
+        lane_recovery_multiplier = 1.0
+        if has_confirmed_lane_error:
+            # The old binary R100 test treated every radius above 100 m as a
+            # straight. On the captured R119--R122 bend, CTE 1.258 m therefore
+            # multiplied an already curve-strengthened gain by about 2.38:
+            # feedback became -0.434 on top of -0.107 feed-forward, yielding
+            # the logged -0.541 command and the growing opposite correction.
+            #
+            # Residual recovery is now a geometric gain schedule, not a
+            # steering-signal filter. It is absent through the proven R120
+            # bend, blends in only as the lane approaches R500, and remains
+            # strongest on a genuine straight. This preserves the earlier R400
+            # drift correction without applying straight-line gain mid-curve.
+            recovery_error_weight = _clamp(
                 (abs(cte) - 0.35) / 1.15, 0.0, 1.0)
-            cte_gain *= 1.0 + 1.75 * recovery_weight
+            recovery_geometry_weight = _clamp(
+                (local_radius - 160.0) / (500.0 - 160.0), 0.0, 1.0)
+            lane_recovery_multiplier += (
+                1.75 * recovery_error_weight * recovery_geometry_weight)
+            cte_gain *= lane_recovery_multiplier
+            straight_recovery_active = (
+                recovery_error_weight > 0.0
+                and abs(local_curvature) < 1.0 / 500.0)
         cte_steer = math.atan(
             (cte_gain * cte) / (K_SOFT + v))
         feed_forward = (math.atan(TRUCK_WHEELBASE_M * local_curvature)
@@ -671,5 +689,8 @@ class Route:
             "raw": float(raw_steer),
             "output": float(steer),
             "curve_direction_hold": bool(curve_direction_hold),
+            "straight_recovery_active": bool(straight_recovery_active),
+            "cte_gain": float(cte_gain),
+            "lane_recovery_multiplier": float(lane_recovery_multiplier),
         }
         return steer

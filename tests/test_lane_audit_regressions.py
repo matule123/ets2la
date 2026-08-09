@@ -118,6 +118,33 @@ class LaneGeometryAuditTests(unittest.TestCase):
         self.assertEqual(sdk.get("live_map_scene_revision"), 1)
         self.assertEqual(len(sdk.get("live_map_road_segments")), 1)
 
+    def test_hidden_live_map_never_schedules_wide_presentation_scan(self):
+        plugin, sdk, point = build_map_plugin()
+        sdk.set("truck_world_pos", (point.x, point.z))
+        sdk.set("truck_heading", point.heading)
+        sdk.set("truck_speed_ms", 10.0)
+        sdk.set("telemetry_valid", True)
+        plugin._load_road_net = lambda: None
+        plugin._update_lane_trajectory = lambda *_args: plugin._lane_path
+        plugin._publish_road_type = lambda *_args: None
+        plugin.tags = Tags()
+        plugin._roads_t = 0.0
+        plugin._diag_t = 0.0
+        scheduled = []
+        plugin._schedule_live_map_scene = lambda *args: (
+            scheduled.append(args) or True)
+
+        plugin._live_map_t = 2.0
+        sdk.set("live_map_view_active", False)
+        plugin.on_tick(0.1)
+        self.assertEqual(scheduled, [])
+        self.assertEqual(plugin._live_map_t, 0.0)
+
+        sdk.set("live_map_view_active", True)
+        plugin._live_map_t = 0.95
+        plugin.on_tick(0.1)
+        self.assertEqual(len(scheduled), 1)
+
     def test_hud_prefab_scene_never_blocks_navigation_heartbeat(self):
         """15:16 trace: the synchronous HUD prefab scan froze map ticks."""
         started, release = threading.Event(), threading.Event()
@@ -366,6 +393,42 @@ class LaneGeometryAuditTests(unittest.TestCase):
             with self.subTest(direction=direction):
                 self.assertEqual(math.copysign(1.0, command), direction)
                 self.assertGreaterEqual(abs(command), 0.08)
+
+    def test_real_211258_r120_bend_never_uses_straight_recovery_gain(self):
+        """Replay the gain error behind the 21:12:58 steering escalation.
+
+        The real lane radius was 119--122 m, speed about 12.5 m/s and the
+        confirmed lane CTE reached 1.258 m.  The former binary R100 condition
+        classified that bend as a straight and raised the combined command to
+        about 0.54.  Both curve directions must retain their ordinary geometric
+        gain; the strong residual recovery remains available on a true straight.
+        """
+        for direction in (-1.0, 1.0):
+            route = Route(self._arc(direction, 120.0, 260.0))
+            position = route.points[50]
+            heading = self._path_heading(position, route.points[53])
+            command = route.steering(
+                position, heading, 12.5,
+                cross_track_error_m=-direction * 1.258)
+            debug = route.last_steering_debug
+            with self.subTest(direction=direction):
+                radius = 1.0 / abs(debug["local_curvature"])
+                self.assertGreater(radius, 119.0)
+                self.assertLess(radius, 121.0)
+                self.assertFalse(debug["straight_recovery_active"])
+                self.assertAlmostEqual(
+                    debug["lane_recovery_multiplier"], 1.0, places=7)
+                self.assertLess(abs(debug["feedback"]), 0.20)
+                self.assertLess(abs(command), 0.32)
+
+        straight = Route([(0.0, 0.0), (0.0, 100.0), (0.0, 200.0)])
+        straight.steering(
+            (0.0, 20.0), math.pi, 12.5,
+            cross_track_error_m=1.258)
+        self.assertTrue(
+            straight.last_steering_debug["straight_recovery_active"])
+        self.assertGreater(
+            straight.last_steering_debug["lane_recovery_multiplier"], 2.0)
 
     def test_real_trace_lane_error_has_explicit_controller_unit_response(self):
         """The 16:59 drive must correct before CTE reaches the lane edge.
