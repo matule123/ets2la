@@ -94,6 +94,12 @@ CURVE_DIRECTION_HOLD_RADIUS_M = 70.0
 # departure by pinning +0.172 steering while CTE had already reached 2.128 m.
 CURVE_DIRECTION_HOLD_CORE_RADIUS_M = 30.0
 CURVE_DIRECTION_HOLD_MAX_CTE_M = 0.90
+# A tight connector can begin with a broader clothoid-like entry. Selecting
+# hold authority only from instantaneous radius made the R54 entry to the
+# captured R18 hairpin release the curve sign, then reacquire it a few metres
+# later. That geometry-driven mode switch produced alternating steering.
+CURVE_DIRECTION_HOLD_APPROACH_RADIUS_M = 30.0
+CURVE_DIRECTION_HOLD_APPROACH_DISTANCE_M = 35.0
 CURVE_MIN_FEEDFORWARD_FRACTION = 0.85
 ARRIVAL_RADIUS = 12.0     # metres from the last point counts as "arrived"
 
@@ -171,6 +177,7 @@ class Route:
             "local_curvature": 0.0, "raw": 0.0, "output": 0.0,
             "curve_direction_hold": False,
             "curve_direction_hold_eligible": False,
+            "curve_direction_hold_approach": False,
         }
 
     # --- Construction / persistence ------------------------------------------
@@ -545,6 +552,7 @@ class Route:
             "local_curvature": 0.0, "raw": 0.0, "output": 0.0,
             "curve_direction_hold": False,
             "curve_direction_hold_eligible": False,
+            "curve_direction_hold_approach": False,
             "straight_recovery_active": False,
             "cte_gain": 0.0,
             "lane_recovery_multiplier": 1.0,
@@ -649,8 +657,18 @@ class Route:
         scaled_feedback = speed_gain(speed_ms) * feedback
         steer = feed_forward + scaled_feedback
         curve_direction_hold = False
+        approach_profile = self.curve_profile_ahead(
+            pos, heading, CURVE_DIRECTION_HOLD_APPROACH_DISTANCE_M)
+        approach_signed = float(approach_profile["signed_curvature"])
+        curve_direction_hold_approach = bool(
+            float(approach_profile["radius_m"])
+                <= CURVE_DIRECTION_HOLD_APPROACH_RADIUS_M
+            and float(approach_profile["distance_m"])
+                <= CURVE_DIRECTION_HOLD_APPROACH_DISTANCE_M
+            and local_curvature * approach_signed > 0.0)
         curve_direction_hold_eligible = bool(
             local_radius <= CURVE_DIRECTION_HOLD_CORE_RADIUS_M
+            or curve_direction_hold_approach
             or abs(cte) <= CURVE_DIRECTION_HOLD_MAX_CTE_M)
         if (local_radius <= CURVE_DIRECTION_HOLD_RADIUS_M
                 and curve_direction_hold_eligible
@@ -705,6 +723,8 @@ class Route:
             "curve_direction_hold": bool(curve_direction_hold),
             "curve_direction_hold_eligible": bool(
                 curve_direction_hold_eligible),
+            "curve_direction_hold_approach": bool(
+                curve_direction_hold_approach),
             "straight_recovery_active": bool(straight_recovery_active),
             "cte_gain": float(cte_gain),
             "lane_recovery_multiplier": float(lane_recovery_multiplier),

@@ -403,7 +403,7 @@ class UiChromeTests(unittest.TestCase):
             "live_map_road_segments": [[
                 [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], "road", 4,
                 True, True, False, False, 8.0, False, "r1:0", 0,
-                "freeway",
+                "freeway", True,
             ]],
             "live_map_scene_polygons": [[
                 [[0.0, 0.0], [20.0, 0.0], [20.0, 12.0], [0.0, 12.0]],
@@ -418,10 +418,11 @@ class UiChromeTests(unittest.TestCase):
             page = MapPage(state)
         page.refresh()
         self.assertEqual(page.view.road_segments[0]["road_type"], "freeway")
+        self.assertTrue(page.view.road_segments[0]["explored"])
         self.assertEqual(page.view.scene_polygons[0]["colour"], 2)
         self.assertEqual(page.view.scene_features[0]["icon"], "gas_ico")
         self.assertEqual(page._last_live_map_scene_revision, 9)
-        self.assertEqual(page.view.zoom_radius, 900.0)
+        self.assertEqual(page.view.zoom_radius, 1050.0)
         self.assertEqual(page.view.trip_panel.objectName(), "LiveMapTripPanel")
         page.view.resize(900, 600)
         image = QImage(900, 600, QImage.Format.Format_ARGB32)

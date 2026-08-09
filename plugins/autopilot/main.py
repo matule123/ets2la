@@ -50,12 +50,34 @@ AUTHORITY_RETENTION_MAX_M = 3.40
 # the truck understeered wide / fish-tailed on corner entry).
 A_LAT_MAX = 1.8             # stable loaded-truck lateral acceleration (m/s²)
 CURVE_BRAKE_MAX = 0.55      # bounded proactive brake for proven sharp curves
-CURVE_BRAKE_MARGIN_MS = 0.5 # start braking this much before v_safe (hysteresis)
+CURVE_BRAKE_MARGIN_MS = 0.15
+CURVE_APPROACH_DECEL_MS2 = 1.0
+CURVE_BRAKE_RESPONSE_S = 1.0
 # A compact prefab can contain right-left-right curvature within a few truck
 # lengths.  Reserve distance for the steering axis and trailer to settle; the
 # old point-mass envelope reached the apex speed mathematically but entered
 # the first lobe too fast to follow the proven lane centre.
 CURVE_STEERING_SETUP_M = 20.0
+
+
+def planned_curve_speed_limit_ms(radius_m, distance_m, speed_ms):
+    """Return the curve-entry envelope and its proven usable distance.
+
+    The former point-mass envelope spent every metre on an ideal 1.6 m/s2
+    stop. It ignored brake ramp and loaded-truck response, so the captured R18
+    hairpin was still approached at 43 km/h. Reserve one current-speed second
+    plus steering setup, then plan at a comfortable 1.0 m/s2. This changes
+    only longitudinal control; map geometry and steering authority are intact.
+    """
+    radius = float(radius_m)
+    distance = max(0.0, float(distance_m))
+    speed = max(0.0, abs(float(speed_ms)))
+    setup = CURVE_STEERING_SETUP_M if radius < 45.0 else 0.0
+    response = speed * CURVE_BRAKE_RESPONSE_S
+    usable_distance = max(0.0, distance - setup - response)
+    return (curve_speed_limit_ms(
+        radius, usable_distance, A_LAT_MAX, CURVE_APPROACH_DECEL_MS2),
+        usable_distance)
 
 
 def lane_authority_rejection_reason(state, snapshot, now=None):
@@ -683,24 +705,23 @@ class Plugin(BasePlugin):
                 R = 1e6
                 distance_to_curve = 0.0
             if 0.0 < R < 2000.0:
-                curve_limit_ms = curve_speed_limit_ms(
-                    R, max(0.0, distance_to_curve - (
-                        CURVE_STEERING_SETUP_M if R < 45.0 else 0.0)),
-                    A_LAT_MAX)
                 v_now = abs(speed)                        # m/s
+                curve_limit_ms, _usable_curve_distance = \
+                    planned_curve_speed_limit_ms(
+                        R, distance_to_curve, v_now)
                 if v_now > curve_limit_ms + CURVE_BRAKE_MARGIN_MS:
                     excess = v_now - curve_limit_ms
                     curve_brake = float(np.clip(
-                        excess / 6.0, 0.0, CURVE_BRAKE_MAX))
+                        excess / 5.0, 0.0, CURVE_BRAKE_MAX))
                     requested_brake = max(requested_brake, curve_brake)
                     curve_factor = max(
                         0.0, min(1.0, curve_limit_ms / max(v_now, 1.0)))
-                elif v_now > curve_limit_ms * 0.90:
+                elif v_now > curve_limit_ms * 0.85:
                     # Coast into the speed envelope instead of accelerating
                     # until the brake threshold and then oscillating around it.
                     curve_factor = max(0.15, min(
                         1.0, (curve_limit_ms - v_now)
-                        / max(curve_limit_ms * 0.10, 0.5)))
+                        / max(curve_limit_ms * 0.15, 0.5)))
         self.sdk.shared_state.set(
             "path_curve_speed_limit_ms",
             (None if not math.isfinite(curve_limit_ms)

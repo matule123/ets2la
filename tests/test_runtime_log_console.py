@@ -48,6 +48,7 @@ def test_plugin_summary_has_separate_warning_and_error_frames():
 
 def test_runtime_log_waits_for_enter_only_when_plugin_has_issue(monkeypatch):
     prompts = []
+    monkeypatch.setattr(logger, "_SESSION_PROMPT_SHOWN", False)
     monkeypatch.setattr(logger, "collect_plugin_issues", lambda _offset: {
         "map": {"warnings": 1, "errors": 0,
                 "warning_messages": ["missing optional field"],
@@ -58,6 +59,11 @@ def test_runtime_log_waits_for_enter_only_when_plugin_has_issue(monkeypatch):
                               colour=False)
     assert len(prompts) == 1
     assert "Enter" in prompts[0]
+
+    # A duplicate shutdown/finalizer call must not consume a second Enter.
+    logger.finish_session_log(10, input_fn=lambda prompt: prompts.append(prompt),
+                              colour=False)
+    assert len(prompts) == 1
 
     prompts.clear()
     monkeypatch.setattr(logger, "collect_plugin_issues", lambda _offset: {})

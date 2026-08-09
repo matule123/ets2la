@@ -122,12 +122,12 @@ class LaneGeometryAuditTests(unittest.TestCase):
         self.assertEqual(sdk.get("live_map_scene_revision"), 1)
         self.assertEqual(len(sdk.get("live_map_road_segments")), 1)
         self.assertEqual(requests, [
-            ("roads", {"radius": 1600.0, "limit": 10000,
+            ("roads", {"radius": 2000.0, "limit": 16000,
                        "altitude": 3.0}),
-            ("areas", {"radius": 1600.0, "limit": 2400}),
-            ("features", {"radius": 1600.0, "limit": 1400}),
+            ("areas", {"radius": 2000.0, "limit": 3000}),
+            ("features", {"radius": 2000.0, "limit": 1800}),
         ])
-        self.assertEqual(sdk.get("live_map_scene_radius_m"), 1600.0)
+        self.assertEqual(sdk.get("live_map_scene_radius_m"), 2000.0)
         self.assertEqual(sdk.get("live_map_scene_counts"), {
             "roads": 1, "areas": 0, "features": 0})
 
@@ -166,9 +166,27 @@ class LaneGeometryAuditTests(unittest.TestCase):
         self.assertEqual(len(scheduled), 1)
 
         plugin._live_map_t = 2.0
-        sdk.set("truck_world_pos", (point.x + 121.0, point.z))
+        sdk.set("truck_world_pos", (point.x + 151.0, point.z))
         plugin.on_tick(0.1)
         self.assertEqual(len(scheduled), 2)
+
+    def test_live_map_exploration_records_only_confirmed_ordinary_lane(self):
+        plugin, sdk, point = build_map_plugin()
+        self.assertTrue(plugin._lane_localization_current)
+        road_uid = plugin._lane_match.lane_id.road_uid
+        self.assertTrue(plugin._record_explored_road())
+        self.assertIn(road_uid, plugin._explored_road_uids)
+        self.assertEqual(sdk.get("live_map_explored_road_count"), 1)
+        self.assertFalse(plugin._record_explored_road())
+
+        original = plugin._lane_match
+        plugin._lane_match = type("PrefabMatch", (), {
+            "lane_id": type("PrefabLane", (), {
+                "road_uid": 999, "prefab_token": "roundabout"})(),
+        })()
+        self.assertFalse(plugin._record_explored_road())
+        self.assertNotIn(999, plugin._explored_road_uids)
+        plugin._lane_match = original
 
     def test_hud_prefab_scene_never_blocks_navigation_heartbeat(self):
         """15:16 trace: the synchronous HUD prefab scan froze map ticks."""
@@ -291,6 +309,35 @@ class LaneGeometryAuditTests(unittest.TestCase):
                     abs(command),
                     abs(debug["feed_forward"])
                     * CURVE_MIN_FEEDFORWARD_FRACTION - 1e-7)
+
+    def test_real_222100_r54_entry_keeps_imminent_r18_curve_authority(self):
+        """The entry radius must not make tight-curve protection chatter.
+
+        At 22:21:00 the local feed-forward represented about R54 while the
+        validated same-direction R18 apex was 28 m ahead. With 1.118 m lane
+        error and 8.5 degrees heading error the old instantaneous-radius test
+        released the curve sign, only to reacquire it at local R19.
+        """
+        for curve_sign in (-1.0, 1.0):
+            route = Route([(0.0, 0.0), (0.0, -100.0), (0.0, -200.0)])
+            route._curvature_at_progress = lambda _progress, _span=6.0, s=curve_sign: s / 54.0
+            route.curve_profile_ahead = lambda *_args, s=curve_sign, **_kwargs: {
+                "radius_m": 18.8, "distance_m": 28.0,
+                "signed_curvature": s / 18.8, "horizon_m": 35.0,
+            }
+            correction_sign = -curve_sign
+            command = route.steering(
+                (0.0, -20.0), correction_sign * math.radians(8.5),
+                30.0 / 3.6,
+                cross_track_error_m=correction_sign * 1.118)
+            debug = route.last_steering_debug
+            with self.subTest(curve_sign=curve_sign):
+                self.assertLess(
+                    debug["feed_forward"] * debug["feedback"], 0.0)
+                self.assertTrue(debug["curve_direction_hold_approach"])
+                self.assertTrue(debug["curve_direction_hold_eligible"])
+                self.assertTrue(debug["curve_direction_hold"])
+                self.assertGreater(command * debug["feed_forward"], 0.0)
 
     def test_real_214845_r65_lane_edge_error_releases_curve_direction_hold(self):
         """Replay the exact mechanism behind the latest right-curve exit.

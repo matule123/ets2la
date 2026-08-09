@@ -2,6 +2,8 @@ import logging
 import os
 import math
 import time
+import json
+import tempfile
 from sdk.base_plugin import BasePlugin
 from core.navigation.route import Route
 from core.navigation.lane_trajectory import build_lane_trajectory
@@ -20,6 +22,9 @@ from core.paths import app_dir
 
 # routes/ lives next to the app (works both from source and when frozen).
 ROUTES_DIR = os.path.join(app_dir(), "routes")
+MAP_EXPLORATION_FILE = os.path.join(
+    os.environ.get("LOCALAPPDATA") or app_dir(),
+    "UltraPilot", "map-exploration.json")
 
 # Controller/HUD/AR need a safe rolling horizon, not 50 000 control samples
 # for an entire 100 km trip. The complete native GPS UID tuple remains the
@@ -79,6 +84,10 @@ class Plugin(BasePlugin):
         # heartbeat.
         self._live_map_loading = False
         self._live_map_job_id = 0
+        self._exploration_fingerprint = None
+        self._explored_road_uids = set()
+        self._exploration_dirty = False
+        self._exploration_save_t = 0.0
         self._lane_signature = None
         self._rolling_route_refresh_needed = False
         self._lane_path = None
@@ -142,7 +151,95 @@ class Plugin(BasePlugin):
         self._roads_loading = False
         self._live_map_job_id += 1
         self._live_map_loading = False
+        self._save_map_exploration()
         self._deactivate_recorded_route(clear_outputs=True)
+
+    def _load_map_exploration(self, fingerprint):
+        """Load only road UIDs proven traversed under this exact dataset."""
+        fingerprint = str(fingerprint or "unavailable")
+        if fingerprint == self._exploration_fingerprint:
+            return
+        explored = set()
+        try:
+            with open(MAP_EXPLORATION_FILE, "r", encoding="utf-8") as stream:
+                payload = json.load(stream)
+            values = (payload.get("datasets", {}) or {}).get(fingerprint, ())
+            for value in values:
+                uid = int(value)
+                if uid:
+                    explored.add(uid)
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+            logging.warning("Live-map exploration history is unreadable: %s",
+                            error)
+        self._exploration_fingerprint = fingerprint
+        self._explored_road_uids = explored
+        self._exploration_dirty = False
+        self.sdk.set("live_map_explored_road_count", len(explored))
+
+    def _save_map_exploration(self):
+        """Atomically persist the bounded, dataset-scoped road history."""
+        if (not self._exploration_dirty
+                or not self._exploration_fingerprint):
+            return False
+        temporary = None
+        try:
+            payload = {"version": 1, "datasets": {}}
+            try:
+                with open(MAP_EXPLORATION_FILE, "r",
+                          encoding="utf-8") as stream:
+                    current = json.load(stream)
+                if isinstance(current, dict):
+                    payload["datasets"] = dict(
+                        current.get("datasets", {}) or {})
+            except FileNotFoundError:
+                pass
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                # Replace malformed presentation history; navigation data is
+                # never stored in this file.
+                payload["datasets"] = {}
+            payload["datasets"][self._exploration_fingerprint] = [
+                str(uid) for uid in sorted(self._explored_road_uids)
+            ]
+            directory = os.path.dirname(MAP_EXPLORATION_FILE) or "."
+            os.makedirs(directory, exist_ok=True)
+            fd, temporary = tempfile.mkstemp(
+                prefix=".map-exploration-", suffix=".tmp", dir=directory)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(payload, stream, separators=(",", ":"))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, MAP_EXPLORATION_FILE)
+            temporary = None
+            self._exploration_dirty = False
+            return True
+        except OSError as error:
+            logging.warning("Live-map exploration history was not saved: %s",
+                            error)
+            return False
+        finally:
+            if temporary:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+
+    def _record_explored_road(self):
+        """Record the exact currently localized ordinary-road LaneId."""
+        match = self._lane_match if self._lane_localization_current else None
+        lane_id = getattr(match, "lane_id", None)
+        if (lane_id is None or lane_id.prefab_token is not None
+                or not int(lane_id.road_uid or 0)):
+            return False
+        uid = int(lane_id.road_uid)
+        if uid in self._explored_road_uids:
+            return False
+        self._explored_road_uids.add(uid)
+        self._exploration_dirty = True
+        self.sdk.set("live_map_explored_road_count",
+                     len(self._explored_road_uids))
+        return True
 
     @staticmethod
     def _lane_id_payload(lane_id):
@@ -1604,34 +1701,38 @@ class Plugin(BasePlugin):
 
         def _worker():
             try:
-                # Keep a 1.6 km cached presentation tile around the truck.
-                # MapView can display up to a 1.5 km radius, while the generous
+                # Keep a 2 km cached presentation tile around the truck.
+                # MapView can display up to a 1.85 km radius, while the generous
                 # margin lets the truck move for several seconds without a
                 # rebuild.  This publishes more surrounding roads but avoids
                 # the former CPU-heavy scan after every 18 metres.
                 roads = net.live_map_segments_3d_near(
-                    request_pos, radius=1600.0, limit=10000,
+                    request_pos, radius=2000.0, limit=16000,
                     altitude=request_altitude)
                 road_payload = []
                 for (a, b, kind, lanes, divided, dash_on, pillar,
                      rail_post, half_width, suppress_markings, path_key,
                      path_index) in roads:
+                    road_uid_getter = getattr(
+                        net, "live_map_road_uid", lambda _path_key: None)
+                    road_uid = road_uid_getter(path_key)
                     road_payload.append([
                         list(a), list(b), kind, lanes, divided, dash_on,
                         pillar, rail_post, half_width, suppress_markings,
                         path_key, path_index,
                         net.live_map_road_type(
                             path_key, lanes=lanes, divided=divided),
+                        bool(road_uid in self._explored_road_uids),
                     ])
                 polygon_payload = [
                     [[list(point) for point in points], colour, z_index]
                     for points, colour, z_index in
                     net.live_map_polygons_near(
-                        request_pos, radius=1600.0, limit=2400)
+                        request_pos, radius=2000.0, limit=3000)
                 ]
                 feature_payload = [list(feature) for feature in
                                    net.map_features_near(
-                                       request_pos, radius=1600.0, limit=1400)]
+                                       request_pos, radius=2000.0, limit=1800)]
 
                 if (job_id != self._live_map_job_id
                         or generation != self._map_load_generation
@@ -1644,7 +1745,7 @@ class Plugin(BasePlugin):
                     "live_map_scene_features": feature_payload,
                     "live_map_scene_revision": self._live_map_revision,
                     "live_map_scene_center": list(request_pos),
-                    "live_map_scene_radius_m": 1600.0,
+                    "live_map_scene_radius_m": 2000.0,
                     "live_map_scene_counts": {
                         "roads": len(road_payload),
                         "areas": len(polygon_payload),
@@ -1783,8 +1884,9 @@ class Plugin(BasePlugin):
                     self.sdk.set("active_map_name",
                                  chosen.get("name") or chosen["key"])
                     data_dir = map_data.dataset_dir(chosen["key"])
-                    self.sdk.set("active_dataset_fingerprint",
-                                 dataset_fingerprint(data_dir))
+                    fingerprint = dataset_fingerprint(data_dir)
+                    self.sdk.set("active_dataset_fingerprint", fingerprint)
+                    self._load_map_exploration(fingerprint)
                     self.sdk.set("map_status",
                                  f"Loading road network ({chosen['key']})…")
                     def _load_progress(fraction, phase):
@@ -1996,6 +2098,11 @@ class Plugin(BasePlugin):
         # time we have a position. Cheap no-op once attempted.
         self._load_road_net()
         self._update_lane_trajectory(pos, heading)
+        self._record_explored_road()
+        self._exploration_save_t += delta_time
+        if self._exploration_save_t >= 15.0:
+            self._exploration_save_t = 0.0
+            self._save_map_exploration()
 
         # Display-only local road geometry. It is deliberately separate from
         # nav_path and therefore cannot influence autopilot steering.
@@ -2026,7 +2133,7 @@ class Plugin(BasePlugin):
             self._live_map_t += delta_time
             live_map_moved = (self._live_map_pos is None or math.hypot(
                 float(pos[0]) - self._live_map_pos[0],
-                float(pos[1]) - self._live_map_pos[1]) >= 120.0)
+                float(pos[1]) - self._live_map_pos[1]) >= 150.0)
             if (self._live_map_t >= 1.5 and live_map_moved
                     and self.road_net is not None and self.road_net.loaded):
                 altitude = float(self.sdk.get(

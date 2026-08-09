@@ -208,6 +208,7 @@ _LOADED_PLUGIN = re.compile(r"Loaded plugin:\s*([^\s(]+)", re.IGNORECASE)
 _MESSAGE_PLUGIN = re.compile(
     r"\[plugin:([^\]]+)\]|plugin\s+['\"]?([A-Za-z0-9_.-]+)",
     re.IGNORECASE)
+_SESSION_PROMPT_SHOWN = False
 
 
 def _session_log_lines(offset):
@@ -300,10 +301,17 @@ def format_plugin_issue_summary(issues, colour=True):
 
 def finish_session_log(offset=0, input_fn=None, colour=True):
     """Print the plugin summary and hold the console only when issues exist."""
+    global _SESSION_PROMPT_SHOWN
     issues = collect_plugin_issues(offset)
     summary = format_plugin_issue_summary(issues, colour=colour)
     if not summary:
         return issues
+    # UI shutdown and the supervisor finalizer may converge on the same close
+    # path. One process session owns exactly one acknowledgement, so a repeated
+    # finalizer cannot require a second Enter after the first prompt returned.
+    if _SESSION_PROMPT_SHOWN:
+        return issues
+    _SESSION_PROMPT_SHOWN = True
     print("\nErrors and warnings in the log files:\n")
     print(summary)
     try:

@@ -1,8 +1,9 @@
+import math
 import unittest
 from datetime import datetime
 from unittest.mock import patch
 
-from PyQt6.QtCore import QRectF
+from PyQt6.QtCore import QPointF, QRectF
 
 from core.navigation.road_network import RoadNetwork
 from UI.map_page import MapView, navigation_trip_summary
@@ -52,6 +53,15 @@ class LiveMapSceneTests(unittest.TestCase):
         self.assertTrue(any(name in painter.calls for name in
                             ("drawPath", "drawRoundedRect", "drawRect")))
 
+    def test_live_map_truck_marker_uses_north_up_heading_without_z_mirror(self):
+        centre = QPointF(100.0, 100.0)
+        north = MapView._truck_marker_polygon(centre, 0.0)
+        west = MapView._truck_marker_polygon(centre, math.pi / 2.0)
+        self.assertLess(north[0].y(), centre.y())
+        self.assertAlmostEqual(north[0].x(), centre.x())
+        self.assertLess(west[0].x(), centre.x())
+        self.assertAlmostEqual(west[0].y(), centre.y())
+
     def test_live_map_keeps_nearby_disconnected_roads_outside_hud_only(self):
         network = RoadNetwork()
         network.loaded = True
@@ -85,6 +95,10 @@ class LiveMapSceneTests(unittest.TestCase):
         self.assertEqual({item[10].split(":", 1)[0] for item in hud}, {"r0"})
         self.assertEqual({item[10].split(":", 1)[0] for item in live},
                          {"r0", "r1"})
+        self.assertEqual(network.live_map_road_uid("r0:0"), 10)
+        self.assertEqual(network.live_map_road_uid("r1:0"), 11)
+        self.assertIsNone(network.live_map_road_uid("p0:3"))
+        self.assertIsNone(network.live_map_road_uid("malformed"))
 
     def test_prefab_polygons_use_real_placed_neighbour_loop_geometry(self):
         network = RoadNetwork()

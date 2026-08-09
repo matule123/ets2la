@@ -33,8 +33,8 @@ class NavigationPagePerformanceTests(unittest.TestCase):
         view = MapView(_State())
         valid = [[0.0, 1.0, 20.0], [2.0, 3.0, 21.0], "road"]
         invalid = [[math.nan, 1.0, 20.0], [2.0, 3.0, 21.0], "road"]
-        view.set_road_segments([valid] * 11000)
-        self.assertEqual(10000, len(view.road_segments))
+        view.set_road_segments([valid] * 17000)
+        self.assertEqual(16000, len(view.road_segments))
         self.assertEqual((0.0, 1.0), view.road_segments[0]["a"])
         self.assertEqual((2.0, 3.0), view.road_segments[0]["b"])
         self.assertEqual("road", view.road_segments[0]["kind"])
@@ -58,7 +58,7 @@ class NavigationPagePerformanceTests(unittest.TestCase):
         view.set_road_segments(payload)
         self.assertEqual(1000, len(view.road_segments))
         self.assertEqual(1, len(view._road_runs))
-        self.assertEqual(1001, len(view._road_runs[0][2]))
+        self.assertEqual(1001, len(view._road_runs[0][3]))
 
 
 if __name__ == "__main__":

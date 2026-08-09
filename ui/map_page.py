@@ -125,7 +125,7 @@ class MapView(QWidget):
         self._pal = None         # set by the page (or a default below)
         # A slightly wider initial field matches the navigation-map reference
         # and uses the broad, display-only 1.2 km scene from the map process.
-        self.zoom_radius = 900.0
+        self.zoom_radius = 1050.0
         self.pan_world = [0.0, 0.0]
         self._drag_at = None
         self.setMinimumHeight(300)
@@ -213,7 +213,7 @@ class MapView(QWidget):
         self.empty_state.raise_()
 
     def reset_view(self):
-        self.zoom_radius = 900.0
+        self.zoom_radius = 1050.0
         self.pan_world[:] = [0.0, 0.0]
         self.update()
 
@@ -222,13 +222,13 @@ class MapView(QWidget):
         self.update()
 
     def zoom_out(self):
-        self.zoom_radius = min(1500.0, self.zoom_radius * 1.28)
+        self.zoom_radius = min(1850.0, self.zoom_radius * 1.28)
         self.update()
 
     def wheelEvent(self, event):
         # Wheel up zooms in, wheel down zooms out to a broad regional view.
         factor = 0.78 if event.angleDelta().y() > 0 else 1.28
-        self.zoom_radius = max(70.0, min(1500.0, self.zoom_radius * factor))
+        self.zoom_radius = max(70.0, min(1850.0, self.zoom_radius * factor))
         self.update()
         event.accept()
 
@@ -269,7 +269,7 @@ class MapView(QWidget):
         map which reduced every motorway and prefab to the same two-pixel line.
         """
         segments = []
-        for item in (payload or [])[:10000]:
+        for item in (payload or [])[:16000]:
             try:
                 a, b = item[0], item[1]
                 values = float(a[0]), float(a[1]), float(b[0]), float(b[1])
@@ -290,6 +290,7 @@ class MapView(QWidget):
                     "road_type": str(item[12]) if len(item) > 12 else (
                         "divided" if len(item) > 4 and bool(item[4])
                         else "local"),
+                    "explored": bool(item[13]) if len(item) > 13 else False,
                 })
             except (TypeError, ValueError, IndexError):
                 continue
@@ -303,11 +304,12 @@ class MapView(QWidget):
         for source_index, segment in enumerate(segments):
             path_key = segment["path_key"] or f"legacy:{source_index}"
             half_width = round(float(segment["half_width"]) * 4.0) / 4.0
-            key = (path_key, segment["road_type"], half_width)
+            key = (path_key, segment["road_type"], half_width,
+                   bool(segment["explored"]))
             grouped.setdefault(key, []).append(segment)
 
         runs = []
-        for (_path_key, road_type, half_width), items in grouped.items():
+        for (_path_key, road_type, half_width, explored), items in grouped.items():
             points = []
             previous_index = None
             for segment in sorted(items, key=lambda item: item["path_index"]):
@@ -319,7 +321,7 @@ class MapView(QWidget):
                 if not continuous and len(points) >= 2:
                     xs = [point[0] for point in points]
                     zs = [point[1] for point in points]
-                    runs.append((road_type, half_width, tuple(points),
+                    runs.append((road_type, half_width, explored, tuple(points),
                                  (min(xs), max(xs), min(zs), max(zs))))
                     points = []
                 if not points:
@@ -329,13 +331,13 @@ class MapView(QWidget):
             if len(points) >= 2:
                 xs = [point[0] for point in points]
                 zs = [point[1] for point in points]
-                runs.append((road_type, half_width, tuple(points),
+                runs.append((road_type, half_width, explored, tuple(points),
                              (min(xs), max(xs), min(zs), max(zs))))
         return runs
 
     def set_scene_polygons(self, payload):
         polygons = []
-        for item in (payload or [])[:2400]:
+        for item in (payload or [])[:3000]:
             try:
                 points = []
                 for point in item[0]:
@@ -356,7 +358,7 @@ class MapView(QWidget):
 
     def set_scene_features(self, payload):
         features = []
-        for item in (payload or [])[:1400]:
+        for item in (payload or [])[:1800]:
             try:
                 x, z = float(item[0]), float(item[1])
                 if not math.isfinite(x) or not math.isfinite(z):
@@ -373,6 +375,23 @@ class MapView(QWidget):
         xs = [p[0] for p in pts]
         zs = [p[1] for p in pts]
         return min(xs), max(xs), min(zs), max(zs)
+
+    @staticmethod
+    def _truck_marker_polygon(center, heading):
+        """Return a compact north-up marker aligned to ETS heading."""
+        fx, fz = -math.sin(heading), -math.cos(heading)
+        forward = QPointF(fx, fz)
+        right_axis = QPointF(-fz, fx)
+
+        def point(ahead, right):
+            return QPointF(
+                center.x() + forward.x()*ahead + right_axis.x()*right,
+                center.y() + forward.y()*ahead + right_axis.y()*right)
+
+        return QPolygonF([
+            point(19.0, 0.0), point(1.0, 8.0), point(-1.5, 3.2),
+            point(-13.0, 0.0), point(-1.5, -3.2), point(1.0, -8.0),
+        ])
 
     def paintEvent(self, event):
         qp = QPainter(self)
@@ -491,17 +510,18 @@ class MapView(QWidget):
 
         # Dark navigation-map road palette: [fill, casing].
         road_colours = {
-            "freeway": (QColor("#95813E"), QColor("#372F21")),
-            "divided": (QColor("#3C4043"), QColor("#4C5043")),
-            "no_vehicles": (QColor("#606166"), QColor("#888888")),
-            "local": (QColor("#606166"), QColor("#333333")),
+            "freeway": (QColor("#666A70"), QColor("#303338")),
+            "divided": (QColor("#62666B"), QColor("#303338")),
+            "no_vehicles": (QColor("#55595E"), QColor("#292C30")),
+            "local": (QColor("#5C6065"), QColor("#2C2F33")),
         }
+        explored_colours = (QColor("#D7B447"), QColor("#4B4024"))
         # World chords are pre-grouped once when the atomic scene revision is
         # received. Paint frames now cull a few continuous runs instead of
         # sorting and drawing up to 10,000 individual segments each time.
         road_paths = []
         view_radius = radius * 1.35
-        for road_type, half_width, points, bounds in self._road_runs:
+        for road_type, half_width, explored, points, bounds in self._road_runs:
             min_x, max_x, min_z, max_z = bounds
             if (max_x < cx - view_radius or min_x > cx + view_radius
                     or max_z < cz - view_radius or min_z > cz + view_radius):
@@ -511,18 +531,20 @@ class MapView(QWidget):
             path = QPainterPath(to_screen(points[0]))
             for point in points[1:]:
                 path.lineTo(to_screen(point))
-            road_paths.append((road_type, width, path))
+            road_paths.append((road_type, width, explored, path))
 
-        for road_type, width, path in road_paths:
-            _surface, casing = road_colours.get(
-                road_type, road_colours["local"])
+        for road_type, width, explored, path in road_paths:
+            _surface, casing = (explored_colours if explored else
+                                road_colours.get(
+                                    road_type, road_colours["local"]))
             qp.setPen(QPen(casing, width + 2.4, Qt.PenStyle.SolidLine,
                            Qt.PenCapStyle.RoundCap,
                            Qt.PenJoinStyle.RoundJoin))
             qp.drawPath(path)
-        for road_type, width, path in road_paths:
-            surface, _casing = road_colours.get(
-                road_type, road_colours["local"])
+        for road_type, width, explored, path in road_paths:
+            surface, _casing = (explored_colours if explored else
+                                road_colours.get(
+                                    road_type, road_colours["local"]))
             qp.setPen(QPen(surface, width, Qt.PenStyle.SolidLine,
                            Qt.PenCapStyle.RoundCap,
                            Qt.PenJoinStyle.RoundJoin))
@@ -584,23 +606,21 @@ class MapView(QWidget):
             self.trip_panel.hide()
 
         # Crisp maps-style position marker at the exact telemetry position.
+        # In this north-up projection world +Z points down on screen. The old
+        # marker negated Z a second time and therefore pointed opposite to the
+        # truck heading.
         c = to_screen(truck)
-        fx, fz = -math.sin(heading), -math.cos(heading)
-        tip = QPointF(c.x() + fx * 16, c.y() - fz * 16)
-        left = QPointF(c.x() - fz * 8 + fx * -7, c.y() - fx * 8 - fz * -7)
-        right = QPointF(c.x() + fz * 8 + fx * -7, c.y() + fx * 8 - fz * -7)
+        marker = self._truck_marker_polygon(c, heading)
+        shadow = QPolygonF([QPointF(point.x()+1.5, point.y()+2.0)
+                            for point in marker])
         qp.setPen(Qt.PenStyle.NoPen)
-        qp.setBrush(QColor(0, 0, 0, 75))
-        qp.drawEllipse(QPointF(c.x()+1.5, c.y()+2.0), 15, 15)
-        qp.setBrush(QColor("#FFFFFF"))
-        qp.drawEllipse(c, 14, 14)
-        qp.setBrush(QColor("#1597F5"))
-        qp.drawEllipse(c, 11.5, 11.5)
-        qp.setPen(QPen(QColor("#FFFFFF"), 1.2,
+        qp.setBrush(QColor(0, 0, 0, 105))
+        qp.drawPolygon(shadow)
+        qp.setPen(QPen(QColor("#FFFFFF"), 2.4,
                        Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
                        Qt.PenJoinStyle.RoundJoin))
-        qp.setBrush(QColor("#FFFFFF"))
-        qp.drawPolygon(QPolygonF([tip, left, right]))
+        qp.setBrush(QColor("#168FF0"))
+        qp.drawPolygon(marker)
 
         # Small unobtrusive interaction hint; no extra toolbar is needed.
         qp.setPen(QColor(185, 190, 198, 145))

@@ -4246,6 +4246,24 @@ class RoadNetwork:
             return "divided"
         return "local"
 
+    def live_map_road_uid(self, path_key):
+        """Return the stable map-item UID for an ordinary display road.
+
+        ``path_key`` is presentation metadata and prefab path indices are local
+        to a scene query.  Only an ordinary ``r<index>:<ribbon>`` key can be
+        proven to own a persistent road UID, so prefab geometry deliberately
+        returns ``None`` instead of inventing exploration identity.
+        """
+        try:
+            key = str(path_key)
+            if not key.startswith("r"):
+                return None
+            segment_index = int(key.split(":", 1)[0][1:])
+            road_uid = int(self._seg_road_uids[segment_index])
+            return road_uid if road_uid else None
+        except (ValueError, IndexError, TypeError, AttributeError):
+            return None
+
     def live_map_polygons_near(self, pos, radius: float = 900.0,
                                limit: int = 1200):
         """Return real placed-prefab polygons using maps' neighbour loops."""

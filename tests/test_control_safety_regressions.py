@@ -33,7 +33,7 @@ from core.sdk.scs_controller_writer import SCSControlsWriter, _FIELDS, _SIZE
 from plugins.autopilot.main import (
     Plugin as AutopilotPlugin, _authority_reason_key,
     authority_retention_lateral_limit, engagement_lateral_limit,
-    lane_authority_rejection_reason,
+    lane_authority_rejection_reason, planned_curve_speed_limit_ms,
 )
 from plugins.lanecontrol.main import Plugin as LaneControlPlugin
 from plugins.map.main import Plugin as MapPlugin
@@ -890,11 +890,40 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         plugin._engage_blend = 1.0
         plugin._was_active = True
         plugin.on_tick(0.10)
-        expected = curve_speed_limit_ms(18.0, 24.0, 1.8)
+        expected, usable = planned_curve_speed_limit_ms(18.0, 44.0, 12.0)
+        self.assertEqual(usable, 12.0)
         self.assertAlmostEqual(
             state.get("path_curve_speed_limit_ms"), expected, places=6)
         self.assertGreater(plugin.sdk.controller.brake, 0.0)
         self.assertEqual(plugin.sdk.controller.throttle, 0.0)
+
+    def test_real_222100_hairpin_brakes_early_with_response_reserve(self):
+        # The log reached the R18 entry at 43 km/h because the ideal point-mass
+        # envelope still allowed 46 km/h at 60 m. The loaded-truck envelope
+        # reserves brake response and therefore begins a smooth ramp earlier.
+        speed = 43.0 / 3.6
+        limit, usable = planned_curve_speed_limit_ms(18.7, 60.0, speed)
+        old_limit = curve_speed_limit_ms(18.7, 40.0, 1.8)
+        self.assertAlmostEqual(usable, 60.0 - 20.0 - speed, places=6)
+        self.assertLess(limit, 35.0 / 3.6)
+        self.assertGreater(old_limit, 45.0 / 3.6)
+
+        state = ready_navigation_state(
+            nav_active=True, nav_steering=-0.10, acc_throttle=1.0,
+            acc_brake=0.0, path_curvature_radius=18.7,
+            path_curve_distance_m=60.0)
+        plugin = autopilot({"speed": speed, "gear": 6}, state)
+        plugin._engage_blend = 1.0
+        plugin._was_active = True
+        samples = []
+        for _ in range(3):
+            plugin.on_tick(0.10)
+            samples.append(plugin.sdk.controller.brake)
+        self.assertGreater(samples[0], 0.0)
+        self.assertLess(samples[0], samples[1])
+        self.assertLessEqual(samples[1], samples[2])
+        self.assertLessEqual(max(b-a for a, b in zip(samples, samples[1:])),
+                             0.251)
 
     def test_live_distance_reason_logs_as_one_stable_category(self):
         self.assertEqual(_authority_reason_key(
