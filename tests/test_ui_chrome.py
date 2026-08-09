@@ -4,6 +4,7 @@ import unittest
 from unittest import mock
 
 from PyQt6.QtCore import QPoint, Qt
+from PyQt6.QtGui import QImage, QPainter
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import (QApplication, QWidget, QFrame, QLabel, QStatusBar,
                              QPushButton)
@@ -408,7 +409,10 @@ class UiChromeTests(unittest.TestCase):
                 [[0.0, 0.0], [20.0, 0.0], [20.0, 12.0], [0.0, 12.0]],
                 2, 2,
             ]],
-            "live_map_scene_features": [[12.0, 4.0, "facility", "gas_ico", ""]],
+            "live_map_scene_features": [
+                [12.0, 4.0, "facility", "gas_ico", ""],
+                [40.0, 24.0, "company", "tradeaux", "Tradeaux"],
+            ],
         })
         with mock.patch.object(MapPage, "_populate_maps", autospec=True):
             page = MapPage(state)
@@ -417,8 +421,15 @@ class UiChromeTests(unittest.TestCase):
         self.assertEqual(page.view.scene_polygons[0]["colour"], 2)
         self.assertEqual(page.view.scene_features[0]["icon"], "gas_ico")
         self.assertEqual(page._last_live_map_scene_revision, 9)
-        self.assertEqual(page.view.zoom_radius, 800.0)
+        self.assertEqual(page.view.zoom_radius, 900.0)
         self.assertEqual(page.view.trip_panel.objectName(), "LiveMapTripPanel")
+        page.view.resize(900, 600)
+        image = QImage(900, 600, QImage.Format.Format_ARGB32)
+        image.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(image)
+        page.view._paint_map(painter, 900, 600, (10.0, 20.0), 0.0)
+        painter.end()
+        self.assertFalse(image.isNull())
         page.close()
 
     def test_plugin_toggle_is_persisted_for_the_next_run(self):

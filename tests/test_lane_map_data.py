@@ -672,6 +672,25 @@ class RealMapLaneDataTests(unittest.TestCase):
             (second.centerline[0].x, second.centerline[0].y,
              second.centerline[0].z)), 1e-6)
 
+    def test_2026_08_09_hud_grade_has_no_moving_ninety_metre_cut(self):
+        """The exact rising road from the screenshot stays one display run."""
+        anchor_index = self.net._road_segment_by_uid[5962819240569748345]
+        anchor = next(
+            lane for lane in self.net._build_lane_segments(anchor_index)
+            if lane.direction == 1 and lane.lane_index == 0)
+        truck = anchor.centerline[len(anchor.centerline) // 2]
+        segments = self.net.hud_segments_3d_near(
+            (truck.x, truck.z), radius=230.0, limit=600,
+            altitude=truck.y, anchor_lane_id=anchor.lane_id)
+        grade_indices = sorted(
+            segment[11] for segment in segments
+            if segment[10] == "r132704:0")
+        self.assertIn(15, grade_indices)
+        self.assertTrue(all(
+            current == previous + 1
+            for previous, current in zip(
+                grade_indices, grade_indices[1:])))
+
     def test_2026_08_08_real_r120_chain_keeps_curve_gain_out_of_straight_mode(self):
         """Use the exact map items traversed during the 21:12 oscillation.
 

@@ -33,8 +33,8 @@ class NavigationPagePerformanceTests(unittest.TestCase):
         view = MapView(_State())
         valid = [[0.0, 1.0, 20.0], [2.0, 3.0, 21.0], "road"]
         invalid = [[math.nan, 1.0, 20.0], [2.0, 3.0, 21.0], "road"]
-        view.set_road_segments([valid] * 7000)
-        self.assertEqual(6500, len(view.road_segments))
+        view.set_road_segments([valid] * 11000)
+        self.assertEqual(10000, len(view.road_segments))
         self.assertEqual((0.0, 1.0), view.road_segments[0]["a"])
         self.assertEqual((2.0, 3.0), view.road_segments[0]["b"])
         self.assertEqual("road", view.road_segments[0]["kind"])
@@ -45,6 +45,20 @@ class NavigationPagePerformanceTests(unittest.TestCase):
         view = MapView(_State())
         self.assertFalse(hasattr(view, "road_net"))
         self.assertEqual([], view.road_segments)
+
+    def test_continuous_roads_are_prebuilt_once_per_scene_revision(self):
+        view = MapView(_State())
+        payload = [
+            [[float(index), 0.0, 0.0],
+             [float(index + 1), 0.0, 0.0],
+             "road", 2, False, True, False, False, 4.5, False,
+             "r10:0", index, "local"]
+            for index in range(1000)
+        ]
+        view.set_road_segments(payload)
+        self.assertEqual(1000, len(view.road_segments))
+        self.assertEqual(1, len(view._road_runs))
+        self.assertEqual(1001, len(view._road_runs[0][2]))
 
 
 if __name__ == "__main__":

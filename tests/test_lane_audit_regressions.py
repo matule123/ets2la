@@ -76,11 +76,13 @@ class LaneGeometryAuditTests(unittest.TestCase):
 
     def test_wide_live_map_scene_never_blocks_navigation_tick(self):
         started, release = threading.Event(), threading.Event()
+        requests = []
 
         class SlowPresentationNetwork:
             loaded = True
 
-            def live_map_segments_3d_near(self, *_args, **_kwargs):
+            def live_map_segments_3d_near(self, *_args, **kwargs):
+                requests.append(("roads", dict(kwargs)))
                 started.set()
                 release.wait(2.0)
                 return [((0.0, 0.0, 0.0), (1.0, 0.0, 0.0),
@@ -90,10 +92,12 @@ class LaneGeometryAuditTests(unittest.TestCase):
             def live_map_road_type(self, *_args, **_kwargs):
                 return "local"
 
-            def live_map_polygons_near(self, *_args, **_kwargs):
+            def live_map_polygons_near(self, *_args, **kwargs):
+                requests.append(("areas", dict(kwargs)))
                 return []
 
-            def map_features_near(self, *_args, **_kwargs):
+            def map_features_near(self, *_args, **kwargs):
+                requests.append(("features", dict(kwargs)))
                 return []
 
         plugin, sdk, _point = build_map_plugin()
@@ -117,6 +121,15 @@ class LaneGeometryAuditTests(unittest.TestCase):
         self.assertFalse(plugin._live_map_loading)
         self.assertEqual(sdk.get("live_map_scene_revision"), 1)
         self.assertEqual(len(sdk.get("live_map_road_segments")), 1)
+        self.assertEqual(requests, [
+            ("roads", {"radius": 1600.0, "limit": 10000,
+                       "altitude": 3.0}),
+            ("areas", {"radius": 1600.0, "limit": 2400}),
+            ("features", {"radius": 1600.0, "limit": 1400}),
+        ])
+        self.assertEqual(sdk.get("live_map_scene_radius_m"), 1600.0)
+        self.assertEqual(sdk.get("live_map_scene_counts"), {
+            "roads": 1, "areas": 0, "features": 0})
 
     def test_hidden_live_map_never_schedules_wide_presentation_scan(self):
         plugin, sdk, point = build_map_plugin()
@@ -141,9 +154,21 @@ class LaneGeometryAuditTests(unittest.TestCase):
         self.assertEqual(plugin._live_map_t, 0.0)
 
         sdk.set("live_map_view_active", True)
-        plugin._live_map_t = 0.95
+        plugin._live_map_t = 1.45
         plugin.on_tick(0.1)
         self.assertEqual(len(scheduled), 1)
+
+        # Keep the wide tile cached while the truck moves inside its margin.
+        plugin._live_map_pos = (point.x, point.z)
+        plugin._live_map_t = 2.0
+        sdk.set("truck_world_pos", (point.x + 100.0, point.z))
+        plugin.on_tick(0.1)
+        self.assertEqual(len(scheduled), 1)
+
+        plugin._live_map_t = 2.0
+        sdk.set("truck_world_pos", (point.x + 121.0, point.z))
+        plugin.on_tick(0.1)
+        self.assertEqual(len(scheduled), 2)
 
     def test_hud_prefab_scene_never_blocks_navigation_heartbeat(self):
         """15:16 trace: the synchronous HUD prefab scan froze map ticks."""
@@ -266,6 +291,42 @@ class LaneGeometryAuditTests(unittest.TestCase):
                     abs(command),
                     abs(debug["feed_forward"])
                     * CURVE_MIN_FEEDFORWARD_FRACTION - 1e-7)
+
+    def test_real_214845_r65_lane_edge_error_releases_curve_direction_hold(self):
+        """Replay the exact mechanism behind the latest right-curve exit.
+
+        At 38 km/h the captured R65 bend had +0.203 feed-forward, -0.564
+        confirmed feedback, -9 degrees of heading error and 2.128 m CTE.  The
+        old generic R70 guard replaced the required opposite correction with
+        +0.172 and kept steering off the road.  R18 protection remains covered
+        above, but a normal R65 bend at the lane edge must recover across zero.
+        """
+        route = Route(self._arc(-1.0, 65.0, 170.0))
+        position = route.points[25]
+        heading = (self._path_heading(position, route.points[28])
+                   - math.radians(9.0))
+        command = route.steering(
+            position, heading, 38.0 / 3.6,
+            cross_track_error_m=-2.128)
+        debug = route.last_steering_debug
+        self.assertAlmostEqual(debug["feed_forward"], 0.209, delta=0.012)
+        self.assertLess(debug["feedback"], -0.50)
+        self.assertFalse(debug["curve_direction_hold_eligible"])
+        self.assertFalse(debug["curve_direction_hold"])
+        self.assertLess(command, -0.30)
+
+        # The same R65 geometry still suppresses a small noisy sign reversal;
+        # only the measured lane-edge displacement releases it.
+        route.steering(
+            position, heading, 38.0 / 3.6,
+            cross_track_error_m=-0.40)
+        self.assertTrue(
+            route.last_steering_debug["curve_direction_hold_eligible"])
+        route.steering(
+            position, heading, 38.0 / 3.6,
+            cross_track_error_m=-0.91)
+        self.assertFalse(
+            route.last_steering_debug["curve_direction_hold_eligible"])
 
     def test_captured_ten_metre_service_exit_stays_inside_lane(self):
         # The same drive exposed a short R~=10.2 m service connector: 16 m
@@ -1047,6 +1108,16 @@ class LaneGeometryAuditTests(unittest.TestCase):
             (0.0, 0.0, 10.0), (2.5, 0.0, 10.4), 10.0, 0.0))
         self.assertFalse(RoadNetwork._hud_chord_is_sane(
             (0.0, 0.0, 10.0), (2.5, 0.0, 30.0), 10.0, 0.0))
+
+    def test_hud_connected_grade_has_no_truck_centred_ninety_metre_gap(self):
+        """21:48 HUD gap moved because the same chord changed at radius 90 m."""
+        grade = ((0.0, 0.0, 112.89), (3.04, 0.0, 113.04))
+        inside = RoadNetwork._hud_chord_is_sane(
+            *grade, altitude=109.0, distance2=89.9 ** 2)
+        outside = RoadNetwork._hud_chord_is_sane(
+            *grade, altitude=109.0, distance2=90.1 ** 2)
+        self.assertTrue(inside)
+        self.assertEqual(inside, outside)
 
 
 class TrajectoryNegativeAuditTests(unittest.TestCase):

@@ -86,6 +86,14 @@ TIGHT_CURVE_RADIUS = 60.0
 # wheel while the lane curvature still has one sign creates the observed
 # inside-edge cut followed by an opposite-side correction.
 CURVE_DIRECTION_HOLD_RADIUS_M = 70.0
+# A very tight connector still needs feed-forward sign protection while the
+# tractor is displaced: without it the controller can reverse lock inside an
+# R18 roundabout.  On an ordinary R60--R70 road bend, however, a confirmed
+# lane error near the edge is no longer noise and must be allowed to command a
+# return across zero.  The former single R70 condition caused the 21:48:45
+# departure by pinning +0.172 steering while CTE had already reached 2.128 m.
+CURVE_DIRECTION_HOLD_CORE_RADIUS_M = 30.0
+CURVE_DIRECTION_HOLD_MAX_CTE_M = 0.90
 CURVE_MIN_FEEDFORWARD_FRACTION = 0.85
 ARRIVAL_RADIUS = 12.0     # metres from the last point counts as "arrived"
 
@@ -162,6 +170,7 @@ class Route:
             "feed_forward": 0.0, "feedback": 0.0,
             "local_curvature": 0.0, "raw": 0.0, "output": 0.0,
             "curve_direction_hold": False,
+            "curve_direction_hold_eligible": False,
         }
 
     # --- Construction / persistence ------------------------------------------
@@ -535,6 +544,7 @@ class Route:
             "feed_forward": 0.0, "feedback": 0.0,
             "local_curvature": 0.0, "raw": 0.0, "output": 0.0,
             "curve_direction_hold": False,
+            "curve_direction_hold_eligible": False,
             "straight_recovery_active": False,
             "cte_gain": 0.0,
             "lane_recovery_multiplier": 1.0,
@@ -639,7 +649,11 @@ class Route:
         scaled_feedback = speed_gain(speed_ms) * feedback
         steer = feed_forward + scaled_feedback
         curve_direction_hold = False
+        curve_direction_hold_eligible = bool(
+            local_radius <= CURVE_DIRECTION_HOLD_CORE_RADIUS_M
+            or abs(cte) <= CURVE_DIRECTION_HOLD_MAX_CTE_M)
         if (local_radius <= CURVE_DIRECTION_HOLD_RADIUS_M
+                and curve_direction_hold_eligible
                 and abs(feed_forward) > 0.05
                 and (steer * feed_forward <= 0.0
                      or abs(steer) < (abs(feed_forward)
@@ -689,6 +703,8 @@ class Route:
             "raw": float(raw_steer),
             "output": float(steer),
             "curve_direction_hold": bool(curve_direction_hold),
+            "curve_direction_hold_eligible": bool(
+                curve_direction_hold_eligible),
             "straight_recovery_active": bool(straight_recovery_active),
             "cte_gain": float(cte_gain),
             "lane_recovery_multiplier": float(lane_recovery_multiplier),

@@ -119,12 +119,13 @@ class MapView(QWidget):
         # Bounded display-only snapshot from the map plugin. Loading another
         # complete RoadNetwork here doubles memory and can terminate the UI.
         self.road_segments = []
+        self._road_runs = []
         self.scene_polygons = []
         self.scene_features = []
         self._pal = None         # set by the page (or a default below)
         # A slightly wider initial field matches the navigation-map reference
         # and uses the broad, display-only 1.2 km scene from the map process.
-        self.zoom_radius = 800.0
+        self.zoom_radius = 900.0
         self.pan_world = [0.0, 0.0]
         self._drag_at = None
         self.setMinimumHeight(300)
@@ -212,7 +213,7 @@ class MapView(QWidget):
         self.empty_state.raise_()
 
     def reset_view(self):
-        self.zoom_radius = 800.0
+        self.zoom_radius = 900.0
         self.pan_world[:] = [0.0, 0.0]
         self.update()
 
@@ -221,13 +222,13 @@ class MapView(QWidget):
         self.update()
 
     def zoom_out(self):
-        self.zoom_radius = min(1400.0, self.zoom_radius * 1.28)
+        self.zoom_radius = min(1500.0, self.zoom_radius * 1.28)
         self.update()
 
     def wheelEvent(self, event):
         # Wheel up zooms in, wheel down zooms out to a broad regional view.
         factor = 0.78 if event.angleDelta().y() > 0 else 1.28
-        self.zoom_radius = max(70.0, min(1400.0, self.zoom_radius * factor))
+        self.zoom_radius = max(70.0, min(1500.0, self.zoom_radius * factor))
         self.update()
         event.accept()
 
@@ -268,7 +269,7 @@ class MapView(QWidget):
         map which reduced every motorway and prefab to the same two-pixel line.
         """
         segments = []
-        for item in (payload or [])[:6500]:
+        for item in (payload or [])[:10000]:
             try:
                 a, b = item[0], item[1]
                 values = float(a[0]), float(a[1]), float(b[0]), float(b[1])
@@ -293,10 +294,48 @@ class MapView(QWidget):
             except (TypeError, ValueError, IndexError):
                 continue
         self.road_segments = segments
+        self._road_runs = self._build_road_runs(segments)
+
+    @staticmethod
+    def _build_road_runs(segments):
+        """Pre-group ordered world chords once per atomic scene revision."""
+        grouped = {}
+        for source_index, segment in enumerate(segments):
+            path_key = segment["path_key"] or f"legacy:{source_index}"
+            half_width = round(float(segment["half_width"]) * 4.0) / 4.0
+            key = (path_key, segment["road_type"], half_width)
+            grouped.setdefault(key, []).append(segment)
+
+        runs = []
+        for (_path_key, road_type, half_width), items in grouped.items():
+            points = []
+            previous_index = None
+            for segment in sorted(items, key=lambda item: item["path_index"]):
+                first, second = segment["a"], segment["b"]
+                continuous = bool(
+                    points and previous_index is not None
+                    and segment["path_index"] == previous_index + 1
+                    and math.dist(points[-1], first) <= 3.5)
+                if not continuous and len(points) >= 2:
+                    xs = [point[0] for point in points]
+                    zs = [point[1] for point in points]
+                    runs.append((road_type, half_width, tuple(points),
+                                 (min(xs), max(xs), min(zs), max(zs))))
+                    points = []
+                if not points:
+                    points.append(first)
+                points.append(second)
+                previous_index = segment["path_index"]
+            if len(points) >= 2:
+                xs = [point[0] for point in points]
+                zs = [point[1] for point in points]
+                runs.append((road_type, half_width, tuple(points),
+                             (min(xs), max(xs), min(zs), max(zs))))
+        return runs
 
     def set_scene_polygons(self, payload):
         polygons = []
-        for item in (payload or [])[:1800]:
+        for item in (payload or [])[:2400]:
             try:
                 points = []
                 for point in item[0]:
@@ -317,7 +356,7 @@ class MapView(QWidget):
 
     def set_scene_features(self, payload):
         features = []
-        for item in (payload or [])[:1000]:
+        for item in (payload or [])[:1400]:
             try:
                 x, z = float(item[0]), float(item[1])
                 if not math.isfinite(x) or not math.isfinite(z):
@@ -418,15 +457,15 @@ class MapView(QWidget):
         # High-contrast dark map-area palette.  Geometry comes from real,
         # placed-prefab neighbour loops in the selected game dataset.
         map_area_colours = {
-            0: QColor.fromHsl(200, 5, 92),
-            1: QColor.fromHsl(38, 64, 89),
-            2: QColor.fromHsl(38, 64, 64),
-            3: QColor.fromHsl(143, 51, 64),
-            4: QColor.fromHsl(0, 255, 64),
-            5: QColor.fromHsl(107, 130, 64),
-            6: QColor.fromHsl(201, 135, 64),
-            7: QColor.fromHsl(53, 214, 64),
-            8: QColor.fromHsl(267, 117, 64),
+            0: QColor("#5B5E60"),   # authored prefab road surface
+            1: QColor("#6F6249"),   # light industrial/map area
+            2: QColor("#4A4234"),   # dark industrial/map area
+            3: QColor("#304B39"),   # green/landscaped area
+            4: QColor("#7F2020"),
+            5: QColor("#2D6532"),
+            6: QColor("#27566B"),
+            7: QColor("#756B25"),
+            8: QColor("#553A70"),
         }
         qp.setPen(Qt.PenStyle.NoPen)
         for polygon in self.scene_polygons:
@@ -443,15 +482,12 @@ class MapView(QWidget):
                            Qt.PenJoinStyle.RoundJoin))
             qp.drawPolygon(QPolygonF([to_screen(point) for point in points]))
 
-        visible = []
-        for segment in self.road_segments:
-            a, b = segment["a"], segment["b"]
-            if (max(a[0], b[0]) < cx - radius * 1.35
-                    or min(a[0], b[0]) > cx + radius * 1.35
-                    or max(a[1], b[1]) < cz - radius * 1.35
-                    or min(a[1], b[1]) > cz + radius * 1.35):
-                continue
-            visible.append((segment, to_screen(a), to_screen(b)))
+        # The current TruckLib export has no individual model/building file.
+        # Show restrained industrial footprints around exact company anchors
+        # as a presentation layer, below roads and GPS, instead of pretending
+        # that arbitrary scenery coordinates are authoritative buildings.
+        self._paint_company_footprints(
+            qp, to_screen, cx, cz, radius, scale)
 
         # Dark navigation-map road palette: [fill, casing].
         road_colours = {
@@ -460,24 +496,37 @@ class MapView(QWidget):
             "no_vehicles": (QColor("#606166"), QColor("#888888")),
             "local": (QColor("#606166"), QColor("#333333")),
         }
-        for segment, a, b in visible:
-            width = max(2.4, min(44.0,
-                2.0 * float(segment["half_width"]) * scale))
+        # World chords are pre-grouped once when the atomic scene revision is
+        # received. Paint frames now cull a few continuous runs instead of
+        # sorting and drawing up to 10,000 individual segments each time.
+        road_paths = []
+        view_radius = radius * 1.35
+        for road_type, half_width, points, bounds in self._road_runs:
+            min_x, max_x, min_z, max_z = bounds
+            if (max_x < cx - view_radius or min_x > cx + view_radius
+                    or max_z < cz - view_radius or min_z > cz + view_radius):
+                continue
+            width = round(max(1.8, min(
+                42.0, 2.0 * half_width * scale)) * 2.0) / 2.0
+            path = QPainterPath(to_screen(points[0]))
+            for point in points[1:]:
+                path.lineTo(to_screen(point))
+            road_paths.append((road_type, width, path))
+
+        for road_type, width, path in road_paths:
             _surface, casing = road_colours.get(
-                segment["road_type"], road_colours["local"])
+                road_type, road_colours["local"])
             qp.setPen(QPen(casing, width + 2.4, Qt.PenStyle.SolidLine,
                            Qt.PenCapStyle.RoundCap,
                            Qt.PenJoinStyle.RoundJoin))
-            qp.drawLine(a, b)
-        for segment, a, b in visible:
-            width = max(1.8, min(42.0,
-                2.0 * float(segment["half_width"]) * scale))
+            qp.drawPath(path)
+        for road_type, width, path in road_paths:
             surface, _casing = road_colours.get(
-                segment["road_type"], road_colours["local"])
+                road_type, road_colours["local"])
             qp.setPen(QPen(surface, width, Qt.PenStyle.SolidLine,
                            Qt.PenCapStyle.RoundCap,
                            Qt.PenJoinStyle.RoundJoin))
-            qp.drawLine(a, b)
+            qp.drawPath(path)
 
         # GPS uses only current-revision snapshot geometry. Recorded replay is
         # admitted only by live_map_navigation_points() in its exclusive mode.
@@ -558,21 +607,8 @@ class MapView(QWidget):
         qp.drawText(14, h - 12,
                     "koliesko: zoom  •  potiahnuť: posun  •  dvojklik: kamión")
 
-    def _paint_scene_features(self, qp, to_screen, cx, cz, radius, scale):
-        """Paint maps-style POI symbols and labels from exported SCS data."""
-        icon_colours = {
-            "gas": QColor("#00A84F"), "fuel": QColor("#00A84F"),
-            "parking": QColor("#1675C1"), "service": QColor("#D29B13"),
-            "dealer": QColor("#D29B13"), "garage": QColor("#1675C1"),
-            "train": QColor("#1675C1"), "ferry": QColor("#1675C1"),
-            "toll": QColor("#00A84F"), "weigh": QColor("#7D8B95"),
-            "viewpoint": QColor("#8D43C7"), "photo": QColor("#8D43C7"),
-            "recruit": QColor("#1675C1"), "agency": QColor("#1675C1"),
-        }
-        occupied = []
-        # Company anchors are exact exported positions. Give their industrial
-        # grounds a restrained footprint layer before drawing labels/icons.
-        # This is presentation-only and never enters routing or localisation.
+    def _paint_company_footprints(self, qp, to_screen, cx, cz, radius, scale):
+        """Paint lightweight industrial blocks around exported companies."""
         for feature in self.scene_features:
             if feature["kind"].lower() != "company":
                 continue
@@ -583,22 +619,45 @@ class MapView(QWidget):
             seed = sum(ord(char) for char in feature["icon"])
             for block in range(3 + seed % 3):
                 phase = (seed * 0.17) + block * 1.91
-                distance = (13.0 + block * 7.0) * max(.65, scale)
+                distance = (13.0 + block * 7.0) * scale
                 centre = QPointF(
                     point.x() + math.cos(phase) * distance,
                     point.y() + math.sin(phase) * distance)
-                width = max(8.0, min(30.0,
+                width = max(7.0, min(32.0,
                     (18.0 + (seed + block * 7) % 15) * scale))
-                height = max(6.0, min(20.0,
+                height = max(5.0, min(22.0,
                     (11.0 + (seed + block * 5) % 10) * scale))
                 qp.save()
                 qp.translate(centre)
                 qp.rotate(((seed + block * 11) % 9 - 4) * 5.0)
-                qp.setPen(QPen(QColor("#413B32"), 0.8))
-                qp.setBrush(QColor("#2D2C2A"))
+                qp.setPen(Qt.PenStyle.NoPen)
+                qp.setBrush(QColor(0, 0, 0, 90))
+                qp.drawRoundedRect(QRectF(-width / 2 + 1.5,
+                                          -height / 2 + 1.8,
+                                          width, height), 1.8, 1.8)
+                qp.setPen(QPen(QColor("#555148"), 0.9))
+                qp.setBrush(QColor("#343330"))
                 qp.drawRoundedRect(QRectF(-width / 2, -height / 2,
-                                          width, height), 1.5, 1.5)
+                                          width, height), 1.8, 1.8)
+                qp.setPen(QPen(QColor(120, 114, 101, 105), 0.7))
+                qp.drawLine(QPointF(-width*.34, 0.0),
+                            QPointF(width*.34, 0.0))
                 qp.restore()
+
+    def _paint_scene_features(self, qp, to_screen, cx, cz, radius, scale):
+        """Paint maps-style POI symbols and labels from exported SCS data."""
+        icon_colours = {
+            "gas": QColor("#00A84F"), "fuel": QColor("#00A84F"),
+            "parking": QColor("#1675C1"), "service": QColor("#D29B13"),
+            "dealer": QColor("#D29B13"), "garage": QColor("#1675C1"),
+            "train": QColor("#1675C1"), "ferry": QColor("#1675C1"),
+            "toll": QColor("#00A84F"), "weigh": QColor("#7D8B95"),
+            "viewpoint": QColor("#8D43C7"), "photo": QColor("#8D43C7"),
+            "recruit": QColor("#1675C1"), "agency": QColor("#1675C1"),
+            "hotel": QColor("#7559C7"), "rest": QColor("#1675C1"),
+            "food": QColor("#C06D2A"), "port": QColor("#1675C1"),
+        }
+        occupied = []
         for feature in self.scene_features:
             x, z = feature["pos"]
             if abs(x-cx) > radius*1.35 or abs(z-cz) > radius*1.35:
@@ -622,19 +681,27 @@ class MapView(QWidget):
             else:
                 key = next((name for name in icon_colours if name in icon), "")
                 colour = icon_colours.get(key, QColor("#65717B"))
-            if any(abs(point.x()-other.x()) < 17 and
-                   abs(point.y()-other.y()) < 17 for other in occupied):
+            size = (22 if kind == "company" else
+                    17 if scale < .40 else 20)
+            if any(abs(point.x()-other.x()) < size + 3 and
+                   abs(point.y()-other.y()) < size + 3
+                   for other in occupied):
                 continue
             occupied.append(point)
-            size = 15 if scale < .55 else 18
             rect_x, rect_y = point.x()-size/2, point.y()-size/2
-            qp.setPen(QPen(QColor("#F3F5F7"), 1.0))
+            qp.setPen(Qt.PenStyle.NoPen)
+            qp.setBrush(QColor(0, 0, 0, 105))
+            qp.drawRoundedRect(QRectF(rect_x + 1.5, rect_y + 2.0,
+                                      size, size), 4, 4)
+            qp.setPen(QPen(QColor("#F3F5F7"), 1.25))
             qp.setBrush(colour)
-            qp.drawRoundedRect(int(rect_x), int(rect_y), size, size, 2, 2)
+            qp.drawRoundedRect(QRectF(rect_x, rect_y, size, size), 4, 4)
             self._paint_feature_symbol(
                 qp, QRectF(rect_x, rect_y, size, size), icon, kind)
             if label and ((kind == "company" and radius <= 950)
-                          or kind in ("landmark", "viewpoint")):
+                          or kind in ("landmark", "viewpoint")
+                          or (kind in ("facility", "poi")
+                              and radius <= 350)):
                 font = qp.font()
                 font.setBold(True)
                 font.setPointSize(8 if kind == "company" else 7)

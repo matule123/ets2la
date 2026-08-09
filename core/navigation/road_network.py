@@ -860,7 +860,16 @@ class RoadNetwork:
 
     @staticmethod
     def _hud_chord_is_sane(a, b, altitude=None, distance2=float("inf")):
-        """Reject malformed display chords without changing map topology."""
+        """Reject malformed display chords without cutting valid road grades.
+
+        ``altitude`` and ``distance2`` remain accepted for compatibility, but
+        a chord is never selected by a hard truck-centred altitude ring.  The
+        former 90 m switch removed a perfectly continuous rising road while it
+        was inside the ring and showed it again immediately outside, producing
+        the moving HUD gap.  Deck identity is already established by the
+        anchored topological component; impossible vertical jumps are rejected
+        below from the chord's own geometry.
+        """
         if not all(math.isfinite(float(value)) for value in (*a, *b)):
             return False
         horizontal = math.hypot(b[0] - a[0], b[1] - a[1])
@@ -871,9 +880,6 @@ class RoadNetwork:
         # wrong-deck assignment and was rendered as a road into the sky.
         if abs(b[2] - a[2]) > max(1.5, horizontal * 0.35):
             return False
-        if altitude is not None and distance2 < 90.0 ** 2:
-            if min(abs(a[2] - altitude), abs(b[2] - altitude)) > 3.2:
-                return False
         return True
 
     def _road_curve_3d(self, first, second, spacing=2.5,

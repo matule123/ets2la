@@ -1562,6 +1562,10 @@ class Plugin(BasePlugin):
                 "live_map_scene_polygons": [],
                 "live_map_scene_features": [],
                 "live_map_scene_revision": self._live_map_revision + 1,
+                "live_map_scene_center": None,
+                "live_map_scene_radius_m": 0.0,
+                "live_map_scene_counts": {
+                    "roads": 0, "areas": 0, "features": 0},
                 "lane_match": None,
                 "nav_command_result": None,
                 "map_load_progress": {
@@ -1600,8 +1604,13 @@ class Plugin(BasePlugin):
 
         def _worker():
             try:
+                # Keep a 1.6 km cached presentation tile around the truck.
+                # MapView can display up to a 1.5 km radius, while the generous
+                # margin lets the truck move for several seconds without a
+                # rebuild.  This publishes more surrounding roads but avoids
+                # the former CPU-heavy scan after every 18 metres.
                 roads = net.live_map_segments_3d_near(
-                    request_pos, radius=1200.0, limit=8500,
+                    request_pos, radius=1600.0, limit=10000,
                     altitude=request_altitude)
                 road_payload = []
                 for (a, b, kind, lanes, divided, dash_on, pillar,
@@ -1618,11 +1627,11 @@ class Plugin(BasePlugin):
                     [[list(point) for point in points], colour, z_index]
                     for points, colour, z_index in
                     net.live_map_polygons_near(
-                        request_pos, radius=1200.0, limit=1800)
+                        request_pos, radius=1600.0, limit=2400)
                 ]
                 feature_payload = [list(feature) for feature in
                                    net.map_features_near(
-                                       request_pos, radius=1200.0, limit=1000)]
+                                       request_pos, radius=1600.0, limit=1400)]
 
                 if (job_id != self._live_map_job_id
                         or generation != self._map_load_generation
@@ -1634,6 +1643,13 @@ class Plugin(BasePlugin):
                     "live_map_scene_polygons": polygon_payload,
                     "live_map_scene_features": feature_payload,
                     "live_map_scene_revision": self._live_map_revision,
+                    "live_map_scene_center": list(request_pos),
+                    "live_map_scene_radius_m": 1600.0,
+                    "live_map_scene_counts": {
+                        "roads": len(road_payload),
+                        "areas": len(polygon_payload),
+                        "features": len(feature_payload),
+                    },
                 })
                 self._live_map_pos = request_pos
             except Exception as e:
@@ -1997,7 +2013,7 @@ class Plugin(BasePlugin):
                                     and self._lane_match is not None else None)):
                 self._roads_t = 0.0
 
-        # The top-down map needs a much wider (1.2 km) scene than the HUD.
+        # The top-down map needs a much wider scene than the HUD.
         # Building it continuously while its UI page is hidden previously
         # competed with this process's 100 Hz authority tick during the real
         # 21:12 stale-heartbeat stops. It is presentation-only, so request it
@@ -2010,8 +2026,8 @@ class Plugin(BasePlugin):
             self._live_map_t += delta_time
             live_map_moved = (self._live_map_pos is None or math.hypot(
                 float(pos[0]) - self._live_map_pos[0],
-                float(pos[1]) - self._live_map_pos[1]) >= 18.0)
-            if (self._live_map_t >= 1.0 and live_map_moved
+                float(pos[1]) - self._live_map_pos[1]) >= 120.0)
+            if (self._live_map_t >= 1.5 and live_map_moved
                     and self.road_net is not None and self.road_net.loaded):
                 altitude = float(self.sdk.get(
                     "truck_altitude", 0.0) or 0.0)
