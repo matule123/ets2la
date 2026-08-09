@@ -324,33 +324,119 @@ class Plugin(BasePlugin):
         return result
 
     def _turn_events_payload(self, lane_path):
-        """Semantic turn events derived from this exact validated LanePath."""
+        """Publish one semantic event for each proven route manoeuvre.
+
+        A prefab is commonly represented by several consecutive lane segments.
+        Treating every segment as a separate turn made a single junction emit
+        left/right/left instructions as the local curve changed sign.  Collapse
+        the whole topology-owned run and derive its instruction from the entry
+        and exit headings.  Lane-change segments remain separate because their
+        immutable proof already names the requested side.
+
+        Roundabouts are special: the indicator belongs to the *exit*, not to
+        every arc around the island.  The circulation direction proves which
+        side the exit is on (opposite the signed arc direction), so no chord or
+        guessed connector is introduced here.
+        """
         points = tuple(getattr(lane_path, "points", ()) or ())
         segments = tuple(getattr(lane_path, "segments", ()) or ())
         events = []
-        for segment_index, segment in enumerate(segments):
-            if (segment.lane_id.prefab_token in (None, "graph")
-                    and segment.lane_type not in ("prefab", "roundabout")):
-                continue
-            owned = [point for point in points
-                     if int(point.segment_index) == segment_index]
-            if len(owned) < 3:
-                continue
-            heading_change = sum(
+
+        def owned_points(start_index, end_index):
+            return [point for point in points
+                    if start_index <= int(point.segment_index) <= end_index]
+
+        def signed_heading_change(owned):
+            return sum(
                 (second.heading - first.heading + math.pi)
                 % (2.0 * math.pi) - math.pi
                 for first, second in zip(owned, owned[1:]))
-            if abs(heading_change) < math.radians(22.0):
+
+        def lane_identity(lane_id):
+            payload = self._lane_id_payload(lane_id)
+            return tuple(sorted((payload or {}).items()))
+
+        index = 0
+        while index < len(segments):
+            segment = segments[index]
+            proof = getattr(segment, "lane_change", None)
+            topology_owned = bool(
+                segment.lane_type in ("prefab", "roundabout")
+                or segment.lane_id.prefab_token not in (None, "graph"))
+            if proof is not None:
+                end_index = index
+                kind = "lane_change"
+            elif topology_owned:
+                end_index = index
+                while end_index + 1 < len(segments):
+                    following = segments[end_index + 1]
+                    if getattr(following, "lane_change", None) is not None:
+                        break
+                    if not (following.lane_type in ("prefab", "roundabout")
+                            or following.lane_id.prefab_token
+                            not in (None, "graph")):
+                        break
+                    end_index += 1
+                kind = ("roundabout" if any(
+                    item.lane_type == "roundabout"
+                    for item in segments[index:end_index + 1]) else "prefab")
+            else:
+                index += 1
                 continue
-            events.append({
-                "segment_index": int(segment_index),
-                "start_s_m": float(owned[0].s),
-                "end_s_m": float(owned[-1].s),
+
+            owned = owned_points(index, end_index)
+            if len(owned) < 2:
+                index = end_index + 1
+                continue
+            heading_change = signed_heading_change(owned)
+            if proof is not None:
+                direction = str(proof.direction)
+            elif kind == "roundabout":
+                if abs(heading_change) < math.radians(12.0):
+                    index = end_index + 1
+                    continue
+                # Positive ETS heading change is a left-circulating island,
+                # therefore its proven exit lies to the right (and vice versa).
+                direction = "right" if heading_change > 0.0 else "left"
+            else:
+                if abs(heading_change) < math.radians(22.0):
+                    index = end_index + 1
+                    continue
                 # ETS heading decreases for a right turn.
-                "direction": "right" if heading_change < 0.0 else "left",
+                direction = "right" if heading_change < 0.0 else "left"
+
+            first_segment, last_segment = segments[index], segments[end_index]
+            start_s, end_s = float(owned[0].s), float(owned[-1].s)
+            source_id = (proof.source_lane_id if proof is not None
+                         else first_segment.lane_id)
+            target_id = (proof.target_lane_id if proof is not None
+                         else last_segment.lane_id)
+            prefab_token = (proof.prefab_token if proof is not None else
+                            first_segment.lane_id.prefab_token)
+            identity = (
+                kind, direction, int(first_segment.gps_pair_index),
+                int(last_segment.gps_pair_index), str(prefab_token or ""),
+                lane_identity(source_id), lane_identity(target_id),
+            )
+            events.append({
+                "event_id": repr(identity),
+                "segment_index": int(index),
+                "end_segment_index": int(end_index),
+                "start_s_m": start_s,
+                "end_s_m": end_s,
+                # Junction/lane-change indication precedes entry. A roundabout
+                # indication precedes only its proven exit.
+                "signal_s_m": end_s if kind == "roundabout" else start_s,
+                "direction": direction,
                 "angle_deg": float(math.degrees(heading_change)),
-                "kind": str(segment.lane_type),
+                "kind": kind,
+                "gps_pair_start": int(first_segment.gps_pair_index),
+                "gps_pair_end": int(last_segment.gps_pair_index),
+                "prefab_token": prefab_token,
+                "source_lane_id": self._lane_id_payload(source_id),
+                "target_lane_id": self._lane_id_payload(target_id),
             })
+            index = end_index + 1
         return events
 
     def _next_lane_revision(self):

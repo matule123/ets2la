@@ -997,6 +997,20 @@ class LaneGeometryAuditTests(unittest.TestCase):
         self.assertLessEqual(abs(route.steering(
             (0.0, 0.0), heading, speed_ms=0.0)), 0.22 + 1e-9)
 
+    def test_captured_offcentre_engagement_uses_one_shallow_intercept(self):
+        # 22:41:56 replay: confirmed CTE 0.809 m and heading error about 2°
+        # previously saturated feedback at -1.3 before the truck moved. That
+        # created a left impulse followed by an opposite centre correction.
+        route = Route([[0.0, 0.0, 0.0], [0.0, 0.0, 40.0],
+                       [0.0, 0.0, 80.0]])
+        steering = route.steering(
+            (-0.809, 0.0), math.pi + math.radians(2.0), speed_ms=0.0,
+            cross_track_error_m=-0.809)
+        debug = route.last_steering_debug
+        self.assertTrue(debug["low_speed_capture_active"])
+        self.assertLess(abs(debug["cte_steer"]), math.radians(3.0))
+        self.assertLess(abs(steering), 0.08)
+
     def test_equal_parallel_candidates_are_rejected_without_history(self):
         def lane(uid, x):
             lid = LaneId(uid, 1, 0)

@@ -52,19 +52,14 @@ class PolicySignalLightRegressionTests(unittest.TestCase):
 
     def test_turnsignals_use_only_proven_turn_events(self):
         plugin = TurnSignalsPlugin.__new__(TurnSignalsPlugin)
-        plugin._route_key = None
-        plugin._route = None
-        path = [[0.0, 5.0, 0.0], [0.0, 5.0, -15.0],
-                [3.0, 5.0, -30.0], [12.0, 5.0, -60.0]]
-        snapshot = {"revision": 4, "route_build_id": "build"}
         right = [{"start_s_m": 15.0, "end_s_m": 70.0,
                   "direction": "right"}]
-        self.assertEqual(plugin._signal_for_events(
-            (0.0, 0.0), 0.0, path, right, snapshot), "right")
+        self.assertEqual(plugin._next_event(
+            right, progress=0.0, approach_m=65.0), right[0])
         # A geometrically curved road without a semantic junction event is not
         # an instruction to signal.
-        self.assertEqual(plugin._signal_for_events(
-            (0.0, 0.0), 0.0, path, [], snapshot), "off")
+        self.assertIsNone(plugin._next_event(
+            [], progress=0.0, approach_m=65.0))
 
     def test_map_publishes_turn_event_only_for_prefab_topology(self):
         lane_id = LaneId(10, 1, 0, prefab_token="junction",
@@ -91,6 +86,54 @@ class PolicySignalLightRegressionTests(unittest.TestCase):
             "look", "road", points)
         self.assertEqual(plugin._turn_events_payload(
             LanePath((road,), points, (1, 2), 27.0, 0.95, True)), [])
+
+    def test_compound_prefab_is_one_locked_semantic_manoeuvre(self):
+        plugin = MapPlugin.__new__(MapPlugin)
+        first_id = LaneId(10, 1, 0, prefab_token="junction",
+                          connector_index=0, connector_path=(1,))
+        second_id = LaneId(11, 1, 0, prefab_token="junction",
+                           connector_index=0, connector_path=(2,))
+        first_points = tuple(LanePoint(
+            float(i), 4.0, float(i * 8), float(i * 8), heading,
+            lane_id=first_id, segment_index=0)
+            for i, heading in enumerate((0.0, -0.35, -0.55)))
+        second_points = tuple(LanePoint(
+            float(i + 3), 4.0, float((i + 3) * 8), float((i + 3) * 8),
+            heading, lane_id=second_id, segment_index=1)
+            for i, heading in enumerate((-0.55, -0.42, -0.70)))
+        first = LaneSegment(first_id, 1, 2, 1, 0, 1, 4.0, "dataset",
+                            0, "look", "prefab", first_points,
+                            gps_pair_index=4)
+        second = LaneSegment(second_id, 2, 3, 1, 0, 1, 4.0, "dataset",
+                             0, "look", "prefab", second_points,
+                             gps_pair_index=5)
+        all_points = first_points + second_points
+        events = plugin._turn_events_payload(LanePath(
+            (first, second), all_points, (1, 2, 3), 40.0, 0.95, True))
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["direction"], "right")
+        self.assertEqual(events[0]["segment_index"], 0)
+        self.assertEqual(events[0]["end_segment_index"], 1)
+        self.assertEqual(events[0]["gps_pair_start"], 4)
+        self.assertEqual(events[0]["gps_pair_end"], 5)
+
+    def test_roundabout_signals_only_its_proven_exit_side(self):
+        plugin = MapPlugin.__new__(MapPlugin)
+        lane_id = LaneId(21, 1, 0, prefab_token="roundabout",
+                         connector_index=2, connector_path=(3, 4))
+        headings = (0.0, 0.35, 0.70, 1.05)
+        points = tuple(LanePoint(
+            float(i * 5), 4.0, float(i * 5), float(i * 12), heading,
+            lane_id=lane_id, segment_index=0)
+            for i, heading in enumerate(headings))
+        segment = LaneSegment(
+            lane_id, 10, 11, 1, 0, 1, 4.0, "dataset", 0, "look",
+            "roundabout", points, gps_pair_index=8)
+        event = plugin._turn_events_payload(LanePath(
+            (segment,), points, (10, 11), 36.0, 0.95, True))[0]
+        self.assertEqual(event["kind"], "roundabout")
+        self.assertEqual(event["direction"], "right")
+        self.assertEqual(event["signal_s_m"], event["end_s_m"])
 
     def test_turnsignal_remains_available_while_stopped_before_turn(self):
         points = [[0.0, 5.0, 0.0], [0.0, 5.0, -15.0],
@@ -123,6 +166,39 @@ class PolicySignalLightRegressionTests(unittest.TestCase):
         plugin.on_tick(0.1)
         self.assertEqual(state.get("route_blinker"), "off")
         self.assertTrue(state.get("lane_change_safe"))
+
+    def test_game_self_cancel_consumes_event_instead_of_reactivating_it(self):
+        points = [[0.0, 5.0, 0.0], [0.0, 5.0, -15.0],
+                  [3.0, 5.0, -30.0], [12.0, 5.0, -60.0]]
+        event = {"event_id": "junction-7", "start_s_m": 15.0,
+                 "end_s_m": 70.0, "signal_s_m": 15.0,
+                 "direction": "right", "kind": "prefab"}
+        state = _State({
+            "autopilot_active": True, "truck_speed_ms": 8.0,
+            "truck_world_pos": (0.0, 0.0), "truck_heading": 0.0,
+            "system_state": "DRIVING", "lane_trajectory_revision": 4,
+            "telemetry": {"truck": {
+                "blinkerLeft": False, "blinkerRight": False}},
+            "lane_trajectory": {
+                "valid": True, "revision": 4, "display_points": points,
+                "turn_events": [event],
+            },
+        })
+        plugin = TurnSignalsPlugin.__new__(TurnSignalsPlugin)
+        plugin.sdk = type("SDK", (), {
+            "shared_state": state,
+            "set": lambda _self, key, value: state.set(key, value),
+        })()
+        plugin.tags = type("Tags", (), {})()
+        plugin.on_start()
+        plugin.on_tick(0.05)
+        self.assertEqual(state.get("route_blinker"), "right")
+        state.values["telemetry"]["truck"]["blinkerRight"] = True
+        plugin.on_tick(0.05)
+        state.values["telemetry"]["truck"]["blinkerRight"] = False
+        plugin.on_tick(0.05)
+        self.assertEqual(state.get("route_blinker"), "off")
+        self.assertIn("junction-7", plugin._consumed_event_ids)
 
     def test_tts_dispatcher_serializes_rapid_messages_on_one_run_loop(self):
         class Engine:

@@ -843,18 +843,22 @@ class Plugin(BasePlugin):
                     steering_debug.get("feedback", 0.0) or 0.0)
                 diagnostic_direction_hold = bool(
                     steering_debug.get("curve_direction_hold", False))
+                diagnostic_low_speed_capture = bool(
+                    steering_debug.get("low_speed_capture_active", False))
             except (TypeError, ValueError, OverflowError):
                 live_lateral = live_heading = float("nan")
                 diagnostic_radius = None
                 diagnostic_curve_distance = float("nan")
                 diagnostic_feed_forward = diagnostic_feedback = float("nan")
                 diagnostic_direction_hold = False
+                diagnostic_low_speed_capture = False
             logging.info(
                 "autopilot: active=%s nav=%s engage=%.2f lane_cte=%.3f "
                 "lane_heading=%.1fdeg vision_off=%.3f "
                 "nav_steer=%.3f nav_filtered=%.3f target=%.3f "
                 "steer_out=%.3f speed=%.0f "
                 "curve_ff=%.3f curve_fb=%.3f curve_hold=%s "
+                "low_speed_capture=%s "
                 "curve_r=%s curve_d=%.1f curve_limit=%s "
                 "lane_revision=%s confidence=%.3f reject=%s",
                 active, nav_active, self._engage_blend,
@@ -864,6 +868,7 @@ class Plugin(BasePlugin):
                 float(self._last_steering), steering_val, speed_kmh,
                 diagnostic_feed_forward, diagnostic_feedback,
                 diagnostic_direction_hold,
+                diagnostic_low_speed_capture,
                 ("-" if diagnostic_radius is None
                  else f"{diagnostic_radius:.1f}"),
                 diagnostic_curve_distance,

@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import time
 
 try:
     import pydirectinput
@@ -128,6 +129,9 @@ class Controller:
         self._keys_down = set()
         self.current_blinker = "off"
         self._scs_blinker_button = None
+        self._observed_blinker = None
+        self._blinker_pending_signature = None
+        self._blinker_pending_at = 0.0
         self.current_hazard = False
         self._scs_hazard_button = False
         self._blinker_keys = _discover_blinker_keys()
@@ -176,10 +180,78 @@ class Controller:
         elif self.mode == "DIGITAL":
             self._key('s', value > 0.1)
 
+    def observe_blinker(self, side):
+        """Synchronize the toggle controller with ETS2's logical state.
+
+        ``blinker*Active`` is the stable indicator switch state; unlike the
+        ``blinker*On`` lamp value it does not alternate on every flash.  Keeping
+        this separate from the requested state prevents an ``off`` request from
+        switching a direction back on after ETS2 has already self-cancelled it.
+        """
+        self._observed_blinker = (side if side in ("left", "right", "off")
+                                  else None)
+
+    def release_blinker_pulse(self):
+        """Release a momentary SCS button without toggling the game state."""
+        if (self.mode == "SCS_SDK"
+                and getattr(self, "_scs_blinker_button", None) is not None):
+            if self._scs_blinker_button == "left":
+                self.scs.set_left_blinker(False)
+            else:
+                self.scs.set_right_blinker(False)
+            self._scs_blinker_button = None
+
+    def _press_blinker_button(self, button):
+        """Emit one toggle edge using the configured profile or SCS writer."""
+        key = getattr(self, "_blinker_keys", {}).get(button)
+        if _HAS_PDI and key:
+            pydirectinput.press(key)
+            return True
+        if self.mode == "SCS_SDK":
+            if button == "left":
+                self.scs.set_left_blinker(True)
+            else:
+                self.scs.set_right_blinker(True)
+            self._scs_blinker_button = button
+            return True
+        if _HAS_PDI:
+            pydirectinput.press("[" if button == "left" else "]")
+            return True
+        return False
+
     def set_blinker(self, side: str):
         """side: 'left', 'right' or 'off'. Tracks state so 'off' actually cancels."""
         if side not in ("left", "right", "off"):
             side = "off"
+
+        # Complete the one-frame SCS pulse before considering another edge.
+        self.release_blinker_pulse()
+
+        observed = getattr(self, "_observed_blinker", None)
+        if observed in ("left", "right", "off"):
+            self.current_blinker = observed
+            if side == observed:
+                self._blinker_pending_signature = None
+                return
+            # A toggle command needs time to appear in the next telemetry
+            # frame. Do not issue the same edge at engine frequency while the
+            # observed state is still unchanged.
+            signature = (side, observed)
+            now = time.monotonic()
+            if (getattr(self, "_blinker_pending_signature", None) == signature
+                    and now - getattr(self, "_blinker_pending_at", 0.0) < 0.35):
+                return
+            # Switching sides is a two-step operation: cancel the currently
+            # active side first; activate the requested side after telemetry
+            # proves the cancellation on a later frame.
+            button = observed if observed in ("left", "right") else side
+            if button in ("left", "right"):
+                logging.info("Blinker command: requested=%s observed=%s edge=%s",
+                             side, observed, button)
+                if self._press_blinker_button(button):
+                    self._blinker_pending_signature = signature
+                    self._blinker_pending_at = now
+            return
 
         # Prefer the key actually configured by the active ETS2 profile. The
         # controller DLL exposes semantic indicator fields, but unlike its
@@ -199,12 +271,6 @@ class Controller:
             # A blinker control is a button edge, not a persistent state. Hold
             # True for one engine frame, release it on the next, and only send
             # another edge when the requested side changes.
-            if self._scs_blinker_button is not None:
-                if self._scs_blinker_button == "left":
-                    self.scs.set_left_blinker(False)
-                else:
-                    self.scs.set_right_blinker(False)
-                self._scs_blinker_button = None
             if side == self.current_blinker:
                 return
             logging.info("Blinker: %s", side)

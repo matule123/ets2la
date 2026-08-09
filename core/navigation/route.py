@@ -56,6 +56,11 @@ K_HEADING = 1.0           # heading-error weight (Stanley keeps this at 1.0)
 K_CTE = 0.80              # damped lane-centre recovery; avoids edge tracking
 K_CTE_CURVE = 1.80        # hold the mapped lane centre against curve cutting
 K_SOFT = 1.0              # softening constant → CTE term never explodes at v=0
+# Below walking speed the ordinary Stanley denominator requests a steep
+# intercept although a stationary truck has no lateral velocity. Capture the
+# centre over a real forward distance so engagement follows one shallow path.
+LOW_SPEED_CAPTURE_MAX_MS = 5.0
+LOW_SPEED_CAPTURE_DISTANCE_M = 16.0
 # Coherent tractor bicycle model.  The former 5.0 m / 0.18 rad pair had a
 # minimum possible turning radius of 27.3 m, yet the validated ProMods trace
 # contains an 18 m roundabout/prefab lane.  It therefore saturated by design,
@@ -554,6 +559,8 @@ class Route:
             "curve_direction_hold_eligible": False,
             "curve_direction_hold_approach": False,
             "straight_recovery_active": False,
+            "low_speed_capture_active": False,
+            "cte_steer": 0.0,
             "cte_gain": 0.0,
             "lane_recovery_multiplier": 1.0,
         }
@@ -645,6 +652,21 @@ class Route:
                 and abs(local_curvature) < 1.0 / 500.0)
         cte_steer = math.atan(
             (cte_gain * cte) / (K_SOFT + v))
+        low_speed_capture_active = False
+        if (has_confirmed_lane_error
+                and v < LOW_SPEED_CAPTURE_MAX_MS
+                and abs(cte_steer) > 1e-9):
+            # atan2(CTE, forward distance) is the heading needed to converge
+            # directly on the same proven centreline. Blend continuously back
+            # to the full Stanley law by 18 km/h. Feed-forward is untouched.
+            geometric_limit = math.atan2(
+                abs(cte), LOW_SPEED_CAPTURE_DISTANCE_M)
+            blend = _clamp(v / LOW_SPEED_CAPTURE_MAX_MS, 0.0, 1.0)
+            capture_limit = (geometric_limit
+                             + (abs(cte_steer) - geometric_limit) * blend)
+            if abs(cte_steer) > capture_limit:
+                cte_steer = math.copysign(capture_limit, cte_steer)
+                low_speed_capture_active = True
         feed_forward = (math.atan(TRUCK_WHEELBASE_M * local_curvature)
                         / NORMALIZED_STEERING_ANGLE_RAD)
         # Heading/CTE feedback stays deliberately damped: amplifying every
@@ -726,6 +748,8 @@ class Route:
             "curve_direction_hold_approach": bool(
                 curve_direction_hold_approach),
             "straight_recovery_active": bool(straight_recovery_active),
+            "low_speed_capture_active": bool(low_speed_capture_active),
+            "cte_steer": float(cte_steer),
             "cte_gain": float(cte_gain),
             "lane_recovery_multiplier": float(lane_recovery_multiplier),
         }

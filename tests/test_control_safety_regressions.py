@@ -632,6 +632,26 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         self.assertEqual(controller.blinker, "off")
         self.assertEqual(state.get("active_blinker"), "off")
 
+    def test_legacy_planner_cannot_signal_from_lane_centring(self):
+        state = State({
+            "autopilot_active": True, "telemetry_valid": True,
+            "autopilot_control_heartbeat": time.monotonic(),
+            CTL_STEERING: -0.45, CTL_THROTTLE: 0.0, CTL_BRAKE: 0.0,
+            "route_blinker": "off", "planner_blinker": "left",
+        })
+        controller = Controller()
+        engine = UltraPilotEngine.__new__(UltraPilotEngine)
+        engine.shared_state = state
+        engine.controller = controller
+        engine._was_active = True
+        engine._drive_selector_pressed = False
+        engine._last_output_steering = 0.0
+        engine._last_output_brake = 0.0
+        engine._last_control_flush = time.monotonic()
+        engine._flush_controls()
+        self.assertEqual(controller.blinker, "off")
+        self.assertEqual(state.get("active_blinker"), "off")
+
     def test_drive_request_survives_worker_engine_scheduling_race(self):
         shared = ready_navigation_state().values
         shared["telemetry"] = {"truck": {"speed": 0.0, "gear": 0}}
@@ -694,6 +714,36 @@ class ControlSafetyRegressionTests(unittest.TestCase):
             controller.set_blinker("off")
             controller.set_blinker("off")
         self.assertEqual(controller.scs.events[-2:],
+                         [("right", True), ("right", False)])
+
+    def test_blinker_feedback_does_not_toggle_an_already_cancelled_signal(self):
+        class FakeSCS:
+            def __init__(self): self.events = []
+            def set_left_blinker(self, value):
+                self.events.append(("left", value))
+            def set_right_blinker(self, value):
+                self.events.append(("right", value))
+
+        controller = PhysicalController.__new__(PhysicalController)
+        controller.mode = "SCS_SDK"
+        controller.scs = FakeSCS()
+        controller.current_blinker = "off"
+        controller._scs_blinker_button = None
+        controller._blinker_keys = {}
+        controller._observed_blinker = None
+        controller._blinker_pending_signature = None
+        controller._blinker_pending_at = 0.0
+        with mock.patch("core.controller._HAS_PDI", False):
+            controller.observe_blinker("off")
+            controller.set_blinker("right")
+            controller.set_blinker("right")  # releases the one-frame pulse
+            controller.observe_blinker("right")
+            controller.set_blinker("right")
+            # ETS2 has now self-cancelled. Requesting off must be a no-op,
+            # not a second right-toggle which would switch it back on.
+            controller.observe_blinker("off")
+            controller.set_blinker("off")
+        self.assertEqual(controller.scs.events,
                          [("right", True), ("right", False)])
 
     def test_scs_hazard_emits_one_toggle_edge_and_following_release(self):

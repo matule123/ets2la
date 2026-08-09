@@ -636,20 +636,35 @@ class UltraPilotEngine:
         fight the player's steering through the SCS SDK input)."""
         safety_hazard = bool(self.shared_state.get(
             "safety_hazard_active", False))
+        truck_telemetry = ((self.shared_state.get("telemetry", {}) or {})
+                           .get("truck", {}) or {})
+        observed_left = bool(truck_telemetry.get("blinkerLeft", False))
+        observed_right = bool(truck_telemetry.get("blinkerRight", False))
+        observed_blinker = (
+            "left" if observed_left and not observed_right else
+            "right" if observed_right and not observed_left else "off")
+        observe_blinker = getattr(self.controller, "observe_blinker", None)
+        if callable(observe_blinker):
+            observe_blinker(observed_blinker)
         set_hazard = getattr(self.controller, "set_hazard", None)
         if callable(set_hazard):
             set_hazard(safety_hazard)
         if not self.shared_state.get("autopilot_active", False):
             if self._was_active:
+                # Cancel only an automatic signal that UltraPilot still owns.
+                # On later manual frames leave the driver's indicators alone.
+                if self.shared_state.get("active_blinker") in ("left", "right"):
+                    self.controller.set_blinker("off")
                 self.controller.release_all()
                 self.shared_state.update_batch({
                     "route_blinker": "off", "active_blinker": "off",
                 })
                 self._was_active = False
                 self._drive_selector_pressed = False
-            # Also gives the SCS button pulse its required following release
-            # frame; once released this is a no-op and does not fight the user.
-            self.controller.set_blinker("off")
+            release_blinker = getattr(
+                self.controller, "release_blinker_pulse", None)
+            if callable(release_blinker):
+                release_blinker()
             self._last_output_steering = 0.0
             self._last_output_brake = 0.0
             self._last_control_flush = time.monotonic()
@@ -737,13 +752,13 @@ class UltraPilotEngine:
         self._last_output_steering = steering
         self._last_output_brake = brake
 
-        # TurnSignals owns route-based indication. Keep its persistent request
-        # separate from the legacy planner so the planner cannot overwrite a
-        # turn signal one frame after the plugin switched it on.
+        # TurnSignals is the sole persistent owner. The old planner inferred a
+        # direction from instantaneous steering correction and is deliberately
+        # excluded: lane centring and road curvature are not turn instructions.
         blinker = ("off" if safety_hazard else
                    (self.shared_state.get(CTL_BLINKER)
                     or self.shared_state.get("route_blinker")
-                    or self.shared_state.get("planner_blinker", "off")))
+                    or "off"))
         self.controller.set_blinker(blinker)
         self.shared_state.set("active_blinker", blinker)
         if self.shared_state.get(CTL_BLINKER):
