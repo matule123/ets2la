@@ -843,6 +843,14 @@ class Plugin(BasePlugin):
                     steering_debug.get("feedback", 0.0) or 0.0)
                 diagnostic_direction_hold = bool(
                     steering_debug.get("curve_direction_hold", False))
+                diagnostic_hold_fraction = float(
+                    steering_debug.get(
+                        "curve_direction_hold_fraction", 0.0) or 0.0)
+                diagnostic_cte_residual = float(
+                    steering_debug.get("cte_geometry_residual", 0.0) or 0.0)
+                diagnostic_cte_proven = bool(
+                    steering_debug.get(
+                        "curve_direction_hold_error_proven", False))
                 diagnostic_low_speed_capture = bool(
                     steering_debug.get("low_speed_capture_active", False))
             except (TypeError, ValueError, OverflowError):
@@ -851,6 +859,8 @@ class Plugin(BasePlugin):
                 diagnostic_curve_distance = float("nan")
                 diagnostic_feed_forward = diagnostic_feedback = float("nan")
                 diagnostic_direction_hold = False
+                diagnostic_hold_fraction = diagnostic_cte_residual = float("nan")
+                diagnostic_cte_proven = False
                 diagnostic_low_speed_capture = False
             logging.info(
                 "autopilot: active=%s nav=%s engage=%.2f lane_cte=%.3f "
@@ -858,6 +868,7 @@ class Plugin(BasePlugin):
                 "nav_steer=%.3f nav_filtered=%.3f target=%.3f "
                 "steer_out=%.3f speed=%.0f "
                 "curve_ff=%.3f curve_fb=%.3f curve_hold=%s "
+                "hold_fraction=%.2f cte_residual=%.3f cte_proven=%s "
                 "low_speed_capture=%s "
                 "curve_r=%s curve_d=%.1f curve_limit=%s "
                 "lane_revision=%s confidence=%.3f reject=%s",
@@ -868,6 +879,8 @@ class Plugin(BasePlugin):
                 float(self._last_steering), steering_val, speed_kmh,
                 diagnostic_feed_forward, diagnostic_feedback,
                 diagnostic_direction_hold,
+                diagnostic_hold_fraction, diagnostic_cte_residual,
+                diagnostic_cte_proven,
                 diagnostic_low_speed_capture,
                 ("-" if diagnostic_radius is None
                  else f"{diagnostic_radius:.1f}"),

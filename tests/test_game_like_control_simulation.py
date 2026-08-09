@@ -109,6 +109,52 @@ class GameLikeControlSimulationTests(unittest.TestCase):
             abs(current-previous)
             for previous, current in zip(commands, commands[1:])), 0.091)
 
+    def test_compound_palisade_with_real_wheel_lag_recovers_across_zero(self):
+        """22:44 replay: a true CTE error must not be held into the bend."""
+        points = _compound_palisade_path()
+        route = Route(points)
+        autopilot = AutopilotPlugin.__new__(AutopilotPlugin)
+        autopilot._last_steering = 0.0
+        autopilot._filtered_nav_steering = 0.0
+        autopilot._filtered_nav_revision = None
+        speed, dt = curve_speed_limit_ms(20.0, 0.0), 0.05
+        x, z = route.points[0]
+        x += 0.45
+        heading = math.atan2(
+            -(route.points[2][0] - route.points[0][0]),
+            -(route.points[2][1] - route.points[0][1]))
+        physical_wheel = 0.0
+        errors, commands = [], []
+        duration = (route._cumulative_m[-1] - 6.0) / speed
+        for frame in range(int(duration / dt)):
+            segment = route.tracking_index((x, z), heading)
+            true_cte = route.cross_track_error(segment, (x, z))
+            measured_cte = true_cte + 0.12 * math.sin(frame * dt * 5.0)
+            raw = route.steering(
+                (x, z), heading, speed,
+                cross_track_error_m=measured_cte)
+            filtered = autopilot._smooth_navigation_steering(raw, dt, 22)
+            target = 0.72 * filtered + 0.28 * autopilot._last_steering
+            autopilot._last_steering = autopilot._ramp_steering(
+                target, dt)
+            physical_wheel += ((autopilot._last_steering - physical_wheel)
+                               * min(1.0, dt / 0.32))
+            heading -= (speed / TRUCK_WHEELBASE_M
+                        * physical_wheel
+                        * NORMALIZED_STEERING_ANGLE_RAD * dt)
+            x += -math.sin(heading) * speed * dt
+            z += -math.cos(heading) * speed * dt
+            segment = route.tracking_index((x, z), heading)
+            errors.append(route.cross_track_error(segment, (x, z)))
+            commands.append(autopilot._last_steering)
+        self.assertLess(max(map(abs, errors)), 1.20)
+        self.assertLess(abs(errors[-1]), 0.50)
+        self.assertTrue(any(value > 0.05 for value in commands))
+        self.assertTrue(any(value < -0.05 for value in commands))
+        self.assertLessEqual(max(
+            abs(current - previous) for previous, current
+            in zip(commands, commands[1:])), 0.031)
+
     def test_roundabout_survives_localization_chatter_and_wheel_lag(self):
         """Replay the 15:07 R18 failure with noisy CTE and a slow game wheel."""
         dt, radius = 0.05, 18.0

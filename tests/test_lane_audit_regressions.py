@@ -339,6 +339,43 @@ class LaneGeometryAuditTests(unittest.TestCase):
                 self.assertTrue(debug["curve_direction_hold"])
                 self.assertGreater(command * debug["feed_forward"], 0.0)
 
+    def test_real_224447_palisade_error_releases_tight_curve_hold(self):
+        """A real lane departure must override the tight-curve sign guard.
+
+        At 22:44:47 feed-forward was -0.240 while the independent feedback was
+        +0.450 and CTE had reached -0.974 m. The old approach hold forced
+        -0.204 anyway; one second later CTE was -2.515 m and localisation was
+        lost. Here Route projection and LaneMatch agree on the displacement,
+        unlike the synthetic localisation-chatter replay above.
+        """
+        for curve_sign in (-1.0, 1.0):
+            route = Route([(0.0, 0.0), (0.0, -100.0), (0.0, -200.0)])
+            route._curvature_at_progress = (
+                lambda _progress, _span=6.0, s=curve_sign: s / 56.0)
+            route.curve_profile_ahead = (
+                lambda *_args, s=curve_sign, **_kwargs: {
+                    "radius_m": 19.6, "distance_m": 28.0,
+                    "signed_curvature": s / 19.6, "horizon_m": 35.0,
+                })
+            cte = curve_sign * 0.974
+            position = (-cte, -20.0)
+            # The logger's 15.2° LaneMatch residual and Route's short local
+            # tangent are different frames; 30° reproduces the logged +0.4
+            # Route feedback against the -0.24 curvature feed-forward.
+            heading = -curve_sign * math.radians(30.0)
+            command = route.steering(
+                position, heading, 22.0 / 3.6,
+                cross_track_error_m=cte)
+            debug = route.last_steering_debug
+            with self.subTest(curve_sign=curve_sign):
+                self.assertLess(debug["cte_geometry_residual"], 0.01)
+                self.assertTrue(debug["curve_direction_hold_error_proven"])
+                self.assertEqual(debug["curve_direction_hold_fraction"], 0.0)
+                self.assertFalse(debug["curve_direction_hold"])
+                self.assertLess(
+                    debug["feed_forward"] * debug["feedback"], 0.0)
+                self.assertLess(command * debug["feed_forward"], 0.0)
+
     def test_real_214845_r65_lane_edge_error_releases_curve_direction_hold(self):
         """Replay the exact mechanism behind the latest right-curve exit.
 

@@ -98,7 +98,14 @@ CURVE_DIRECTION_HOLD_RADIUS_M = 70.0
 # return across zero.  The former single R70 condition caused the 21:48:45
 # departure by pinning +0.172 steering while CTE had already reached 2.128 m.
 CURVE_DIRECTION_HOLD_CORE_RADIUS_M = 30.0
-CURVE_DIRECTION_HOLD_MAX_CTE_M = 0.90
+# Direction protection is full only close to the centre and releases
+# continuously as a geometry-confirmed error approaches the lane edge. The
+# former binary/unconditional tight-curve hold kept steering into the bend at
+# CTE -0.974 and -2.515 m even though both LaneMatch and route projection
+# proved that the truck had already crossed the centreline.
+CURVE_DIRECTION_HOLD_FULL_CTE_M = 0.45
+CURVE_DIRECTION_HOLD_RELEASE_CTE_M = 0.90
+CURVE_DIRECTION_HOLD_CTE_AGREEMENT_M = 0.45
 # A tight connector can begin with a broader clothoid-like entry. Selecting
 # hold authority only from instantaneous radius made the R54 entry to the
 # captured R18 hairpin release the curve sign, then reacquire it a few metres
@@ -558,6 +565,8 @@ class Route:
             "curve_direction_hold": False,
             "curve_direction_hold_eligible": False,
             "curve_direction_hold_approach": False,
+            "curve_direction_hold_fraction": 0.0,
+            "curve_direction_hold_error_proven": False,
             "straight_recovery_active": False,
             "low_speed_capture_active": False,
             "cte_steer": 0.0,
@@ -603,10 +612,15 @@ class Route:
         # engages" bug. Capping it keeps the steering reasonable while still
         # pulling back toward the lane.
         has_confirmed_lane_error = cross_track_error_m is not None
-        cte = (self.cross_track_error(idx, pos)
-               if cross_track_error_m is None
-               else float(cross_track_error_m)) + lane_offset_m
+        geometric_cte = self.cross_track_error(idx, pos) + lane_offset_m
+        cte = (geometric_cte if cross_track_error_m is None
+               else float(cross_track_error_m) + lane_offset_m)
+        geometric_cte = max(-5.0, min(5.0, geometric_cte))
         cte = max(-5.0, min(5.0, cte))
+        cte_geometry_residual = abs(cte - geometric_cte)
+        cte_error_geometrically_proven = bool(
+            not has_confirmed_lane_error
+            or cte_geometry_residual <= CURVE_DIRECTION_HOLD_CTE_AGREEMENT_M)
 
         # --- Stanley lateral-control law (Fáza 3a) -------------------------
         #   δ = K_HEADING · heading_error + atan( K_CTE · cte / (K_SOFT + v) )
@@ -688,24 +702,42 @@ class Route:
             and float(approach_profile["distance_m"])
                 <= CURVE_DIRECTION_HOLD_APPROACH_DISTANCE_M
             and local_curvature * approach_signed > 0.0)
+        # A large LaneMatch jump which disagrees with the same immutable route
+        # projection is localisation chatter, so tight-curve direction remains
+        # protected. A real displacement agreed by both measurements must be
+        # allowed to steer back across zero. Release that protection
+        # continuously rather than switching authority at one threshold.
+        tight_curve_noise_protection = bool(
+            (local_radius <= CURVE_DIRECTION_HOLD_CORE_RADIUS_M
+             or curve_direction_hold_approach)
+            and not cte_error_geometrically_proven)
+        if tight_curve_noise_protection:
+            curve_direction_hold_fraction = 1.0
+        else:
+            curve_direction_hold_fraction = _clamp(
+                (CURVE_DIRECTION_HOLD_RELEASE_CTE_M - abs(cte))
+                / (CURVE_DIRECTION_HOLD_RELEASE_CTE_M
+                   - CURVE_DIRECTION_HOLD_FULL_CTE_M), 0.0, 1.0)
         curve_direction_hold_eligible = bool(
-            local_radius <= CURVE_DIRECTION_HOLD_CORE_RADIUS_M
-            or curve_direction_hold_approach
-            or abs(cte) <= CURVE_DIRECTION_HOLD_MAX_CTE_M)
+            curve_direction_hold_fraction > 0.0)
         if (local_radius <= CURVE_DIRECTION_HOLD_RADIUS_M
                 and curve_direction_hold_eligible
                 and abs(feed_forward) > 0.05
                 and (steer * feed_forward <= 0.0
                      or abs(steer) < (abs(feed_forward)
-                                      * CURVE_MIN_FEEDFORWARD_FRACTION))):
+                                      * CURVE_MIN_FEEDFORWARD_FRACTION
+                                      * curve_direction_hold_fraction))):
             # Correcting toward the lane centre is still allowed, but a noisy
             # tangent/CTE sample cannot demand the opposite lock while the
             # validated lane continues around the same tight arc.  The hold
             # disappears naturally at the prefab exit when local curvature
             # becomes straight or genuinely changes direction.
-            steer = (math.copysign(
-                abs(feed_forward) * CURVE_MIN_FEEDFORWARD_FRACTION,
-                feed_forward))
+            # Scale the protected minimum with geometry-confirmed recovery
+            # authority; no temporal filter or stale steering state is used.
+            steer = math.copysign(
+                abs(feed_forward) * CURVE_MIN_FEEDFORWARD_FRACTION
+                * curve_direction_hold_fraction,
+                feed_forward)
             curve_direction_hold = True
         raw_steer = steer
         # A fixed ±0.70 limit physically cannot follow a proven 25–40 m prefab
@@ -747,6 +779,12 @@ class Route:
                 curve_direction_hold_eligible),
             "curve_direction_hold_approach": bool(
                 curve_direction_hold_approach),
+            "curve_direction_hold_fraction": float(
+                curve_direction_hold_fraction),
+            "curve_direction_hold_error_proven": bool(
+                cte_error_geometrically_proven),
+            "geometric_cte": float(geometric_cte),
+            "cte_geometry_residual": float(cte_geometry_residual),
             "straight_recovery_active": bool(straight_recovery_active),
             "low_speed_capture_active": bool(low_speed_capture_active),
             "cte_steer": float(cte_steer),
