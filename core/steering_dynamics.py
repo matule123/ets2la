@@ -1,10 +1,18 @@
-"""Physical output dynamics for an already validated steering command.
+"""Physical output trajectory for an already validated steering command.
 
 This module does not choose a lane, alter a trajectory or calculate geometric
 feedback.  It turns the normalized steering-angle request produced by
 ``Route.steering`` into a command that a real steering actuator can follow.
 All limits are expressed per second and integrated with measured monotonic
-``dt``; no moving average or stored target history is used.
+``dt``; no moving average, low-pass target or stored target history is used.
+
+The game already contains the truck's steering response.  Modelling another
+settling response here adds phase lag to the closed control loop: after a bend
+the requested direction can reverse while the command is still following the
+previous half-cycle.  This module therefore plans the quickest trajectory that
+obeys the proven angle, rate and acceleration limits.  It starts braking the
+angular rate at the physical stopping distance instead of delaying the current
+geometric target through a second actuator model.
 """
 
 from __future__ import annotations
@@ -44,24 +52,24 @@ STEERING_STRAIGHT_DAMPING = 0.72
 STEERING_STRAIGHT_ACCEL_DAMPING = 0.35
 STEERING_CURVE_FULL_AUTHORITY_PER_M = 1.0 / 80.0
 STEERING_DEMAND_FULL_AUTHORITY = 0.25
-# Estimated 2% settling envelope of the commanded steering actuator.  The
-# angle/rate/acceleration clamps remain the hard physical bounds; this
-# critically damped target law only decides when to accelerate and brake.
-STEERING_SETTLING_LOW_SPEED_S = 0.33
-STEERING_SETTLING_HIGH_SPEED_S = 0.50
-STEERING_CURVE_SETTLING_LOW_SPEED_S = 0.17
-STEERING_CURVE_SETTLING_HIGH_SPEED_S = 0.30
 STEERING_NOISE_DEADBAND = 0.004
 STEERING_SETTLE_EPSILON = 1e-5
+# At the final few thousandths of normalized angle, the continuous
+# sqrt(2*a*distance) stopping envelope can still cross the target inside one
+# discrete control frame.  This 25 ms terminal horizon caps only that final
+# velocity so a final from-rest acceleration does not create a correction
+# larger than the current error. It acts on the current target and stores no
+# samples; an already moving actuator still obeys its acceleration bound.
+STEERING_TERMINAL_APPROACH_S = 0.025
 
 
 class SteeringDynamics:
-    """Second-order, speed-scheduled normalized steering actuator.
+    """Speed-scheduled normalized angle/rate/acceleration trajectory.
 
     ``command`` is normalized steering angle and ``rate`` is normalized angle
-    per second. Acceleration limits the first derivative's change. A critically
-    damped current-target law prevents oscillatory settling without a sample-
-    history average or a delayed copy of old geometry.
+    per second. Acceleration limits the first derivative's change.  The target
+    itself is never filtered: a stopping-distance velocity profile reaches the
+    newest target with the least phase delay permitted by the physical bounds.
     """
 
     def __init__(self, initial_command: float = 0.0):
@@ -84,7 +92,12 @@ class SteeringDynamics:
             "max_rate_per_s": STEERING_RATE_LOW_SPEED_PER_S,
             "max_acceleration_per_s2": STEERING_ACCEL_LOW_SPEED_PER_S2,
             "natural_frequency_rad_s": 0.0,
-            "settling_time_s": STEERING_SETTLING_LOW_SPEED_S,
+            "settling_time_s": 0.0,
+            "target_error": 0.0,
+            "stopping_distance": 0.0,
+            "safe_rate_per_s": 0.0,
+            "terminal_rate_per_s": 0.0,
+            "trajectory_phase": "settled",
             "target_saturated": False,
             "rate_limited": False,
             "acceleration_limited": False,
@@ -145,29 +158,6 @@ class SteeringDynamics:
         return (max_command, base_rate * rate_damping,
                 base_accel * accel_damping)
 
-    @staticmethod
-    def response(speed_ms: float,
-                 authority_fraction: float = 0.0) -> tuple[float, float]:
-        """Return estimated critical settling time and natural frequency."""
-        speed = _clamp(abs(float(speed_ms)), 0.0, STEERING_HIGH_SPEED_MS)
-        speed_fraction = _clamp(
-            (speed - STEERING_LOW_SPEED_FULL_AUTHORITY_MS)
-            / (STEERING_HIGH_SPEED_MS
-               - STEERING_LOW_SPEED_FULL_AUTHORITY_MS), 0.0, 1.0)
-        straight_settling = (STEERING_SETTLING_LOW_SPEED_S
-                             + (STEERING_SETTLING_HIGH_SPEED_S
-                                - STEERING_SETTLING_LOW_SPEED_S)
-                             * speed_fraction)
-        curve_settling = (STEERING_CURVE_SETTLING_LOW_SPEED_S
-                          + (STEERING_CURVE_SETTLING_HIGH_SPEED_S
-                             - STEERING_CURVE_SETTLING_LOW_SPEED_S)
-                          * speed_fraction)
-        authority = _clamp(float(authority_fraction), 0.0, 1.0)
-        settling_time = (straight_settling
-                         + (curve_settling - straight_settling) * authority)
-        # A critically damped second-order system settles to about 2% in 4/w.
-        return settling_time, 4.0 / settling_time
-
     def update(self, target: float, dt: float, *, speed_ms: float = 0.0,
                curvature_per_m: float = 0.0) -> float:
         try:
@@ -186,12 +176,8 @@ class SteeringDynamics:
         # Releasing an established lock needs the same authority as acquiring
         # it; otherwise the wheel would enter a curve faster than it unwinds.
         command_demand = max(abs(raw_target), abs(self.command))
-        authority_fraction = self._authority_fraction(
-            curvature, command_demand)
         max_command, max_rate, max_accel = self.limits(
             speed, curvature, command_demand)
-        settling_time, natural_frequency = self.response(
-            speed, authority_fraction)
         bounded_target = _clamp(raw_target, -max_command, max_command)
         deadband_active = bool(
             abs(curvature) < 1.0 / 500.0
@@ -201,38 +187,57 @@ class SteeringDynamics:
             bounded_target = 0.0
 
         error = bounded_target - self.command
+        previous_rate = self.rate
+        stopping_distance = (
+            previous_rate * previous_rate / (2.0 * max_accel)
+            if max_accel > 1e-9 else float("inf"))
+        continuous_safe_rate = math.sqrt(max(
+            0.0, 2.0 * max_accel * abs(error)))
+        terminal_rate = abs(error) / STEERING_TERMINAL_APPROACH_S
+        safe_rate = min(continuous_safe_rate, terminal_rate)
+        target_eta = (
+            abs(error) / max(max_rate, 1e-9)
+            + abs(previous_rate) / max(max_accel, 1e-9))
         if abs(error) <= STEERING_SETTLE_EPSILON and abs(self.rate) <= (
                 max_accel * used_dt):
-            previous_rate = self.rate
             self.command = bounded_target
             self.rate = 0.0
             acceleration = -previous_rate / used_dt
             rate_limited = acceleration_limited = False
+            trajectory_phase = "settled"
         else:
-            # Critically damped second-order target law (zeta = 1):
-            #   command'' = w^2 * error - 2*w * command'
-            # Hard physical rate/acceleration limits below remain authoritative.
-            # Unlike a sample-history average this acts on the current target,
-            # has explicit units and cannot retain an old steering direction.
-            desired_acceleration = (
-                natural_frequency * natural_frequency * error
-                - 2.0 * natural_frequency * self.rate)
-            acceleration = _clamp(
-                desired_acceleration, -max_accel, max_accel)
-            acceleration_limited = abs(
-                desired_acceleration) > max_accel + 1e-9
-            previous_rate = self.rate
-            unrestricted_rate = previous_rate + acceleration * used_dt
-            new_rate = _clamp(unrestricted_rate, -max_rate, max_rate)
-            rate_limited = abs(unrestricted_rate) > max_rate + 1e-9
-            # Report the acceleration actually integrated after a rate clamp.
+            direction = 1.0 if error > 0.0 else -1.0
+            desired_rate = direction * min(max_rate, safe_rate)
+            requested_rate_delta = desired_rate - previous_rate
+            allowed_rate_delta = max_accel * used_dt
+            actual_rate_delta = _clamp(
+                requested_rate_delta, -allowed_rate_delta,
+                allowed_rate_delta)
+            new_rate = _clamp(
+                previous_rate + actual_rate_delta, -max_rate, max_rate)
             acceleration = (new_rate - previous_rate) / used_dt
-            # Constant-acceleration kinematics. Semi-implicit Euler used the
-            # end-of-frame rate over the whole tick, then the former crossing
-            # guard snapped rate to zero at the target. Both made the measured
-            # second derivative exceed its advertised bound. Trapezoidal
-            # integration lets the critically damped law pass a tiny amount
-            # through a target and reverse continuously on following ticks.
+            acceleration_limited = bool(
+                abs(requested_rate_delta) > allowed_rate_delta + 1e-9)
+            rate_limited = bool(
+                safe_rate > max_rate + 1e-9
+                and abs(new_rate) >= max_rate - 1e-9)
+            signed_previous_rate = previous_rate * direction
+            signed_new_rate = new_rate * direction
+            if signed_previous_rate < -1e-9:
+                trajectory_phase = "reverse"
+            elif signed_new_rate + 1e-9 < signed_previous_rate:
+                trajectory_phase = "brake"
+            elif safe_rate <= max_rate + 1e-9:
+                trajectory_phase = "approach"
+            elif abs(new_rate) >= max_rate - 1e-9:
+                trajectory_phase = "cruise"
+            else:
+                trajectory_phase = "accelerate"
+            # Report the acceleration actually integrated after a rate clamp.
+            # Constant-acceleration kinematics keep the command and its first
+            # two derivatives inside the advertised physical envelope.  A
+            # tiny target crossing is corrected on the next tick with the same
+            # bounds; it is never hidden by snapping or temporal averaging.
             new_command = (self.command
                            + 0.5 * (previous_rate + new_rate) * used_dt)
             self.command = _clamp(new_command, -max_command, max_command)
@@ -250,8 +255,13 @@ class SteeringDynamics:
             "max_command": max_command,
             "max_rate_per_s": max_rate,
             "max_acceleration_per_s2": max_accel,
-            "natural_frequency_rad_s": natural_frequency,
-            "settling_time_s": settling_time,
+            "natural_frequency_rad_s": 0.0,
+            "settling_time_s": target_eta,
+            "target_error": bounded_target - self.command,
+            "stopping_distance": stopping_distance,
+            "safe_rate_per_s": safe_rate,
+            "terminal_rate_per_s": terminal_rate,
+            "trajectory_phase": trajectory_phase,
             "target_saturated": abs(raw_target) > max_command + 1e-9,
             "rate_limited": bool(rate_limited),
             "acceleration_limited": bool(acceleration_limited),

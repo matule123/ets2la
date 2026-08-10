@@ -898,10 +898,22 @@ class Plugin(BasePlugin):
                     dynamics_debug.get("rate_per_s", 0.0) or 0.0)
                 diagnostic_steering_accel = float(
                     dynamics_debug.get("acceleration_per_s2", 0.0) or 0.0)
+                diagnostic_steering_error = float(
+                    dynamics_debug.get("target_error", 0.0) or 0.0)
+                diagnostic_stopping_distance = float(
+                    dynamics_debug.get("stopping_distance", 0.0) or 0.0)
+                diagnostic_safe_rate = float(
+                    dynamics_debug.get("safe_rate_per_s", 0.0) or 0.0)
+                diagnostic_trajectory_phase = str(
+                    dynamics_debug.get("trajectory_phase", "unknown")
+                    or "unknown")
                 diagnostic_dt = float(getattr(
                     self, "_last_control_dt", 0.0) or 0.0)
                 diagnostic_dt_used = float(
                     dynamics_debug.get("dt_used_s", 0.0) or 0.0)
+                diagnostic_game_steering = float(observed_game_steering)
+                diagnostic_game_tracking = (
+                    diagnostic_game_steering - float(steering_val))
                 diagnostic_dynamics_flags = ",".join(name for name in (
                     "target_saturated", "rate_limited",
                     "acceleration_limited", "dt_limited",
@@ -925,7 +937,11 @@ class Plugin(BasePlugin):
                 diagnostic_trailer_reason = "malformed"
                 diagnostic_raw_target = diagnostic_bounded_target = float("nan")
                 diagnostic_steering_rate = diagnostic_steering_accel = float("nan")
+                diagnostic_steering_error = float("nan")
+                diagnostic_stopping_distance = diagnostic_safe_rate = float("nan")
+                diagnostic_trajectory_phase = "malformed"
                 diagnostic_dt = diagnostic_dt_used = float("nan")
+                diagnostic_game_steering = diagnostic_game_tracking = float("nan")
                 diagnostic_dynamics_flags = "malformed"
             self.sdk.shared_state.set("steering_dynamics_diagnostic", {
                 **dict(getattr(self, "_steering_dynamics_debug", {}) or {}),
@@ -937,6 +953,8 @@ class Plugin(BasePlugin):
                 "lane_heading_deg": live_heading,
                 "curvature_per_m": diagnostic_guidance_curvature,
                 "lookahead_m": diagnostic_guidance_lookahead,
+                "observed_game_steering": diagnostic_game_steering,
+                "game_steer_tracking_error": diagnostic_game_tracking,
                 "navigation_intent_id": self.sdk.shared_state.get(
                     "navigation_intent_id"),
                 "revision": snapshot_revision,
@@ -960,6 +978,8 @@ class Plugin(BasePlugin):
                 "trailer_reason=%s engine_steer=%.3f articulation_guard=%s "
                 "steer_raw=%.3f steer_bounded=%.3f steer_rate=%.3f/s "
                 "steer_accel=%.3f/s2 dt=%.4f used_dt=%.4f "
+                "steer_phase=%s steer_error=%.3f stop_angle=%.3f "
+                "safe_rate=%.3f/s game_steer=%.3f game_tracking=%.3f "
                 "heading_fb=%.3f cte_fb=%.3f steer_flags=%s "
                 "intent=%s lane_revision=%s confidence=%.3f reject=%s",
                 active, nav_active, self._engage_blend,
@@ -992,6 +1012,9 @@ class Plugin(BasePlugin):
                 diagnostic_raw_target, diagnostic_bounded_target,
                 diagnostic_steering_rate, diagnostic_steering_accel,
                 diagnostic_dt, diagnostic_dt_used,
+                diagnostic_trajectory_phase, diagnostic_steering_error,
+                diagnostic_stopping_distance, diagnostic_safe_rate,
+                diagnostic_game_steering, diagnostic_game_tracking,
                 diagnostic_heading_feedback, diagnostic_cte_feedback,
                 diagnostic_dynamics_flags,
                 self.sdk.shared_state.get("navigation_intent_id"),

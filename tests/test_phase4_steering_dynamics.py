@@ -74,6 +74,56 @@ def _old_first_order_profile(targets, dts, rate_per_s=0.60):
     return outputs
 
 
+class _Phase4CriticalSettlingDynamics(SteeringDynamics):
+    """Superseded Phase-4 settling law used only as a regression baseline."""
+
+    def update(self, target, dt, *, speed_ms=0.0, curvature_per_m=0.0):
+        raw_target = float(target)
+        used_dt = max(0.001, min(STEERING_DYNAMICS_MAX_DT_S, float(dt)))
+        command_demand = max(abs(raw_target), abs(self.command))
+        authority = self._authority_fraction(
+            curvature_per_m, command_demand)
+        max_command, max_rate, max_accel = self.limits(
+            speed_ms, curvature_per_m, command_demand)
+        bounded_target = max(-max_command, min(max_command, raw_target))
+        speed_fraction = max(0.0, min(
+            1.0, (abs(float(speed_ms)) - 5.0) / 20.0))
+        straight_settling = 0.33 + (0.50 - 0.33) * speed_fraction
+        curve_settling = 0.17 + (0.30 - 0.17) * speed_fraction
+        settling_time = (straight_settling
+                         + (curve_settling - straight_settling) * authority)
+        natural_frequency = 4.0 / settling_time
+        error = bounded_target - self.command
+        previous_rate = self.rate
+        desired_acceleration = (
+            natural_frequency * natural_frequency * error
+            - 2.0 * natural_frequency * previous_rate)
+        acceleration = max(-max_accel, min(max_accel,
+                                            desired_acceleration))
+        unrestricted_rate = previous_rate + acceleration * used_dt
+        new_rate = max(-max_rate, min(max_rate, unrestricted_rate))
+        acceleration = (new_rate - previous_rate) / used_dt
+        self.command = max(-max_command, min(
+            max_command,
+            self.command + 0.5 * (previous_rate + new_rate) * used_dt))
+        self.rate = new_rate
+        self.last_debug = {
+            **self._empty_debug(self.command),
+            "raw_target": raw_target,
+            "bounded_target": bounded_target,
+            "output": self.command,
+            "rate_per_s": self.rate,
+            "acceleration_per_s2": acceleration,
+            "dt_s": float(dt),
+            "dt_used_s": used_dt,
+            "speed_ms": abs(float(speed_ms)),
+            "max_command": max_command,
+            "max_rate_per_s": max_rate,
+            "max_acceleration_per_s2": max_accel,
+        }
+        return self.command
+
+
 def _arc_path(direction, radius_m, sweep_degrees=90.0, exit_m=60.0):
     points = [(0.0, float(z)) for z in range(0, 81, 2)]
     sweep = math.radians(sweep_degrees)
@@ -96,6 +146,45 @@ def _arc_path(direction, radius_m, sweep_degrees=90.0, exit_m=60.0):
         end_z + tangent_z * distance,
     ) for distance in range(2, int(exit_m) + 2, 2))
     return points
+
+
+def _straight_path(length_m=420.0):
+    return [(0.0, float(z)) for z in range(0, int(length_m) + 2, 2)]
+
+
+_CAPTURED_CURVE_EXIT_TARGETS = (
+    -0.027, -0.009, -0.008, 0.011, 0.030, -0.029, -0.084,
+    0.091, 0.118, -0.158, 0.170, -0.160, 0.160, -0.281,
+    0.325, -0.372, 0.068,
+)
+
+
+def _replay_captured_curve_exit(dynamics_factory):
+    dynamics = dynamics_factory(-0.031)
+    targets = []
+    outputs = []
+    # The log samples at 1 Hz; interpolate only between those measured values
+    # at the observed 24--37 ms control cadence. This does not invent another
+    # controller signal or feed the result back into geometry.
+    dt = 0.03
+    for start, end in zip(
+            _CAPTURED_CURVE_EXIT_TARGETS,
+            _CAPTURED_CURVE_EXIT_TARGETS[1:]):
+        for tick in range(33):
+            fraction = (tick + 1) / 33.0
+            target = start + (end - start) * fraction
+            targets.append(target)
+            outputs.append(dynamics.update(
+                target, dt, speed_ms=16.67, curvature_per_m=0.0))
+    sign_disagreements = sum(
+        target * output < 0.0 and abs(target) > 0.02
+        for target, output in zip(targets, outputs))
+    return {
+        "mean_tracking_error": statistics.fmean(
+            abs(target - output)
+            for target, output in zip(targets, outputs)),
+        "sign_disagreements": sign_disagreements,
+    }
 
 
 def _lane_change_path(direction, length_m=70.0, lane_width_m=3.6):
@@ -131,12 +220,17 @@ def _s_curve_path():
 
 
 def _simulate_route(points, speed_ms, *, wheel_response_s=0.32,
-                    noisy_localization=False):
+                    noisy_localization=False,
+                    dynamics_factory=SteeringDynamics,
+                    initial_lateral_m=0.0,
+                    initial_heading_error_deg=0.0):
     route = Route(points)
-    dynamics = SteeringDynamics()
+    dynamics = dynamics_factory()
     x, z = route.points[0]
+    x += float(initial_lateral_m)
     heading = math.atan2(
         -(route.points[2][0] - x), -(route.points[2][1] - z))
+    heading += math.radians(float(initial_heading_error_deg))
     dt = 0.05
     physical_wheel = 0.0
     ctes = []
@@ -264,7 +358,7 @@ class Phase4SteeringDynamicsTests(unittest.TestCase):
         self.assertAlmostEqual(limits[-1][0], 0.55)
 
     def test_left_and_right_radii_keep_lane_with_bounded_dynamics(self):
-        for radius in (30.0, 45.0, 80.0, 120.0, 220.0):
+        for radius in (18.0, 30.0, 45.0, 80.0, 120.0, 220.0):
             speed = min(15.0, curve_speed_limit_ms(radius, 0.0))
             for direction in (-1.0, 1.0):
                 metrics = _simulate_route(
@@ -279,6 +373,52 @@ class Phase4SteeringDynamicsTests(unittest.TestCase):
                     self.assertLessEqual(metrics["max_acceleration"], 14.01)
                     self.assertLessEqual(metrics["reaction_delay_s"], 0.151)
                     self.assertTrue(metrics["progress_monotonic"])
+
+    def test_real_curve_exit_phase_lag_settles_on_the_following_straight(self):
+        # 12:45:44--12:46:00 capture: the R83 exit reaches 60 km/h, then the
+        # old target/output pair alternates at 0.5--0.8 Hz.  CTE grows to
+        # 1.188 m and heading error to 13.2 degrees while feed-forward is
+        # effectively zero.  The 0.85 s effective response reproduces the
+        # observed command + game-wheel/vehicle phase in the closed loop.
+        for direction in (-1.0, 1.0):
+            points = _arc_path(direction, 83.0, 90.0, 300.0)
+            old = _simulate_route(
+                points, 16.67, wheel_response_s=0.85,
+                dynamics_factory=_Phase4CriticalSettlingDynamics)
+            repaired = _simulate_route(
+                points, 16.67, wheel_response_s=0.85)
+            with self.subTest(direction=direction):
+                self.assertGreater(old["max_cte_m"], 1.45)
+                self.assertGreaterEqual(old["sign_changes"], 10)
+                self.assertGreater(old["max_heading_error_deg"], 9.0)
+                self.assertLess(repaired["max_cte_m"], 0.70)
+                self.assertLess(repaired["rms_cte_m"], 0.25)
+                self.assertLess(abs(repaired["final_cte_m"]), 0.08)
+                self.assertLess(repaired["max_heading_error_deg"], 4.5)
+                self.assertLessEqual(repaired["sign_changes"], 7)
+
+    def test_captured_targets_do_not_retain_the_previous_half_cycle(self):
+        old = _replay_captured_curve_exit(
+            _Phase4CriticalSettlingDynamics)
+        repaired = _replay_captured_curve_exit(SteeringDynamics)
+        self.assertGreater(old["mean_tracking_error"], 0.035)
+        self.assertLess(repaired["mean_tracking_error"], 0.030)
+        self.assertGreaterEqual(old["sign_disagreements"], 35)
+        self.assertLessEqual(repaired["sign_disagreements"], 25)
+
+    def test_high_speed_straight_small_error_converges_without_hunting(self):
+        for lateral, heading in ((0.20, 1.2), (-0.20, -1.2)):
+            metrics = _simulate_route(
+                _straight_path(), 16.67, wheel_response_s=0.85,
+                initial_lateral_m=lateral,
+                initial_heading_error_deg=heading)
+            with self.subTest(lateral=lateral, heading=heading):
+                self.assertLess(metrics["max_cte_m"], 0.45)
+                self.assertLess(metrics["rms_cte_m"], 0.12)
+                self.assertLess(abs(metrics["final_cte_m"]), 0.05)
+                self.assertLess(
+                    abs(metrics["final_heading_error_deg"]), 0.20)
+                self.assertLessEqual(metrics["sign_changes"], 6)
 
     def test_s_curve_reversal_is_continuous_and_settles(self):
         metrics = _simulate_route(_s_curve_path(), 8.5)
@@ -402,6 +542,10 @@ class Phase4SteeringDynamicsTests(unittest.TestCase):
         for key in (
                 "raw_target", "bounded_target", "output", "rate_per_s",
                 "acceleration_per_s2", "dt_s", "speed_ms",
+                "target_error", "stopping_distance", "safe_rate_per_s",
+                "terminal_rate_per_s",
+                "trajectory_phase", "observed_game_steering",
+                "game_steer_tracking_error",
                 "feed_forward", "heading_feedback", "cte_feedback",
                 "lane_cte_m", "lane_heading_deg", "curvature_per_m",
                 "lookahead_m", "navigation_intent_id", "revision"):
