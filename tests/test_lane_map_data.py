@@ -730,14 +730,24 @@ class RealMapLaneDataTests(unittest.TestCase):
         route = Route(route_points)
         captured_radius_samples = []
         for index in range(3, len(route.points) - 4):
-            position = route.points[index]
+            base = route.points[index]
+            following = route.points[index + 1]
+            dx, dz = following[0] - base[0], following[1] - base[1]
+            segment_length = math.hypot(dx, dz)
+            requested_cte = -1.258
+            position = (
+                base[0] + dz / segment_length * requested_cte,
+                base[1] - dx / segment_length * requested_cte,
+            )
             target = route.points[index + 3]
             heading = math.atan2(
-                -(target[0] - position[0]),
-                -(target[1] - position[1]))
+                -(target[0] - base[0]),
+                -(target[1] - base[1]))
+            tracking_index = route.tracking_index(position, heading)
+            live_cte = route.cross_track_error(tracking_index, position)
             command = route.steering(
                 position, heading, 12.5,
-                cross_track_error_m=-1.258)
+                cross_track_error_m=live_cte)
             debug = route.last_steering_debug
             curvature = abs(debug["local_curvature"])
             radius = 1.0 / curvature if curvature > 1e-9 else 1e9
@@ -746,8 +756,13 @@ class RealMapLaneDataTests(unittest.TestCase):
                 self.assertAlmostEqual(
                     debug["lane_recovery_multiplier"], 1.0, places=7)
                 self.assertFalse(debug["straight_recovery_active"])
-                self.assertLess(abs(debug["feedback"]), 0.20)
-                self.assertLess(abs(command), 0.32)
+                self.assertEqual(debug["cte_gain"], 0.0)
+                self.assertFalse(debug["curve_direction_hold"])
+                self.assertLess(debug["cte_geometry_residual"], 0.03)
+                self.assertLess(
+                    abs(debug["guidance_heading_error_rad"]),
+                    math.radians(18.0))
+                self.assertLessEqual(abs(command), 0.70)
         self.assertGreaterEqual(len(captured_radius_samples), 20)
 
     def test_known_prefab_pair_uses_full_lane_curve_chain(self):

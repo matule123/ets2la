@@ -384,22 +384,25 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         self.assertLess(first, 0.03)
         self.assertGreaterEqual(first, -0.03)
 
-    def test_navigation_filter_rejects_one_frame_opposite_lock(self):
-        plugin = autopilot({"speed": 10.0, "gear": 3}, State())
-        first = plugin._smooth_navigation_steering(0.40, 0.05, 10)
-        opposite_spike = plugin._smooth_navigation_steering(-0.40, 0.05, 10)
-        self.assertEqual(first, 0.40)
-        self.assertGreater(opposite_spike, 0.0)
-        # A persistent genuine direction change still crosses zero promptly.
-        settled = [plugin._smooth_navigation_steering(-0.40, 0.05, 10)
-                   for _ in range(12)]
-        self.assertLess(settled[-1], -0.35)
+    def test_authoritative_navigation_has_one_physical_steering_stage(self):
+        state = ready_navigation_state(
+            nav_active=True, nav_steering=0.40,
+            path_curvature_radius=80.0, path_curve_distance_m=0.0)
+        plugin = autopilot({"speed": 10.0, "gear": 3}, state)
+        plugin._engage_blend = 1.0
+        plugin._was_active = True
+        plugin.on_tick(0.10)
+        self.assertAlmostEqual(state.get("nav_steering_filtered"), 0.40)
+        self.assertAlmostEqual(plugin._last_steering, 0.06)
 
-    def test_navigation_filter_never_blends_stale_revision(self):
-        plugin = autopilot({"speed": 10.0, "gear": 3}, State())
-        plugin._smooth_navigation_steering(0.55, 0.05, 10)
-        changed = plugin._smooth_navigation_steering(-0.25, 0.05, 11)
-        self.assertEqual(changed, -0.25)
+        # The current geometric target is published without a stale temporal
+        # average. The sole physical ramp still makes a reversal pass zero.
+        state.set("nav_steering", -0.40)
+        plugin.on_tick(0.10)
+        self.assertAlmostEqual(state.get("nav_steering_filtered"), -0.40)
+        self.assertAlmostEqual(plugin._last_steering, 0.0, places=7)
+        plugin.on_tick(0.10)
+        self.assertAlmostEqual(plugin._last_steering, -0.06)
 
     def test_scs_writer_layout_matches_shipped_controller_dll(self):
         offsets, total = {}, 0

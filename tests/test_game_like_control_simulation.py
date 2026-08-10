@@ -109,14 +109,91 @@ class GameLikeControlSimulationTests(unittest.TestCase):
             abs(current-previous)
             for previous, current in zip(commands, commands[1:])), 0.091)
 
+    def test_left_and_right_curves_have_no_lane_edge_bias(self):
+        means = []
+        for direction in (-1.0, 1.0):
+            points = _path_with_curve(direction, 45.0)
+            errors, _commands, progresses = _simulate(
+                points, curve_speed_limit_ms(45.0, 0.0))
+            settled = [error for error, progress in zip(errors, progresses)
+                       if 95.0 < progress < progresses[-1] - 5.0]
+            with self.subTest(direction=direction):
+                self.assertTrue(settled)
+                self.assertLess(
+                    sum(map(abs, settled)) / len(settled), 0.12)
+            means.append(sum(settled) / len(settled))
+        # Mirrored geometry must produce mirrored, equally small residuals;
+        # it may not prefer the centre line in one bend and verge in the other.
+        self.assertAlmostEqual(means[0], -means[1], delta=0.01)
+
+    def test_real_231025_r47_trace_has_no_alternating_controller_conflict(self):
+        """Replay the final -0.214/+0.214/-0.192 authority-loss mechanism."""
+        for direction in (-1.0, 1.0):
+            points = _path_with_curve(direction, 47.0)
+            exit_x, exit_z = points[-1]
+            before_x, before_z = points[-2]
+            dx, dz = exit_x - before_x, exit_z - before_z
+            tangent_length = math.hypot(dx, dz)
+            points.extend((
+                exit_x + dx / tangent_length * distance,
+                exit_z + dz / tangent_length * distance,
+            ) for distance in range(2, 42, 2))
+
+            route = Route(points)
+            autopilot = AutopilotPlugin.__new__(AutopilotPlugin)
+            autopilot._last_steering = 0.0
+            x, z = route.points[0]
+            heading = math.atan2(
+                -(route.points[2][0] - x),
+                -(route.points[2][1] - z))
+            speed = curve_speed_limit_ms(47.0, 0.0)
+            dt, physical_wheel = 0.05, 0.0
+            errors, commands, progresses = [], [], []
+            duration = (route._cumulative_m[-1] - 5.0) / speed
+            for frame in range(int(duration / dt)):
+                segment = route.tracking_index((x, z), heading)
+                true_cte = route.cross_track_error(segment, (x, z))
+                # The real immutable revision had <=0.131 m locator/route
+                # residual while its old controller changed lock every second.
+                measured_cte = true_cte + 0.13 * math.sin(
+                    frame * dt * 2.0 * math.pi / 0.90)
+                raw = route.steering(
+                    (x, z), heading, speed,
+                    cross_track_error_m=measured_cte)
+                autopilot._last_steering = autopilot._ramp_steering(
+                    raw, dt)
+                physical_wheel += (
+                    (autopilot._last_steering - physical_wheel)
+                    * min(1.0, dt / 0.32))
+                heading -= (speed / TRUCK_WHEELBASE_M
+                            * physical_wheel
+                            * NORMALIZED_STEERING_ANGLE_RAD * dt)
+                x += -math.sin(heading) * speed * dt
+                z += -math.cos(heading) * speed * dt
+                segment = route.tracking_index((x, z), heading)
+                errors.append(route.cross_track_error(segment, (x, z)))
+                commands.append(autopilot._last_steering)
+                progresses.append(route.tracking_progress((x, z), heading))
+
+            bend = [(error, command) for error, command, progress
+                    in zip(errors, commands, progresses)
+                    if 88.0 < progress < 145.0]
+            strong_reversals = sum(
+                1 for (_error_a, previous), (_error_b, current)
+                in zip(bend, bend[1:])
+                if previous * current < 0.0
+                and abs(previous) > 0.08 and abs(current) > 0.08)
+            with self.subTest(direction=direction):
+                self.assertLess(max(abs(error) for error, _ in bend), 0.25)
+                self.assertEqual(strong_reversals, 0)
+                self.assertLess(abs(errors[-1]), 0.08)
+
     def test_compound_palisade_with_real_wheel_lag_recovers_across_zero(self):
         """22:44 replay: a true CTE error must not be held into the bend."""
         points = _compound_palisade_path()
         route = Route(points)
         autopilot = AutopilotPlugin.__new__(AutopilotPlugin)
         autopilot._last_steering = 0.0
-        autopilot._filtered_nav_steering = 0.0
-        autopilot._filtered_nav_revision = None
         speed, dt = curve_speed_limit_ms(20.0, 0.0), 0.05
         x, z = route.points[0]
         x += 0.45
@@ -133,10 +210,7 @@ class GameLikeControlSimulationTests(unittest.TestCase):
             raw = route.steering(
                 (x, z), heading, speed,
                 cross_track_error_m=measured_cte)
-            filtered = autopilot._smooth_navigation_steering(raw, dt, 22)
-            target = 0.72 * filtered + 0.28 * autopilot._last_steering
-            autopilot._last_steering = autopilot._ramp_steering(
-                target, dt)
+            autopilot._last_steering = autopilot._ramp_steering(raw, dt)
             physical_wheel += ((autopilot._last_steering - physical_wheel)
                                * min(1.0, dt / 0.32))
             heading -= (speed / TRUCK_WHEELBASE_M
@@ -179,8 +253,6 @@ class GameLikeControlSimulationTests(unittest.TestCase):
             route = Route(points)
             autopilot = AutopilotPlugin.__new__(AutopilotPlugin)
             autopilot._last_steering = 0.0
-            autopilot._filtered_nav_steering = 0.0
-            autopilot._filtered_nav_revision = None
             x, z = route.points[0]
             heading = math.atan2(
                 -(route.points[2][0] - x),
@@ -200,11 +272,7 @@ class GameLikeControlSimulationTests(unittest.TestCase):
                 raw = route.steering(
                     (x, z), measured_heading, speed,
                     cross_track_error_m=measured_cte)
-                filtered = autopilot._smooth_navigation_steering(
-                    raw, dt, 10)
-                target = 0.72 * filtered + 0.28 * autopilot._last_steering
-                autopilot._last_steering = autopilot._ramp_steering(
-                    target, dt)
+                autopilot._last_steering = autopilot._ramp_steering(raw, dt)
                 # ETS steering does not reach a requested wheel angle in one
                 # control frame; reproduce a 320 ms first-order response.
                 physical_wheel += ((autopilot._last_steering - physical_wheel)

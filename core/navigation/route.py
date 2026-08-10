@@ -41,26 +41,16 @@ def iter_path_xz(points):
         if math.isfinite(x) and math.isfinite(z):
             yield x, z
 
-# Tuning: gentle + far lookahead so the truck anticipates curves smoothly
-# instead of jerking late into them (which caused it to crash on bends).
-#
-# The lateral controller is now a **Stanley law** (Hoffmann/Stanford, the
-# standard for kinematic lane-keeping) instead of two hand-tuned gains:
-#     δ = heading_error + atan( k_cte · cte / (k_soft + speed) )
-# This couples the heading correction and the cross-track correction in a
-# physically meaningful way: at speed the CTE term is damped (no twitchy
-# over-correction), at crawl it's strong (precise low-speed placement). It
-# tracks curves far better than the old ANGLE_GAIN·h + CTE_GAIN·cte sum,
-# which oscillated in S-bends because the two terms fought each other.
+# Legacy Stanley calibration helpers remain public for compatibility and
+# isolated calibration tests. Authoritative GPS steering no longer sums these
+# heading and CTE gains; it uses the coherent geometric target below.
 K_HEADING = 1.0           # heading-error weight (Stanley keeps this at 1.0)
 K_CTE = 0.80              # damped lane-centre recovery; avoids edge tracking
 K_CTE_CURVE = 1.80        # hold the mapped lane centre against curve cutting
 K_SOFT = 1.0              # softening constant → CTE term never explodes at v=0
-# Below walking speed the ordinary Stanley denominator requests a steep
-# intercept although a stationary truck has no lateral velocity. Capture the
-# centre over a real forward distance so engagement follows one shallow path.
+# Below walking speed, expand the same target so engagement follows one
+# shallow intercept rather than demanding a steep correction at standstill.
 LOW_SPEED_CAPTURE_MAX_MS = 5.0
-LOW_SPEED_CAPTURE_DISTANCE_M = 16.0
 # Coherent tractor bicycle model.  The former 5.0 m / 0.18 rad pair had a
 # minimum possible turning radius of 27.3 m, yet the validated ProMods trace
 # contains an 18 m roundabout/prefab lane.  It therefore saturated by design,
@@ -69,50 +59,27 @@ LOW_SPEED_CAPTURE_DISTANCE_M = 16.0
 # angle cover a 13.3 m radius without inventing geometry or raising any gate.
 TRUCK_WHEELBASE_M = 3.8
 NORMALIZED_STEERING_ANGLE_RAD = 0.28
-# Calibrated conversion of Stanley's feedback angle to the normalized SCS
-# steering input. The former implicit factor was 0.18 (feedback radians were
-# effectively treated as controller units), which the real trace proves too
-# weak; a full 1.0 physical conversion hunts on sampled S-curves. Closed-loop
-# sweeps across 0--90 km/h select this bounded response.
-# Closed-loop sweeps of the coherent model across 0--90 km/h select this
-# bounded response. It keeps broad-curve lane-centre recovery strong without
-# re-amplifying curvature feed-forward or producing a sign-change snap.
-FEEDBACK_STEERING_RESPONSE = 0.36
 STEERING_CURVATURE_SPAN_M = 6.0
-STEERING_PREVIEW_MIN_M = 0.5
-STEERING_PREVIEW_MAX_M = 4.0
+# A single geometric target replaces the former independent curvature,
+# heading and CTE commands.  Eight metres is long enough to avoid reacting to
+# individual two-metre trajectory samples, while still following an R18 lane
+# without cutting its chord.  At road speed the target expands gradually; at
+# crawl it expands towards 20 m so engaging off-centre produces one shallow
+# intercept instead of a left/right correction cycle.
+GUIDANCE_LOOKAHEAD_MIN_M = 8.0
+GUIDANCE_LOOKAHEAD_MAX_M = 30.0
+GUIDANCE_LOW_SPEED_LOOKAHEAD_M = 20.0
 # A longer window is retained for anticipatory curve braking; steering uses
 # the shorter local window above so it cannot cut across a bend.
 CURV_WINDOW_M = 60.0
 CURVE_PROFILE_STEP_M = 4.0
 TIGHT_CURVE_RADIUS = 60.0
-# On a proven prefab/roundabout arc, instantaneous heading and CTE feedback
-# may reduce the physical feed-forward but must not reverse it.  Reversing the
-# wheel while the lane curvature still has one sign creates the observed
-# inside-edge cut followed by an opposite-side correction.
-CURVE_DIRECTION_HOLD_RADIUS_M = 70.0
-# A very tight connector still needs feed-forward sign protection while the
-# tractor is displaced: without it the controller can reverse lock inside an
-# R18 roundabout.  On an ordinary R60--R70 road bend, however, a confirmed
-# lane error near the edge is no longer noise and must be allowed to command a
-# return across zero.  The former single R70 condition caused the 21:48:45
-# departure by pinning +0.172 steering while CTE had already reached 2.128 m.
-CURVE_DIRECTION_HOLD_CORE_RADIUS_M = 30.0
-# Direction protection is full only close to the centre and releases
-# continuously as a geometry-confirmed error approaches the lane edge. The
-# former binary/unconditional tight-curve hold kept steering into the bend at
-# CTE -0.974 and -2.515 m even though both LaneMatch and route projection
-# proved that the truck had already crossed the centreline.
-CURVE_DIRECTION_HOLD_FULL_CTE_M = 0.45
-CURVE_DIRECTION_HOLD_RELEASE_CTE_M = 0.90
+# These values now drive audit fields only. They report whether LaneLocator and
+# Route projection agree and whether a tight curve is approaching; neither
+# replaces or clamps the geometric steering command.
 CURVE_DIRECTION_HOLD_CTE_AGREEMENT_M = 0.45
-# A tight connector can begin with a broader clothoid-like entry. Selecting
-# hold authority only from instantaneous radius made the R54 entry to the
-# captured R18 hairpin release the curve sign, then reacquire it a few metres
-# later. That geometry-driven mode switch produced alternating steering.
 CURVE_DIRECTION_HOLD_APPROACH_RADIUS_M = 30.0
 CURVE_DIRECTION_HOLD_APPROACH_DISTANCE_M = 35.0
-CURVE_MIN_FEEDFORWARD_FRACTION = 0.85
 ARRIVAL_RADIUS = 12.0     # metres from the last point counts as "arrived"
 
 
@@ -572,6 +539,10 @@ class Route:
             "cte_steer": 0.0,
             "cte_gain": 0.0,
             "lane_recovery_multiplier": 1.0,
+            "guidance_lookahead_m": 0.0,
+            "guidance_target_distance_m": 0.0,
+            "guidance_heading_error_rad": 0.0,
+            "guidance_curvature": 0.0,
         }
         if len(self.points) < 2:
             return 0.0
@@ -582,12 +553,9 @@ class Route:
         # onto a neighbouring arm and immediately pull across the median.
         idx = self.tracking_index(pos, heading)
 
-        # Use the proven stable preview from the pre-intent controller. A very
-        # short 2–4 m tangent and 4–8 m curvature window amplified normal
-        # two-metre LaneTrajectory sampling noise into alternating full-lock
-        # commands at segment boundaries.
-        # Stanley uses the local path tangent. A direction to a 70 m chord
-        # cuts one bend toward the median and the opposite bend toward grass.
+        # This short tangent selects and verifies the forward route segment; it
+        # is not a second steering target. The geometric guidance target below
+        # is interpolated by arc-length on the same confirmed trajectory.
         projection = self.lookahead_point(idx, pos, 0.0)
         tangent_window = _clamp(3.0 + abs(speed_ms) * 0.15, 3.0, 6.0)
         tangent_target = self.lookahead_point(idx, pos, tangent_window)
@@ -607,10 +575,9 @@ class Route:
         # Cross-track error, measured to the lane-offset line so it pulls us
         # into our lane, not the centre. CLAMPED to ±5 m: when the truck is far
         # from the road (e.g. a wrong map dataset is loaded, or we're on a ferry
-        # / car park) the raw CTE can be 30+ m, which saturates the Stanley law
-        # to full-lock — that's the „truck yanks hard left the moment autopilot
-        # engages" bug. Capping it keeps the steering reasonable while still
-        # pulling back toward the lane.
+        # / car park) the raw CTE can be 30+ m. Capping it prevents an invalid
+        # position from turning the geometric intercept into immediate full
+        # lock; the runtime authority gate still handles the fail-closed stop.
         has_confirmed_lane_error = cross_track_error_m is not None
         geometric_cte = self.cross_track_error(idx, pos) + lane_offset_m
         cte = (geometric_cte if cross_track_error_m is None
@@ -622,76 +589,111 @@ class Route:
             not has_confirmed_lane_error
             or cte_geometry_residual <= CURVE_DIRECTION_HOLD_CTE_AGREEMENT_M)
 
-        # --- Stanley lateral-control law (Fáza 3a) -------------------------
-        #   δ = K_HEADING · heading_error + atan( K_CTE · cte / (K_SOFT + v) )
-        # The CTE term is a steering ANGLE (not a velocity), so it's damped at
-        # speed (K_SOFT + v in the denominator) and strong at crawl. Combined
-        # with the heading error it tracks the lane without the oscillation the
-        # old pure-gain sum produced in S-bends. The speed_gain schedule scales
-        # the whole command down with speed (gentle inputs at 90 km/h).
+        # --- Coherent trajectory guidance ---------------------------------
+        #
+        # The previous controller added three independently sampled demands:
+        # local-curvature feed-forward, tangent heading feedback and LaneMatch
+        # CTE feedback.  In the captured 23:10:25 hairpin those terms alternated
+        # -0.230, +0.319, -0.429 and +0.340 while the immutable trajectory and
+        # revision stayed unchanged.  This is a control-law conflict, not map
+        # noise: each term was valid in isolation but referred to a different
+        # point along the articulated vehicle's rapidly changing path.
+        #
+        # Aim at one interpolated point on the *same* authoritative trajectory
+        # and convert that chord into the bicycle curvature which reaches it:
+        #
+        #     kappa = 2 sin(alpha) / chord_length
+        #
+        # On a circular lane this yields exactly 1/R.  Off-centre it produces
+        # one continuous intercept, so heading and lateral recovery cannot
+        # command opposite locks on consecutive ticks.  This is the useful
+        # geometric property of ETS2LA's short local target, adapted without
+        # copying its code or weakening UltraPilot's lane authority contract.
         v = max(abs(speed_ms), 0.0)
         progress = self.tracking_progress(pos, heading)
-        # Feed-forward remains local. The long curve horizon belongs only to
-        # speed/braking; moving this preview farther ahead makes the truck cut
-        # the straight before a junction rather than follow the lane entry.
-        preview = _clamp(v * 0.35, STEERING_PREVIEW_MIN_M,
-                         STEERING_PREVIEW_MAX_M)
-        local_curvature = self._curvature_at_progress(progress + preview)
-        local_radius = (1e6 if abs(local_curvature) < 1e-9
-                        else 1.0 / abs(local_curvature))
-        cte_gain = curve_cte_gain(local_radius, cte)
-        straight_recovery_active = False
-        lane_recovery_multiplier = 1.0
-        if has_confirmed_lane_error:
-            # The old binary R100 test treated every radius above 100 m as a
-            # straight. On the captured R119--R122 bend, CTE 1.258 m therefore
-            # multiplied an already curve-strengthened gain by about 2.38:
-            # feedback became -0.434 on top of -0.107 feed-forward, yielding
-            # the logged -0.541 command and the growing opposite correction.
-            #
-            # Residual recovery is now a geometric gain schedule, not a
-            # steering-signal filter. It is absent through the proven R120
-            # bend, blends in only as the lane approaches R500, and remains
-            # strongest on a genuine straight. This preserves the earlier R400
-            # drift correction without applying straight-line gain mid-curve.
-            recovery_error_weight = _clamp(
-                (abs(cte) - 0.35) / 1.15, 0.0, 1.0)
-            recovery_geometry_weight = _clamp(
-                (local_radius - 160.0) / (500.0 - 160.0), 0.0, 1.0)
-            lane_recovery_multiplier += (
-                1.75 * recovery_error_weight * recovery_geometry_weight)
-            cte_gain *= lane_recovery_multiplier
-            straight_recovery_active = (
-                recovery_error_weight > 0.0
-                and abs(local_curvature) < 1.0 / 500.0)
-        cte_steer = math.atan(
-            (cte_gain * cte) / (K_SOFT + v))
-        low_speed_capture_active = False
-        if (has_confirmed_lane_error
-                and v < LOW_SPEED_CAPTURE_MAX_MS
-                and abs(cte_steer) > 1e-9):
-            # atan2(CTE, forward distance) is the heading needed to converge
-            # directly on the same proven centreline. Blend continuously back
-            # to the full Stanley law by 18 km/h. Feed-forward is untouched.
-            geometric_limit = math.atan2(
-                abs(cte), LOW_SPEED_CAPTURE_DISTANCE_M)
-            blend = _clamp(v / LOW_SPEED_CAPTURE_MAX_MS, 0.0, 1.0)
-            capture_limit = (geometric_limit
-                             + (abs(cte_steer) - geometric_limit) * blend)
-            if abs(cte_steer) > capture_limit:
-                cte_steer = math.copysign(capture_limit, cte_steer)
-                low_speed_capture_active = True
+        moving_lookahead = _clamp(
+            max(GUIDANCE_LOOKAHEAD_MIN_M, v * 1.5),
+            GUIDANCE_LOOKAHEAD_MIN_M, GUIDANCE_LOOKAHEAD_MAX_M)
+        if v < LOW_SPEED_CAPTURE_MAX_MS:
+            low_speed_lookahead = (
+                GUIDANCE_LOW_SPEED_LOOKAHEAD_M
+                - (GUIDANCE_LOW_SPEED_LOOKAHEAD_M
+                   - GUIDANCE_LOOKAHEAD_MIN_M)
+                * (v / LOW_SPEED_CAPTURE_MAX_MS))
+            guidance_lookahead = max(moving_lookahead, low_speed_lookahead)
+        else:
+            guidance_lookahead = moving_lookahead
+
+        # Close to centre, retain the full preview and therefore the exact
+        # circular 1/R command.  A proven displacement shortens the *same*
+        # geometric intercept continuously, providing enough recovery for the
+        # measured SCS steering shortfall without adding another CTE steering
+        # term.  This is still one target and one curvature calculation.
+        recovery_weight = _clamp((abs(cte) - 0.20) / 1.30, 0.0, 1.0)
+        guidance_lookahead *= 1.0 - 0.75 * recovery_weight
+        guidance_lookahead = max(
+            GUIDANCE_LOOKAHEAD_MIN_M, guidance_lookahead)
+
+        guidance_target = self._point_at_progress(
+            progress + guidance_lookahead)
+        # Recorded routes may deliberately request an offset from their road
+        # centre.  Shift only the target point; GPS lane trajectories pass
+        # zero and therefore retain their exact immutable centreline.
+        if abs(lane_offset_m) > 1e-9:
+            before = self._point_at_progress(
+                progress + max(0.0, guidance_lookahead - 1.0))
+            after = self._point_at_progress(
+                progress + guidance_lookahead + 1.0)
+            target_heading = math.atan2(
+                -(after[0] - before[0]), -(after[1] - before[1]))
+            guidance_target = (
+                guidance_target[0] + math.cos(target_heading) * lane_offset_m,
+                guidance_target[1] - math.sin(target_heading) * lane_offset_m)
+
+        # LaneLocator may project against the original, denser lane while
+        # Route follows its validated/resampled control points. Express that
+        # small signed residual as a virtual lateral displacement of the
+        # vehicle, so the confirmed LaneMatch remains authoritative without
+        # becoming an independent steering term.
+        cte_residual_signed = cte - geometric_cte
+        control_pos = (
+            pos[0] - math.cos(path_heading) * cte_residual_signed,
+            pos[1] + math.sin(path_heading) * cte_residual_signed)
+        target_dx = guidance_target[0] - control_pos[0]
+        target_dz = guidance_target[1] - control_pos[1]
+        target_distance = math.hypot(target_dx, target_dz)
+        if target_distance < 1.0:
+            return 0.0
+        target_heading = math.atan2(-target_dx, -target_dz)
+        guidance_heading_error = (
+            (heading - target_heading + math.pi) % (2.0 * math.pi) - math.pi)
+        target_alignment = (
+            (-math.sin(heading) * target_dx
+             - math.cos(heading) * target_dz) / target_distance)
+        if (target_alignment <= 0.05
+                or abs(guidance_heading_error) > math.radians(85.0)):
+            return 0.0
+
+        guidance_curvature = (
+            2.0 * math.sin(guidance_heading_error) / target_distance)
+        steer = (math.atan(TRUCK_WHEELBASE_M * guidance_curvature)
+                 / NORMALIZED_STEERING_ANGLE_RAD)
+
+        # Local curvature is retained for speed planning, physical authority
+        # and diagnostics.  It no longer becomes a second steering demand.
+        local_curvature = self._curvature_at_progress(progress)
         feed_forward = (math.atan(TRUCK_WHEELBASE_M * local_curvature)
                         / NORMALIZED_STEERING_ANGLE_RAD)
-        # Heading/CTE feedback stays deliberately damped: amplifying every
-        # sampled tangent or CTE through the physical Ackermann scale makes an
-        # S-bend hunt.  The confirmed-lane recovery gain above fixes the real
-        # broad-curve drift without changing tight prefab steering.
-        feedback = (FEEDBACK_STEERING_RESPONSE
-                    * (K_HEADING * heading_error + cte_steer)
-                    / NORMALIZED_STEERING_ANGLE_RAD)
-        scaled_feedback = speed_gain(speed_ms) * feedback
-        steer = feed_forward + scaled_feedback
+        # Diagnostic decomposition only: the output was calculated once above;
+        # this residual is not fed back into it.
+        scaled_feedback = steer - feed_forward
+        cte_steer = guidance_heading_error
+        cte_gain = 0.0
+        straight_recovery_active = bool(
+            abs(local_curvature) < 1.0 / 500.0 and abs(cte) > 0.35)
+        lane_recovery_multiplier = 1.0
+        low_speed_capture_active = bool(
+            guidance_lookahead > moving_lookahead + 1e-6)
         curve_direction_hold = False
         approach_profile = self.curve_profile_ahead(
             pos, heading, CURVE_DIRECTION_HOLD_APPROACH_DISTANCE_M)
@@ -702,43 +704,11 @@ class Route:
             and float(approach_profile["distance_m"])
                 <= CURVE_DIRECTION_HOLD_APPROACH_DISTANCE_M
             and local_curvature * approach_signed > 0.0)
-        # A large LaneMatch jump which disagrees with the same immutable route
-        # projection is localisation chatter, so tight-curve direction remains
-        # protected. A real displacement agreed by both measurements must be
-        # allowed to steer back across zero. Release that protection
-        # continuously rather than switching authority at one threshold.
-        tight_curve_noise_protection = bool(
-            (local_radius <= CURVE_DIRECTION_HOLD_CORE_RADIUS_M
-             or curve_direction_hold_approach)
-            and not cte_error_geometrically_proven)
-        if tight_curve_noise_protection:
-            curve_direction_hold_fraction = 1.0
-        else:
-            curve_direction_hold_fraction = _clamp(
-                (CURVE_DIRECTION_HOLD_RELEASE_CTE_M - abs(cte))
-                / (CURVE_DIRECTION_HOLD_RELEASE_CTE_M
-                   - CURVE_DIRECTION_HOLD_FULL_CTE_M), 0.0, 1.0)
-        curve_direction_hold_eligible = bool(
-            curve_direction_hold_fraction > 0.0)
-        if (local_radius <= CURVE_DIRECTION_HOLD_RADIUS_M
-                and curve_direction_hold_eligible
-                and abs(feed_forward) > 0.05
-                and (steer * feed_forward <= 0.0
-                     or abs(steer) < (abs(feed_forward)
-                                      * CURVE_MIN_FEEDFORWARD_FRACTION
-                                      * curve_direction_hold_fraction))):
-            # Correcting toward the lane centre is still allowed, but a noisy
-            # tangent/CTE sample cannot demand the opposite lock while the
-            # validated lane continues around the same tight arc.  The hold
-            # disappears naturally at the prefab exit when local curvature
-            # becomes straight or genuinely changes direction.
-            # Scale the protected minimum with geometry-confirmed recovery
-            # authority; no temporal filter or stale steering state is used.
-            steer = math.copysign(
-                abs(feed_forward) * CURVE_MIN_FEEDFORWARD_FRACTION
-                * curve_direction_hold_fraction,
-                feed_forward)
-            curve_direction_hold = True
+        # No direction-hold state is needed: noisy LaneMatch CTE is never a
+        # separate steering input.  Keep the proof fields for audit/log schema
+        # compatibility and to show whether locator and route still agree.
+        curve_direction_hold_fraction = 0.0
+        curve_direction_hold_eligible = False
         raw_steer = steer
         # A fixed ±0.70 limit physically cannot follow a proven 25–40 m prefab
         # bend in the truck model (it bottoms out near a 40 m radius), which is
@@ -790,5 +760,9 @@ class Route:
             "cte_steer": float(cte_steer),
             "cte_gain": float(cte_gain),
             "lane_recovery_multiplier": float(lane_recovery_multiplier),
+            "guidance_lookahead_m": float(guidance_lookahead),
+            "guidance_target_distance_m": float(target_distance),
+            "guidance_heading_error_rad": float(guidance_heading_error),
+            "guidance_curvature": float(guidance_curvature),
         }
         return steer
