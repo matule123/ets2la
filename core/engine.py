@@ -714,12 +714,6 @@ class UltraPilotEngine:
         throttle = self.shared_state.get(CTL_THROTTLE, 0.0)
         brake = self.shared_state.get(CTL_BRAKE, 0.0)
 
-        # Live steering tuning from the Settings page: sensitivity + invert.
-        sens = self.shared_state.get("steering_sensitivity", 1.0) or 1.0
-        steering = max(-1.0, min(1.0, float(steering) * float(sens)))
-        if self.shared_state.get("steering_invert", False):
-            steering = -steering
-
         # Speed-dependent steering clamp for legacy/vision steering. A valid
         # GPS LaneTrajectory has already produced a bounded, speed-aware and
         # rate-limited command. Clamping that command a second time made the
@@ -739,6 +733,18 @@ class UltraPilotEngine:
             and self.shared_state.get("nav_active", False)
             and snapshot.get("valid", False)
             and snapshot_revision == lane_revision == control_revision)
+        # The authoritative GPS command has already passed geometric angle,
+        # speed, rate and acceleration limits. Applying UI sensitivity after
+        # that actuator was a second unmodelled gain/clamp. Keep sensitivity
+        # for legacy/vision input only; inversion remains a backend convention.
+        if authoritative_gps_steering:
+            steering = max(-1.0, min(1.0, float(steering)))
+        else:
+            sens = self.shared_state.get("steering_sensitivity", 1.0) or 1.0
+            steering = max(-1.0, min(
+                1.0, float(steering) * float(sens)))
+        if self.shared_state.get("steering_invert", False):
+            steering = -steering
         max_steer = (1.0 if authoritative_gps_steering or spd_kmh < 30.0
                      else max(0.25, 1.0 - (spd_kmh - 30.0) / 110.0))
 

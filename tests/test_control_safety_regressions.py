@@ -456,16 +456,30 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         plugin._was_active = True
         plugin.on_tick(0.10)
         self.assertAlmostEqual(state.get("nav_steering_filtered"), 0.40)
-        self.assertAlmostEqual(plugin._last_steering, 0.06)
+        first = plugin._last_steering
+        first_debug = dict(plugin._steering_dynamics_debug)
+        self.assertGreater(first, 0.0)
+        self.assertLess(first, 0.06)
+        self.assertLessEqual(
+            abs(first_debug["acceleration_per_s2"]),
+            first_debug["max_acceleration_per_s2"] + 1e-9)
 
         # The current geometric target is published without a stale temporal
-        # average. The sole physical ramp still makes a reversal pass zero.
+        # average. The sole second-order actuator decelerates the existing
+        # wheel rate, passes continuously through zero and then turns left.
         state.set("nav_steering", -0.40)
-        plugin.on_tick(0.10)
+        outputs = []
+        for _ in range(12):
+            plugin.on_tick(0.10)
+            outputs.append(plugin._last_steering)
+            debug = plugin._steering_dynamics_debug
+            self.assertLessEqual(
+                abs(debug["rate_per_s"]), debug["max_rate_per_s"] + 1e-9)
+            self.assertLessEqual(
+                abs(debug["acceleration_per_s2"]),
+                debug["max_acceleration_per_s2"] + 1e-9)
         self.assertAlmostEqual(state.get("nav_steering_filtered"), -0.40)
-        self.assertAlmostEqual(plugin._last_steering, 0.0, places=7)
-        plugin.on_tick(0.10)
-        self.assertAlmostEqual(plugin._last_steering, -0.06)
+        self.assertTrue(any(value < 0.0 for value in outputs))
 
     def test_trailer_guard_limits_only_the_command_that_increases_fold(self):
         for sign in (-1.0, 1.0):

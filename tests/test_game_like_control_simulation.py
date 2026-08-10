@@ -54,7 +54,10 @@ def _simulate(points, speed_ms):
         target = route.steering(
             (x, z), heading, speed_ms,
             cross_track_error_m=live_cte)
-        autopilot._last_steering = autopilot._ramp_steering(target, dt)
+        autopilot._last_steering = autopilot._ramp_steering(
+            target, dt, speed_ms=speed_ms,
+            curvature_per_m=route.last_steering_debug.get(
+                "local_curvature", 0.0))
         heading -= (speed_ms / TRUCK_WHEELBASE_M
                     * (autopilot._last_steering
                        * NORMALIZED_STEERING_ANGLE_RAD) * dt)
@@ -161,7 +164,9 @@ class GameLikeControlSimulationTests(unittest.TestCase):
                     (x, z), heading, speed,
                     cross_track_error_m=measured_cte)
                 autopilot._last_steering = autopilot._ramp_steering(
-                    raw, dt)
+                    raw, dt, speed_ms=speed,
+                    curvature_per_m=route.last_steering_debug.get(
+                        "local_curvature", 0.0))
                 physical_wheel += (
                     (autopilot._last_steering - physical_wheel)
                     * min(1.0, dt / 0.32))
@@ -210,7 +215,10 @@ class GameLikeControlSimulationTests(unittest.TestCase):
             raw = route.steering(
                 (x, z), heading, speed,
                 cross_track_error_m=measured_cte)
-            autopilot._last_steering = autopilot._ramp_steering(raw, dt)
+            autopilot._last_steering = autopilot._ramp_steering(
+                raw, dt, speed_ms=speed,
+                curvature_per_m=route.last_steering_debug.get(
+                    "local_curvature", 0.0))
             physical_wheel += ((autopilot._last_steering - physical_wheel)
                                * min(1.0, dt / 0.32))
             heading -= (speed / TRUCK_WHEELBASE_M
@@ -272,7 +280,10 @@ class GameLikeControlSimulationTests(unittest.TestCase):
                 raw = route.steering(
                     (x, z), measured_heading, speed,
                     cross_track_error_m=measured_cte)
-                autopilot._last_steering = autopilot._ramp_steering(raw, dt)
+                autopilot._last_steering = autopilot._ramp_steering(
+                    raw, dt, speed_ms=speed,
+                    curvature_per_m=route.last_steering_debug.get(
+                        "local_curvature", 0.0))
                 # ETS steering does not reach a requested wheel angle in one
                 # control frame; reproduce a 320 ms first-order response.
                 physical_wheel += ((autopilot._last_steering - physical_wheel)

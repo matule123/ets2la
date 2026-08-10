@@ -8,11 +8,10 @@ from core.navigation.runtime_preflight import (
 )
 from core.navigation.navigation_intent import snapshot_matches_navigation_intent
 from core.navigation.route import curve_speed_limit_ms
+from core.steering_dynamics import SteeringDynamics
 
 
 # --- Tuning (kept here, mirrored into settings under "autopilot" section) -----
-STEER_RATE_LIMIT = 0.60      # acquire confirmed curve steering before lane drift
-STEER_UNWIND_RATE = 0.60     # symmetric release avoids a late, abrupt wheel reversal
 MIN_LANE_TRAJECTORY_CONFIDENCE = CONFIDENCE_THRESHOLD
 # 0.72 rejects ambiguous/off-route matches while retaining a wide margin below
 # ProMods-1.59 centre samples (min 0.895, p05 0.950, median 0.966) and
@@ -85,6 +84,12 @@ def lane_authority_rejection_reason(state, snapshot, now=None):
         if snapshot_revision != current_revision:
             return (f"lane trajectory revision {snapshot_revision} is stale; "
                     f"current revision is {current_revision}")
+        steering_revision = int(state.get(
+            "nav_trajectory_revision", snapshot_revision) or -1)
+        if (state.get("nav_active", False)
+                and steering_revision != snapshot_revision):
+            return (f"steering revision {steering_revision} is stale; "
+                    f"lane trajectory revision is {snapshot_revision}")
         if not snapshot_matches_navigation_intent(state, snapshot):
             return "lane trajectory belongs to a different navigation intent"
         heartbeat = float(state.get("lane_trajectory_heartbeat", 0.0) or 0.0)
@@ -266,6 +271,11 @@ class Plugin(BasePlugin):
         self.enabled = True
         self._last_throttle = 0.0
         self._last_steering = 0.0
+        self._steering_dynamics = SteeringDynamics()
+        self._steering_dynamics_debug = dict(
+            self._steering_dynamics.last_debug)
+        self._last_steering_event = (False, False)
+        self._last_control_dt = 0.0
         self._last_brake = 0.0          # smoothed brake command (the ramp)
         # Rolling speed estimate (for ramp scaling when telemetry lags).
         self._speed_kmh = 0.0
@@ -335,7 +345,10 @@ class Plugin(BasePlugin):
         })
 
     def on_tick(self, delta_time: float):
-        dt = max(delta_time, 1e-3)
+        self._last_control_dt = float(delta_time)
+        # Longitudinal ramps also reject a scheduler-sized jump. Steering uses
+        # its own 100 ms physical integration bound internally.
+        dt = min(max(float(delta_time), 1e-3), 0.10)
         self.sdk.shared_state.set("autopilot_control_heartbeat", time.monotonic())
 
         # 1. Telemetry & state
@@ -631,8 +644,7 @@ class Plugin(BasePlugin):
             else:
                 target = 0.0
             self._last_steering = self._ramp_steering(target, dt)
-            self.sdk.controller.set_steering(
-                self._last_steering * self._engage_blend)
+            self.sdk.controller.set_steering(self._last_steering)
             self.sdk.shared_state.set("tts_message", "Emergency stop triggered!")
             self._publish_control_tags(speed_kmh, emergency_nav_active)
             return
@@ -765,17 +777,24 @@ class Plugin(BasePlugin):
         nav_active = bool(self.sdk.shared_state.get("nav_active", False)
                           and navigation_authority_safe)
 
-        # Soft-start: detect the rising edge of autopilot_active and fade the
-        # steering authority in from 0 → 1 over ~1.2 s. This kills the jerk that
-        # happens the instant the user toggles the autopilot on (the first tick
-        # would otherwise apply 55% of whatever target was computed).
+        # Bumpless handover: on the rising edge synchronize the actuator state
+        # with the measured game wheel. The rate/acceleration model then owns
+        # the whole transition; no second engagement multiplier reshapes it.
         active = bool(self.sdk.shared_state.get("autopilot_active", False))
+        try:
+            # SCS gameSteer has the opposite sign to the controller input.
+            # Begin at the proven game-wheel value instead of assumed zero.
+            observed_game_steering = float(np.clip(
+                -float(truck.get("gameSteer", 0.0) or 0.0), -1.0, 1.0))
+        except (TypeError, ValueError, OverflowError):
+            observed_game_steering = 0.0
         if active and not self._was_active:
-            self._engage_blend = 0.0
+            self._reset_steering_dynamics(observed_game_steering)
         self._was_active = active
-        engage = min(1.0, self._engage_blend + dt / 1.2)
-        self._engage_blend = engage if active else 0.0
-        if navigation_unreliable:
+        self._engage_blend = 1.0 if active else 0.0
+        if not active:
+            self._reset_steering_dynamics(observed_game_steering)
+        elif navigation_unreliable:
             self._last_steering = self._ramp_steering(0.0, dt)
         elif nav_active:
             # Route publishes one finished geometric curvature command.  Do
@@ -810,9 +829,9 @@ class Plugin(BasePlugin):
             # rate limiter; the brake/throttle safety path above handles stop.
             self._last_steering = self._ramp_steering(0.0, dt)
 
-        # Apply the soft-start engagement ramp so we never slam the wheel over
-        # the moment the autopilot is switched on.
-        steering_val = self._last_steering * self._engage_blend
+        # Inactive control relinquishes the device. Active control is already
+        # continuous because its actuator was initialized from gameSteer.
+        steering_val = self._last_steering if active else 0.0
 
         # Diagnostic: log the lateral-control state once per second so we can see
         # exactly why the truck turns the way it does (the sign of lane_offset /
@@ -836,6 +855,10 @@ class Plugin(BasePlugin):
                     steering_debug.get("feed_forward", 0.0) or 0.0)
                 diagnostic_feedback = float(
                     steering_debug.get("feedback", 0.0) or 0.0)
+                diagnostic_heading_feedback = float(
+                    steering_debug.get("heading_feedback", 0.0) or 0.0)
+                diagnostic_cte_feedback = float(
+                    steering_debug.get("cte_feedback", 0.0) or 0.0)
                 diagnostic_direction_hold = bool(
                     steering_debug.get("curve_direction_hold", False))
                 diagnostic_hold_fraction = float(
@@ -865,11 +888,30 @@ class Plugin(BasePlugin):
                     trailer_debug.get("applied_offset_m", 0.0) or 0.0)
                 diagnostic_trailer_reason = str(
                     trailer_debug.get("reason", "") or "")
+                dynamics_debug = dict(getattr(
+                    self, "_steering_dynamics_debug", {}) or {})
+                diagnostic_raw_target = float(
+                    dynamics_debug.get("raw_target", 0.0) or 0.0)
+                diagnostic_bounded_target = float(
+                    dynamics_debug.get("bounded_target", 0.0) or 0.0)
+                diagnostic_steering_rate = float(
+                    dynamics_debug.get("rate_per_s", 0.0) or 0.0)
+                diagnostic_steering_accel = float(
+                    dynamics_debug.get("acceleration_per_s2", 0.0) or 0.0)
+                diagnostic_dt = float(getattr(
+                    self, "_last_control_dt", 0.0) or 0.0)
+                diagnostic_dt_used = float(
+                    dynamics_debug.get("dt_used_s", 0.0) or 0.0)
+                diagnostic_dynamics_flags = ",".join(name for name in (
+                    "target_saturated", "rate_limited",
+                    "acceleration_limited", "dt_limited",
+                    "deadband_active") if dynamics_debug.get(name, False)) or "none"
             except (TypeError, ValueError, OverflowError):
                 live_lateral = live_heading = float("nan")
                 diagnostic_radius = None
                 diagnostic_curve_distance = float("nan")
                 diagnostic_feed_forward = diagnostic_feedback = float("nan")
+                diagnostic_heading_feedback = diagnostic_cte_feedback = float("nan")
                 diagnostic_direction_hold = False
                 diagnostic_hold_fraction = diagnostic_cte_residual = float("nan")
                 diagnostic_cte_proven = False
@@ -881,6 +923,26 @@ class Plugin(BasePlugin):
                 diagnostic_trailer_required = float("nan")
                 diagnostic_trailer_offset = float("nan")
                 diagnostic_trailer_reason = "malformed"
+                diagnostic_raw_target = diagnostic_bounded_target = float("nan")
+                diagnostic_steering_rate = diagnostic_steering_accel = float("nan")
+                diagnostic_dt = diagnostic_dt_used = float("nan")
+                diagnostic_dynamics_flags = "malformed"
+            self.sdk.shared_state.set("steering_dynamics_diagnostic", {
+                **dict(getattr(self, "_steering_dynamics_debug", {}) or {}),
+                "feed_forward": diagnostic_feed_forward,
+                "feedback": diagnostic_feedback,
+                "heading_feedback": diagnostic_heading_feedback,
+                "cte_feedback": diagnostic_cte_feedback,
+                "lane_cte_m": live_lateral,
+                "lane_heading_deg": live_heading,
+                "curvature_per_m": diagnostic_guidance_curvature,
+                "lookahead_m": diagnostic_guidance_lookahead,
+                "navigation_intent_id": self.sdk.shared_state.get(
+                    "navigation_intent_id"),
+                "revision": snapshot_revision,
+                "authority_rejection": authority_reason,
+                "timestamp": time.monotonic(),
+            })
             logging.info(
                 "autopilot: active=%s nav=%s engage=%.2f lane_cte=%.3f "
                 "lane_heading=%.1fdeg vision_off=%.3f "
@@ -896,7 +958,10 @@ class Plugin(BasePlugin):
                 "aux_brake=%.3f vision_brake=%.3f "
                 "trailer_cte=%.3f trailer_required=%.3f trailer_offset=%.3f "
                 "trailer_reason=%s engine_steer=%.3f articulation_guard=%s "
-                "lane_revision=%s confidence=%.3f reject=%s",
+                "steer_raw=%.3f steer_bounded=%.3f steer_rate=%.3f/s "
+                "steer_accel=%.3f/s2 dt=%.4f used_dt=%.4f "
+                "heading_fb=%.3f cte_fb=%.3f steer_flags=%s "
+                "intent=%s lane_revision=%s confidence=%.3f reject=%s",
                 active, nav_active, self._engage_blend,
                 live_lateral, live_heading, float(lane_offset),
                 float(self.sdk.shared_state.get("nav_steering", 0.0) or 0.0),
@@ -924,6 +989,12 @@ class Plugin(BasePlugin):
                     "engine_applied_steering", steering_val) or 0.0),
                 bool(self.sdk.shared_state.get(
                     "trailer_articulation_guarded", False)),
+                diagnostic_raw_target, diagnostic_bounded_target,
+                diagnostic_steering_rate, diagnostic_steering_accel,
+                diagnostic_dt, diagnostic_dt_used,
+                diagnostic_heading_feedback, diagnostic_cte_feedback,
+                diagnostic_dynamics_flags,
+                self.sdk.shared_state.get("navigation_intent_id"),
                 snapshot_revision,
                 snapshot_confidence,
                 authority_reason)
@@ -978,24 +1049,62 @@ class Plugin(BasePlugin):
                                       BRAKE_RAMP_UP, BRAKE_RAMP_DOWN)
         self.sdk.controller.set_brake(self._last_brake)
 
-    def _ramp_steering(self, target: float, dt: float) -> float:
-        """Rate-limit steering and make every reversal pass through zero.
+    def _reset_steering_dynamics(self, command: float = 0.0) -> float:
+        dynamics = getattr(self, "_steering_dynamics", None)
+        if dynamics is None:
+            dynamics = SteeringDynamics(command)
+            self._steering_dynamics = dynamics
+        self._last_steering = dynamics.reset(command)
+        self._steering_dynamics_debug = dict(dynamics.last_debug)
+        return self._last_steering
 
-        The validated lane target is one geometric curvature command. A
-        faster, separate unwind rate made its smooth zero crossing into a
-        visible wheel snap. Use one coherent physical slew rate in both
-        directions and never apply the opposite lock in the same control frame.
+    def _ramp_steering(self, target: float, dt: float, *,
+                       speed_ms=None, curvature_per_m=None) -> float:
+        """Apply the sole physical steering-angle/rate/acceleration model.
+
+        This is a state-space actuator, not a moving-average filter. Geometry
+        remains current while normalized angle, angular rate and angular
+        acceleration obey speed-scheduled, real-time bounds.
         """
-        target = float(np.clip(target, -1.0, 1.0))
-        current = float(self._last_steering)
-        reversing = current * target < 0.0
-        unwinding = abs(target) < abs(current) or reversing
-        rate = STEER_UNWIND_RATE if unwinding else STEER_RATE_LIMIT
-        max_step = rate * max(dt, 1e-3)
-        if reversing:
-            # Release the old lock first; never cross zero and apply an
-            # opposite command in the same control frame.
-            return float(max(0.0, current - max_step)
-                         if current > 0.0 else min(0.0, current + max_step))
-        delta = float(np.clip(target - self._last_steering, -max_step, max_step))
-        return float(np.clip(self._last_steering + delta, -1.0, 1.0))
+        dynamics = getattr(self, "_steering_dynamics", None)
+        if dynamics is None:
+            dynamics = SteeringDynamics(getattr(self, "_last_steering", 0.0))
+            self._steering_dynamics = dynamics
+        # Tests and safety transitions may explicitly synchronize the public
+        # command. Never let a hidden actuator state retain an older lock.
+        current = float(getattr(self, "_last_steering", 0.0) or 0.0)
+        if abs(dynamics.command - current) > 1e-9:
+            dynamics.reset(current)
+        try:
+            if speed_ms is None:
+                speed_ms = (abs(float(getattr(
+                    self, "_speed_kmh", 0.0) or 0.0)) / 3.6)
+            steering_debug = self.sdk.shared_state.get(
+                "nav_steering_debug", {}) or {}
+            if curvature_per_m is None:
+                curvature_per_m = float(steering_debug.get(
+                    "local_curvature",
+                    self.sdk.shared_state.get(
+                        "path_curve_signed_curvature", 0.0)) or 0.0)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            speed_ms = 0.0 if speed_ms is None else float(speed_ms)
+            curvature_per_m = (0.0 if curvature_per_m is None
+                               else float(curvature_per_m))
+        output = dynamics.update(
+            target, dt, speed_ms=speed_ms,
+            curvature_per_m=curvature_per_m or 0.0)
+        self._steering_dynamics_debug = dict(dynamics.last_debug)
+        event = (bool(dynamics.last_debug["target_saturated"]),
+                 bool(dynamics.last_debug["dt_limited"]))
+        previous_event = getattr(self, "_last_steering_event", (False, False))
+        if event != previous_event and (any(event) or any(previous_event)):
+            logging.info(
+                "Steering dynamics event: target_saturated=%s dt_limited=%s "
+                "raw=%.3f bounded=%.3f dt=%.4f used_dt=%.4f speed=%.2fm/s",
+                event[0], event[1], dynamics.last_debug["raw_target"],
+                dynamics.last_debug["bounded_target"],
+                dynamics.last_debug["dt_s"],
+                dynamics.last_debug["dt_used_s"],
+                dynamics.last_debug["speed_ms"])
+        self._last_steering_event = event
+        return output

@@ -801,9 +801,12 @@ class Route:
 
         feed_forward = (math.atan(TRUCK_WHEELBASE_M * local_curvature)
                         / NORMALIZED_STEERING_ANGLE_RAD)
-        scaled_feedback = (FEEDBACK_STEERING_RESPONSE
-                           * (K_HEADING * guidance_heading_error + cte_steer)
-                           / NORMALIZED_STEERING_ANGLE_RAD)
+        heading_feedback = (FEEDBACK_STEERING_RESPONSE * K_HEADING
+                            * guidance_heading_error
+                            / NORMALIZED_STEERING_ANGLE_RAD)
+        cte_feedback = (FEEDBACK_STEERING_RESPONSE * cte_steer
+                        / NORMALIZED_STEERING_ANGLE_RAD)
+        scaled_feedback = heading_feedback + cte_feedback
         steer = feed_forward + scaled_feedback
         steering_angle = steer * NORMALIZED_STEERING_ANGLE_RAD
         guidance_curvature = (math.tan(_clamp(
@@ -861,6 +864,12 @@ class Route:
         self.last_steering_debug = {
             "feed_forward": float(feed_forward),
             "feedback": float(scaled_feedback),
+            "heading_feedback": float(heading_feedback),
+            "cte_feedback": float(cte_feedback),
+            "feed_forward_angle_rad": float(
+                feed_forward * NORMALIZED_STEERING_ANGLE_RAD),
+            "feedback_angle_rad": float(
+                scaled_feedback * NORMALIZED_STEERING_ANGLE_RAD),
             "local_curvature": float(local_curvature),
             "raw": float(raw_steer),
             "output": float(steer),
@@ -885,6 +894,8 @@ class Route:
             "guidance_target_distance_m": float(target_distance),
             "guidance_heading_error_rad": float(guidance_heading_error),
             "guidance_curvature": float(guidance_curvature),
+            "steering_limit": float(steering_limit),
+            "saturated": bool(abs(raw_steer) > steering_limit + 1e-9),
             "trailer_envelope": dict(trailer_debug),
         }
         return steer

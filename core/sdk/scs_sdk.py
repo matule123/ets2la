@@ -181,6 +181,11 @@ class SCSTelemetry:
             tf = {}
             tf["speed"] = self.read_float(948)[0]               # m/s
             tf["engineRpm"] = self.read_float(952)[0]
+            # Physical input and resulting in-game steering, normalized by
+            # the SCS telemetry ABI.  These make autopilot handover start at
+            # the wheel's current position instead of an assumed zero.
+            tf["userSteer"] = self.read_float(956)[0]
+            tf["gameSteer"] = self.read_float(972)[0]
             tf["cruiseControlSpeed"] = self.read_float(988)[0]
             tf["fuel"] = self.read_float(1000)[0]               # liters
             tf["fuelRange"] = self.read_float(1008)[0]          # km

@@ -274,7 +274,10 @@ class LaneGeometryAuditTests(unittest.TestCase):
                 cte = route.cross_track_error(index, (x, z))
                 raw = route.steering(
                     (x, z), heading, speed, cross_track_error_m=cte)
-                plugin._last_steering = plugin._ramp_steering(raw, dt)
+                plugin._last_steering = plugin._ramp_steering(
+                    raw, dt, speed_ms=speed,
+                    curvature_per_m=route.last_steering_debug.get(
+                        "local_curvature", 0.0))
                 heading -= (speed / TRUCK_WHEELBASE_M
                             * plugin._last_steering
                             * NORMALIZED_STEERING_ANGLE_RAD * dt)
@@ -405,7 +408,10 @@ class LaneGeometryAuditTests(unittest.TestCase):
                     (x, z), heading, speed,
                     cross_track_error_m=cte,
                     vehicle_envelope=envelope)
-                plugin._last_steering = plugin._ramp_steering(target, dt)
+                plugin._last_steering = plugin._ramp_steering(
+                    target, dt, speed_ms=speed,
+                    curvature_per_m=route.last_steering_debug.get(
+                        "local_curvature", 0.0))
                 heading -= (speed / TRUCK_WHEELBASE_M
                             * plugin._last_steering
                             * NORMALIZED_STEERING_ANGLE_RAD * dt)
@@ -571,7 +577,10 @@ class LaneGeometryAuditTests(unittest.TestCase):
             cte = route.cross_track_error(index, (x, z))
             raw = route.steering(
                 (x, z), heading, speed, cross_track_error_m=cte)
-            plugin._last_steering = plugin._ramp_steering(raw, dt)
+            plugin._last_steering = plugin._ramp_steering(
+                raw, dt, speed_ms=speed,
+                curvature_per_m=route.last_steering_debug.get(
+                    "local_curvature", 0.0))
             heading -= (speed / TRUCK_WHEELBASE_M
                         * plugin._last_steering
                         * NORMALIZED_STEERING_ANGLE_RAD * dt)
@@ -605,7 +614,10 @@ class LaneGeometryAuditTests(unittest.TestCase):
             cte = route.cross_track_error(index, (x, z))
             raw = route.steering(
                 (x, z), heading, speed, cross_track_error_m=cte)
-            plugin._last_steering = plugin._ramp_steering(raw, dt)
+            plugin._last_steering = plugin._ramp_steering(
+                raw, dt, speed_ms=speed,
+                curvature_per_m=route.last_steering_debug.get(
+                    "local_curvature", 0.0))
             heading -= (speed / TRUCK_WHEELBASE_M
                         * plugin._last_steering
                         * NORMALIZED_STEERING_ANGLE_RAD * dt)
@@ -651,7 +663,10 @@ class LaneGeometryAuditTests(unittest.TestCase):
                     position, heading, speed,
                     cross_track_error_m=0.0)
                 raw_commands.append(raw)
-                plugin._last_steering = plugin._ramp_steering(raw, 0.05)
+                plugin._last_steering = plugin._ramp_steering(
+                    raw, 0.05, speed_ms=speed,
+                    curvature_per_m=route.last_steering_debug.get(
+                        "local_curvature", 0.0))
                 applied_commands.append(plugin._last_steering)
             with self.subTest(speed=speed):
                 self.assertTrue(all(command < 0.0
@@ -763,7 +778,10 @@ class LaneGeometryAuditTests(unittest.TestCase):
                     target = route.steering(
                         (x, z), heading, speed,
                         cross_track_error_m=live_cte)
-                    plugin._last_steering = plugin._ramp_steering(target, dt)
+                    plugin._last_steering = plugin._ramp_steering(
+                        target, dt, speed_ms=speed,
+                        curvature_per_m=route.last_steering_debug.get(
+                            "local_curvature", 0.0))
                     heading -= (speed / wheelbase
                                 * plugin._last_steering
                                 * NORMALIZED_STEERING_ANGLE_RAD * dt)
@@ -896,7 +914,9 @@ class LaneGeometryAuditTests(unittest.TestCase):
                 for _ in range(int(400.0 / speed / 0.05)):
                     target = route.steering((x, z), heading, speed)
                     plugin._last_steering = plugin._ramp_steering(
-                        target, 0.05)
+                        target, 0.05, speed_ms=speed,
+                        curvature_per_m=route.last_steering_debug.get(
+                            "local_curvature", 0.0))
                     heading -= (speed / TRUCK_WHEELBASE_M
                                 * plugin._last_steering
                                 * NORMALIZED_STEERING_ANGLE_RAD * 0.05)
@@ -1011,7 +1031,9 @@ class LaneGeometryAuditTests(unittest.TestCase):
                     for _ in range(200):
                         target = route.steering((x, z), heading, speed)
                         plugin._last_steering = plugin._ramp_steering(
-                            target, dt)
+                            target, dt, speed_ms=speed,
+                            curvature_per_m=route.last_steering_debug.get(
+                                "local_curvature", 0.0))
                         heading -= (speed / wheelbase
                                     * (plugin._last_steering
                                        * NORMALIZED_STEERING_ANGLE_RAD) * dt)
@@ -1038,7 +1060,10 @@ class LaneGeometryAuditTests(unittest.TestCase):
                 errors, commands = [], []
                 for _ in range(int(150.0 / speed / dt)):
                     raw = route.steering((x, z), heading, speed)
-                    plugin._last_steering = plugin._ramp_steering(raw, dt)
+                    plugin._last_steering = plugin._ramp_steering(
+                        raw, dt, speed_ms=speed,
+                        curvature_per_m=route.last_steering_debug.get(
+                            "local_curvature", 0.0))
                     heading -= (speed / wheelbase
                                 * plugin._last_steering
                                 * NORMALIZED_STEERING_ANGLE_RAD * dt)
@@ -1079,7 +1104,10 @@ class LaneGeometryAuditTests(unittest.TestCase):
                     errors = []
                     for _ in range(400):
                         raw = route.steering((x, z), heading, speed)
-                        plugin._last_steering = plugin._ramp_steering(raw, dt)
+                        plugin._last_steering = plugin._ramp_steering(
+                            raw, dt, speed_ms=speed,
+                            curvature_per_m=route.last_steering_debug.get(
+                                "local_curvature", 0.0))
                         heading -= (speed / wheelbase
                                     * plugin._last_steering * 0.14 * dt)
                         x += -math.sin(heading) * speed * dt

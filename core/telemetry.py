@@ -65,6 +65,8 @@ class Telemetry:
             "speed": speed_ms,                       # m/s (plugins convert)
             "speed_kmh": abs(speed_ms) * 3.6,
             "engineRpm": tf.get("engineRpm", 0.0),
+            "userSteer": tf.get("userSteer", 0.0),
+            "gameSteer": tf.get("gameSteer", 0.0),
             "gear": ti.get("gear", 0),
             "fuel": tf.get("fuel", 0.0),
             "fuelRange": tf.get("fuelRange", 0.0),
