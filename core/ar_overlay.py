@@ -14,13 +14,74 @@ from PyQt6.QtCore import QPointF, QTimer, Qt
 from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import QApplication, QWidget
 
-from core.camera import project_world_point, project_world_points
+from core.camera import (
+    CameraSnapshotProducer, project_world_point, project_world_points,
+)
 from core.navigation.route import Route, iter_path_xz
 
 
 AR_MIN_ROAD_DEPTH_M = 8.0
-AR_MAX_ROAD_DEPTH_M = 140.0
-AR_TOP_VISIBILITY_FRACTION = 0.06
+AR_FADE_IN_END_M = 20.0
+AR_FADE_OUT_START_M = 105.0
+AR_MAX_ROAD_DEPTH_M = 130.0
+AR_TOP_VISIBILITY_FRACTION = 0.12
+AR_PROFILE_OCCLUSION_RAD = math.radians(0.30)
+AR_PROFILE_BEARING_RAD = math.radians(2.0)
+
+
+def _road_profile_visible_prefix(world_points, camera_snapshot):
+    """Hide the route after a crest proven by its own X/Y/Z profile.
+
+    The overlay has no access to ETS2's depth buffer.  A farther centreline
+    sample whose elevation ray drops behind the highest nearer ray is hidden
+    by the nearer road profile.  This never moves or fills trajectory points;
+    it only returns the first line-of-sight prefix.
+    """
+    try:
+        cx, cy, cz = map(float, camera_snapshot["position"][:3])
+    except (KeyError, TypeError, ValueError, IndexError, OverflowError):
+        return []
+    visible = []
+    sight_lines = []
+    for point in world_points:
+        try:
+            x, y, z = map(float, point[:3])
+            horizontal = math.hypot(x - cx, z - cz)
+            if horizontal < 0.5:
+                continue
+            angle = math.atan2(y - cy, horizontal)
+            bearing = math.atan2(x - cx, z - cz)
+        except (TypeError, ValueError, IndexError, OverflowError):
+            break
+        same_ray_angles = [
+            previous_angle for previous_bearing, previous_angle in sight_lines
+            if abs(math.atan2(math.sin(bearing - previous_bearing),
+                              math.cos(bearing - previous_bearing)))
+            <= AR_PROFILE_BEARING_RAD
+        ]
+        if (len(visible) >= 2 and same_ray_angles
+                and angle < max(same_ray_angles) - AR_PROFILE_OCCLUSION_RAD):
+            break
+        visible.append(point)
+        sight_lines.append((bearing, angle))
+    return visible
+
+
+def _route_alpha(depth_m):
+    """Distance fade used by the AR render loop, in the ETS2LA style."""
+    try:
+        depth = float(depth_m)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    if depth <= AR_MIN_ROAD_DEPTH_M or depth >= AR_MAX_ROAD_DEPTH_M:
+        return 0.0
+    if depth < AR_FADE_IN_END_M:
+        return (depth - AR_MIN_ROAD_DEPTH_M) / (
+            AR_FADE_IN_END_M - AR_MIN_ROAD_DEPTH_M)
+    if depth > AR_FADE_OUT_START_M:
+        return (AR_MAX_ROAD_DEPTH_M - depth) / (
+            AR_MAX_ROAD_DEPTH_M - AR_FADE_OUT_START_M)
+    return 1.0
 
 
 def _forward_route_suffix(world_points, camera_snapshot):
@@ -223,6 +284,12 @@ class AROverlay(QWidget):
         self.state = shared_state
         self._last_status = None
         self._last_status_at = 0.0
+        # Like ETS2LA's AR loop, sample CameraProps in the renderer process.
+        # The engine snapshot remains the shared diagnostic authority; this
+        # private snapshot removes Manager/engine-loop latency while the user
+        # moves the in-game camera quickly.
+        self._render_camera_producer = CameraSnapshotProducer()
+        self._render_camera_snapshot = None
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -245,12 +312,36 @@ class AROverlay(QWidget):
             if app is not None:
                 app.quit()
             return
-        self._sync_viewport()
+        self._render_camera_snapshot = self._fresh_render_camera_snapshot()
+        self._sync_viewport(self._render_camera_snapshot)
         self.update()
 
-    def _sync_viewport(self):
+    def _fresh_render_camera_snapshot(self):
+        shared = self.state.get("camera_snapshot", {}) or {}
+        try:
+            fresh = self._render_camera_producer.read(
+                int(shared.get("render_time_us", 0) or 0),
+                float(shared.get("telemetry_timestamp", 0.0) or 0.0))
+        except Exception:
+            return shared
+        if not fresh.get("valid", False):
+            return shared
+        # Truck pose still comes from the same telemetry/lane snapshot as the
+        # route. Only the camera matrix/viewport is refreshed locally.
+        fresh = dict(fresh)
+        for key in ("vehicle_position", "vehicle_heading",
+                    "vehicle_altitude", "telemetry_valid"):
+            if key in shared:
+                fresh[key] = shared[key]
+        return fresh
+
+    def _active_camera_snapshot(self):
+        private = getattr(self, "_render_camera_snapshot", None)
+        return private or self.state.get("camera_snapshot", {}) or {}
+
+    def _sync_viewport(self, snapshot=None):
         """Follow the actual ETS2 client rectangle, including monitor moves."""
-        snapshot = self.state.get("camera_snapshot", {}) or {}
+        snapshot = snapshot or self.state.get("camera_snapshot", {}) or {}
         viewport = snapshot.get("viewport") or {}
         try:
             geometry = (int(viewport["x"]), int(viewport["y"]),
@@ -264,7 +355,7 @@ class AROverlay(QWidget):
             self.setGeometry(*geometry)
 
     def _project_world(self, point):
-        snapshot = self.state.get("camera_snapshot", {}) or {}
+        snapshot = AROverlay._active_camera_snapshot(self)
         projected = project_world_point(
             snapshot, point,
             telemetry_timestamp=float(snapshot.get(
@@ -278,8 +369,8 @@ class AROverlay(QWidget):
         payload = {
             "ready": bool(ready), "reason": str(reason or ""),
             "lane_revision": int(lane_revision),
-            "camera_revision": int((self.state.get(
-                "camera_snapshot", {}) or {}).get("revision", -1) or -1),
+            "camera_revision": int(AROverlay._active_camera_snapshot(
+                self).get("revision", -1) or -1),
             "timestamp": now,
         }
         signature = (payload["ready"], payload["reason"],
@@ -308,7 +399,7 @@ class AROverlay(QWidget):
             self.state.set("ar_lane_revision", -1)
             self._publish_status(False, route_reason or "lane trajectory is unavailable")
             return
-        camera_snapshot = self.state.get("camera_snapshot", {}) or {}
+        camera_snapshot = self._active_camera_snapshot()
         telemetry_timestamp = float(camera_snapshot.get(
             "telemetry_timestamp", 0.0) or 0.0)
         world = _forward_route_suffix(world, camera_snapshot)
@@ -316,6 +407,13 @@ class AROverlay(QWidget):
             self.state.set("ar_lane_revision", -1)
             self._publish_status(
                 False, "trajectory has no forward samples at the atomic vehicle pose",
+                current_revision)
+            return
+        world = _road_profile_visible_prefix(world, camera_snapshot)
+        if len(world) < 2:
+            self.state.set("ar_lane_revision", -1)
+            self._publish_status(
+                False, "trajectory is hidden by the proven road elevation profile",
                 current_revision)
             return
         projected_values, camera_reason = project_world_points(
@@ -345,21 +443,22 @@ class AROverlay(QWidget):
         # scaling makes the trace lie visually on the road while round caps
         # keep adjacent samples continuous.
         segments = []
-        occluders = _traffic_occluders(
-            camera_snapshot, self.state.get("traffic", []) or [],
-            telemetry_timestamp)
         for first, second in zip(strip, strip[1:]):
             depth = (first[1] + second[1]) * 0.5
-            for visible_first, visible_second in _visible_segment_parts(
-                    first[0], second[0], depth, occluders):
-                segments.append((depth, visible_first, visible_second))
+            alpha = _route_alpha(depth)
+            if alpha > 0.0:
+                # Do not punch rectangular holes around traffic. Without the
+                # game depth buffer those cut-outs are not physically proven
+                # and visibly pop as vehicles move.
+                segments.append((depth, alpha, first[0], second[0]))
         segments.sort(key=lambda item: item[0], reverse=True)
         for halo in (True, False):
-            for depth, first, second in segments:
+            for depth, alpha, first, second in segments:
                 halo_width, core_width = _perspective_route_widths(
                     depth, camera_snapshot)
                 painter.setPen(QPen(
-                    QColor(45, 142, 255, 95 if halo else 240),
+                    QColor(45, 142, 255, round(
+                        (95 if halo else 240) * alpha)),
                     halo_width if halo else core_width,
                     Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
                     Qt.PenJoinStyle.RoundJoin))

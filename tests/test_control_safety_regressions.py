@@ -35,6 +35,7 @@ from plugins.autopilot.main import (
     authority_retention_lateral_limit, engagement_lateral_limit,
     lane_authority_rejection_reason, planned_curve_speed_limit_ms,
 )
+from plugins.collision.main import Plugin as CollisionPlugin
 from plugins.lanecontrol.main import Plugin as LaneControlPlugin
 from plugins.map.main import Plugin as MapPlugin
 from sdk.plugin_sdk import (
@@ -122,6 +123,68 @@ def ready_navigation_state(**extra):
 
 
 class ControlSafetyRegressionTests(unittest.TestCase):
+    def test_unproven_screen_danger_cannot_create_a_brake_request(self):
+        """10:12:26: curve_brake=0, but screen CV stopped the truck."""
+        state = ready_navigation_state(
+            traffic_snapshot_valid=True,
+            traffic_snapshot_timestamp=time.monotonic(), traffic_brake=0.0,
+            obstacle={"level": 0.93, "source": "screen_diagnostic"},
+            vision_obstacle_diagnostic={"level": 0.93},
+        )
+
+        class SDK:
+            def get(self, key, default=None):
+                return state.get(key, default)
+
+            def set(self, key, value):
+                state.set(key, value)
+
+        collision = CollisionPlugin.__new__(CollisionPlugin)
+        collision.enabled = True
+        collision.sdk = SDK()
+        collision.tags = Tags()
+        collision.on_tick(0.05)
+        self.assertEqual(state.get("collision_brake_request"), 0.0)
+
+        state.set("traffic_brake", 0.64)
+        collision.on_tick(0.05)
+        self.assertAlmostEqual(state.get("collision_brake_request"), 0.64)
+
+    def test_brake_to_reverse_is_recovered_to_drive_without_disengaging(self):
+        """Real 10:12:26 stop: our service brake selected R at 0 km/h."""
+        truck = {"speed": 0.0, "gear": -1}
+        state = ready_navigation_state(
+            nav_active=True, nav_steering=0.0, system_state="FOLLOW_LANE",
+            traffic_snapshot_valid=True,
+            traffic_snapshot_timestamp=time.monotonic(), traffic_brake=0.0,
+            collision_brake_request=0.0, light_brake=0.0,
+            aux_brake_request=0.0, danger_level=0.0,
+            acc_throttle=0.0, acc_brake=0.0,
+        )
+        plugin = autopilot(truck, state)
+        plugin._automatic_brake_stop = True
+        plugin.on_tick(0.05)
+        self.assertTrue(state.get("autopilot_active"))
+        self.assertTrue(plugin._reverse_recovery)
+        self.assertIn(True, plugin.sdk.controller.drive_events)
+        self.assertEqual(plugin.sdk.controller.throttle, 0.0)
+
+        truck["gear"] = 1
+        plugin.on_tick(0.05)
+        self.assertTrue(state.get("autopilot_active"))
+        self.assertFalse(plugin._reverse_recovery)
+        self.assertNotEqual(
+            state.get("autopilot_disable_reason"), "unexpected reverse gear")
+
+    def test_uncommanded_reverse_still_fails_closed(self):
+        truck = {"speed": 0.0, "gear": -1}
+        state = ready_navigation_state()
+        plugin = autopilot(truck, state)
+        plugin.on_tick(0.05)
+        self.assertFalse(state.get("autopilot_active"))
+        self.assertEqual(state.get("autopilot_disable_reason"),
+                         "unexpected reverse gear")
+
     def test_live_same_revision_confidence_replaces_stale_build_locator_score(self):
         # Real revision 10: the immutable LanePath scored 0.93, but the build
         # happened while the rolling prefix charged the locator an off-route
@@ -549,6 +612,8 @@ class ControlSafetyRegressionTests(unittest.TestCase):
     def test_queue_brake_keeps_fresh_gps_steering_and_authority(self):
         state = ready_navigation_state(
             system_state="CRUISE", nav_active=True, nav_steering=0.30,
+            traffic_snapshot_valid=True,
+            traffic_snapshot_timestamp=time.monotonic(),
             traffic_brake=1.0, acc_throttle=0.8, acc_brake=0.0)
         plugin = autopilot({"speed": 8.0, "gear": 5}, state)
         plugin._engage_blend = 1.0

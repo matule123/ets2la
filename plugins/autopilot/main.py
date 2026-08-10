@@ -276,6 +276,8 @@ class Plugin(BasePlugin):
         self._was_active = False
         self._diag_t = 0.0              # throttle for diagnostic logging
         self._reverse_recovery = False
+        self._reverse_recovery_owned = False
+        self._automatic_brake_stop = False
         self._drive_request_t = 0.0
         self._drive_engage_started = 0.0
         self._lane_lock_acquired = False
@@ -348,9 +350,6 @@ class Plugin(BasePlugin):
         system_state = self.sdk.shared_state.get("system_state")
         danger_level = self.sdk.shared_state.get("danger_level", 0) or 0
         lane_offset = self.sdk.shared_state.get("lane_offset", 0) or 0
-        # Real traffic available? If so, down-weight the noisy vision signal.
-        traffic = self.sdk.shared_state.get("traffic", []) or []
-        have_real_traffic = len(traffic) > 0
         snapshot = self.sdk.shared_state.get("lane_trajectory", {}) or {}
         try:
             snapshot_revision = int(snapshot.get("revision", -1) or -1)
@@ -510,11 +509,16 @@ class Plugin(BasePlugin):
         if navigation_authority_safe:
             self._last_authority_stop_reason = None
 
-        reversing = bool(autopilot_engaged and
-                         (float(speed) < -0.10 or gear < 0
-                          or self._reverse_recovery))
-        if reversing:
+        reverse_signal = bool(float(speed) < -0.10 or gear < 0)
+        if autopilot_engaged and reverse_signal and not self._reverse_recovery:
             self._reverse_recovery = True
+            # A reverse ratio reached while UltraPilot itself was holding the
+            # service brake is ETS2's automatic brake-to-reverse gesture, not
+            # an unexplained driver selection.
+            self._reverse_recovery_owned = bool(self._automatic_brake_stop)
+        reversing = bool(autopilot_engaged and
+                         (reverse_signal or self._reverse_recovery))
+        if reversing:
             self.sdk.controller.set_throttle(0.0)
             self._last_throttle = 0.0
             self._last_steering = self._ramp_steering(0.0, dt)
@@ -523,19 +527,45 @@ class Plugin(BasePlugin):
                 self._set_brake(0.62, dt)
                 self.sdk.shared_state.set(
                     "navigation_status", "Zastavujem neočakávanú spiatočku")
-            else:
+                self._publish_control_tags(speed_kmh, False)
+                return
+            if gear < 0 and self._reverse_recovery_owned:
+                # Release the brake gesture before requesting D. Keep
+                # throttle at zero until telemetry proves reverse is gone.
+                self.sdk.controller.set_brake(0.0)
+                self._last_brake = 0.0
+                now = time.monotonic()
+                if (self._drive_request_t <= 0.0
+                        or now - self._drive_request_t >= DRIVE_RETRY_S):
+                    self.sdk.controller.select_drive(True)
+                    self._drive_request_t = now
+                self.sdk.shared_state.set(
+                    "navigation_status",
+                    "Obnovujem jazdu dopredu po automatickej spiatočke")
+                self._publish_control_tags(speed_kmh, False)
+                return
+            if gear < 0:
+                # A reverse selection not caused by our own brake remains a
+                # genuine fail-closed event.
                 self.sdk.controller.set_brake(0.0)
                 self.sdk.controller.select_drive(False)
                 self._last_brake = 0.0
-                self._reverse_recovery = False
-                self._drive_engage_started = 0.0
                 self._publish_automatic_disable("unexpected reverse gear")
                 logging.warning(
                     "Autopilot automatically disengaged: unexpected reverse gear")
                 self.sdk.shared_state.set(
                     "navigation_status", "Autopilot vypnutý po spiatočke")
-            self._publish_control_tags(speed_kmh, False)
-            return
+                self._reverse_recovery = False
+                self._reverse_recovery_owned = False
+                self._automatic_brake_stop = False
+                self._drive_engage_started = 0.0
+                self._publish_control_tags(speed_kmh, False)
+                return
+            # D/neutral is proven again; continue through the normal drive
+            # handshake without needlessly disabling the autopilot.
+            self._reverse_recovery = False
+            self._reverse_recovery_owned = False
+            self._automatic_brake_stop = False
 
         # ``gear`` is the currently engaged ratio, not a reliable automatic
         # selector mode. Several ETS2 automatic transmissions report gear 0
@@ -582,6 +612,9 @@ class Plugin(BasePlugin):
         #    the truck doesn't lock up and spin.
         if system_state == "EMERGENCY":
             self._set_brake(1.0, dt)
+            self._automatic_brake_stop = bool(
+                autopilot_engaged and speed_kmh < 1.0
+                and self._last_brake > BRAKE_MIN_HOLD)
             self.sdk.controller.set_throttle(0.0)
             self._last_throttle = 0.0
             # Never leave the previous steering value latched while stopping
@@ -616,17 +649,23 @@ class Plugin(BasePlugin):
 
         # --- Gather all brake requests, combine via max() -------------------
         collision_brake = float(self.sdk.shared_state.get("collision_brake_request", 0.0) or 0.0)
-        traffic_brake = float(self.sdk.shared_state.get("traffic_brake", 0.0) or 0.0)
+        try:
+            traffic_age = time.monotonic() - float(
+                self.sdk.shared_state.get(
+                    "traffic_snapshot_timestamp", 0.0) or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            traffic_age = float("inf")
+        traffic_brake = (float(self.sdk.shared_state.get(
+            "traffic_brake", 0.0) or 0.0)
+            if (self.sdk.shared_state.get("traffic_snapshot_valid", False)
+                and 0.0 <= traffic_age <= 0.5) else 0.0)
         light_brake = float(self.sdk.shared_state.get("light_brake", 0.0) or 0.0)
         aux_brake = float(self.sdk.shared_state.get("aux_brake_request", 0.0) or 0.0)
-        # Vision obstacle (screen CV). Only trust it as a *nudge*: when we have
-        # real traffic data, heavily discount it so a shadow / sign can't cause
-        # a phantom full stop.
-        if danger_level > 0.35:
-            vision_brake = float(np.clip((danger_level - 0.35) * 1.8, 0.0, 1.0))
-            vision_brake *= (0.25 if have_real_traffic else 1.0)
-        else:
-            vision_brake = 0.0
+        # Raw screenshot danger is diagnostic only. ``danger_level`` now
+        # represents lane-aligned SCS traffic, already covered by
+        # traffic_brake/collision_brake, so it must not become a duplicate
+        # braking channel.
+        vision_brake = 0.0
         requested_brake = max(collision_brake, traffic_brake, light_brake,
                               aux_brake, vision_brake)
         if navigation_unreliable:
@@ -706,11 +745,9 @@ class Plugin(BasePlugin):
         # 3. Apply braking THROUGH THE RAMP (anti-jerk). This is the key change:
         #    the truck brakes firmly but progressively, never a step to 1.0.
         self._set_brake(requested_brake, dt)
-
-        # While stopped for traffic keep the gearbox in Drive. Holding the
-        # brake must never become ETS2's automatic brake-to-reverse gesture.
-        if autopilot_engaged and speed_kmh < 1.0 and requested_brake > 0.0:
-            self.sdk.controller.select_drive(True)
+        self._automatic_brake_stop = bool(
+            autopilot_engaged and speed_kmh < 1.0
+            and self._last_brake > BRAKE_MIN_HOLD)
 
         # 4. Longitudinal control from ACC outputs
         acc_throttle = self.sdk.shared_state.get("acc_throttle", None)

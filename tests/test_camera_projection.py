@@ -11,7 +11,8 @@ from unittest import mock
 
 from core.ar_overlay import (
     AR_MAX_ROAD_DEPTH_M, AROverlay, _first_visible_road_strip,
-    _forward_route_suffix, _visible_segment_parts,
+    _forward_route_suffix, _road_profile_visible_prefix, _route_alpha,
+    _visible_segment_parts,
 )
 from PyQt6.QtCore import QPointF
 from core.camera import (
@@ -52,6 +53,58 @@ def snapshot(raw=None, view=None, now=None, render_time=1_000_000):
 
 
 class CameraSnapshotTests(unittest.TestCase):
+    def test_ar_road_profile_stops_after_a_proven_crest(self):
+        camera = {"position": [0.0, 2.0, 0.0]}
+        # Elevation rays climb to the crest at z=30, then the lower road is
+        # geometrically hidden behind it. No depth buffer or invented point is
+        # needed to stop the trace there.
+        road = [[0.0, 0.0, 10.0], [0.0, 1.0, 20.0],
+                [0.0, 3.0, 30.0], [0.0, -2.0, 45.0],
+                [0.0, -2.0, 60.0]]
+        visible = _road_profile_visible_prefix(road, camera)
+        self.assertEqual(visible, road[:3])
+
+        flat = [[0.0, 0.0, float(z)] for z in (10, 20, 40, 80)]
+        self.assertEqual(_road_profile_visible_prefix(flat, camera), flat)
+
+        # A lower point in a different bearing is a turn, not proof that the
+        # straight road in front occludes it.
+        turning = [[0.0, 0.0, 10.0], [0.0, 2.0, 20.0],
+                   [20.0, -2.0, 25.0], [35.0, -2.0, 25.0]]
+        self.assertEqual(_road_profile_visible_prefix(turning, camera),
+                         turning)
+
+    def test_ar_distance_visibility_fades_in_and_out_without_hard_pop(self):
+        self.assertEqual(_route_alpha(8.0), 0.0)
+        self.assertGreater(_route_alpha(14.0), 0.0)
+        self.assertEqual(_route_alpha(50.0), 1.0)
+        self.assertGreater(_route_alpha(120.0), 0.0)
+        self.assertEqual(_route_alpha(AR_MAX_ROAD_DEPTH_M), 0.0)
+
+    def test_ar_renderer_refreshes_camera_locally_but_keeps_atomic_truck_pose(self):
+        shared_camera = {
+            "render_time_us": 123, "telemetry_timestamp": time.monotonic(),
+            "vehicle_position": [9.0, 1.0, 8.0],
+            "vehicle_heading": 0.4, "position": [1.0, 2.0, 3.0],
+        }
+        fresh_camera = {
+            "valid": True, "position": [4.0, 5.0, 6.0],
+            "viewport": viewport(), "revision": 20,
+        }
+
+        class LocalProducer:
+            def read(self, *_):
+                return dict(fresh_camera)
+
+        overlay = type("RenderCamera", (), {
+            "state": State({"camera_snapshot": shared_camera}),
+            "_render_camera_producer": LocalProducer(),
+        })()
+        result = AROverlay._fresh_render_camera_snapshot(overlay)
+        self.assertEqual(result["position"], [4.0, 5.0, 6.0])
+        self.assertEqual(result["vehicle_position"], [9.0, 1.0, 8.0])
+        self.assertEqual(result["vehicle_heading"], 0.4)
+
     def test_ar_slices_every_sample_behind_the_atomic_vehicle_pose(self):
         world = [[0.0, 0.0, float(z)] for z in range(0, 101, 10)]
         camera = {

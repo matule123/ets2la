@@ -1195,22 +1195,38 @@ class UltraPilotEngine:
                     **trailer_payload,
                 })
 
-                # Surrounding traffic + the traffic light controlling us (ETS2LA plugin).
+                # Surrounding traffic + the traffic light controlling us
+                # (ETS2LA game plugin). A successful empty list is still an
+                # authoritative "road is clear" snapshot; it is not the same
+                # thing as an unavailable reader.
                 try:
                     from core.sdk.ets2la_data import nearest_light_ahead
                     traffic = self.ets2la.read_traffic()
                     lights = self.ets2la.read_traffic_lights()
                     pos = (truck.get("x", 0.0), truck.get("z", 0.0))
                     hdg = truck.get("rotation", 0.0)
-                    self.shared_state.set("traffic", traffic)
                     light = nearest_light_ahead(lights, pos, hdg)
-                    self.shared_state.set("traffic_light", light)
                     # Lead-vehicle following: brake for the nearest car ahead in our lane.
-                    self.shared_state.set("traffic_brake", self._lead_brake(traffic, pos, hdg))
+                    traffic_brake = self._lead_brake(traffic, pos, hdg)
                     # Stop on red / go on green.
-                    self.shared_state.set("light_brake", self._light_brake(light))
-                except Exception:
-                    pass
+                    self.shared_state.update_batch({
+                        "traffic": traffic,
+                        "traffic_light": light,
+                        "traffic_brake": traffic_brake,
+                        "light_brake": self._light_brake(light),
+                        "traffic_snapshot_valid": True,
+                        "traffic_snapshot_timestamp": telemetry_timestamp,
+                    })
+                except Exception as error:
+                    # Never retain actuator-facing values from an older frame.
+                    self.shared_state.update_batch({
+                        "traffic": [], "traffic_light": None,
+                        "traffic_brake": 0.0, "light_brake": 0.0,
+                        "lead_distance": None,
+                        "traffic_snapshot_valid": False,
+                        "traffic_snapshot_timestamp": telemetry_timestamp,
+                        "traffic_snapshot_failure": str(error),
+                    })
             else:
                 telemetry_timestamp = time.monotonic()
                 camera_snapshot = self.camera_snapshot_producer.read(
@@ -1223,6 +1239,13 @@ class UltraPilotEngine:
                     "telemetry_valid": False,
                     "telemetry_timestamp": telemetry_timestamp,
                     "camera_snapshot": camera_snapshot,
+                    "traffic": [],
+                    "traffic_light": None,
+                    "traffic_brake": 0.0,
+                    "light_brake": 0.0,
+                    "lead_distance": None,
+                    "traffic_snapshot_valid": False,
+                    "traffic_snapshot_timestamp": telemetry_timestamp,
                     "trailer_attached": False,
                     "trailer_world_pos": None,
                     "trailer_altitude": None,
@@ -1245,12 +1268,33 @@ class UltraPilotEngine:
             # the whole Engine process if it ever does die.
             try:
                 # 2. Perception
-                obstacle_data = self.perception.detect_obstacles()
-                self.shared_state.set("obstacle", obstacle_data)
+                vision_obstacle = self.perception.detect_obstacles()
+                # Screenshot colour/edge detection has no lane, depth,
+                # direction or object-identity proof. Keep it diagnostic, but
+                # derive braking authority solely from lane-aligned SCS data.
+                try:
+                    traffic_brake = float(self.shared_state.get(
+                        "traffic_brake", 0.0) or 0.0)
+                except (TypeError, ValueError, OverflowError):
+                    traffic_brake = 0.0
+                traffic_valid = bool(self.shared_state.get(
+                    "traffic_snapshot_valid", False))
+                obstacle_data = {
+                    "level": (max(0.0, min(1.0, traffic_brake))
+                              if traffic_valid else 0.0),
+                    "position": "center",
+                    "source": ("scs_lane_aligned_traffic" if traffic_valid
+                               else "no_proven_obstacle_authority"),
+                }
+                self.shared_state.update_batch({
+                    "vision_obstacle_diagnostic": vision_obstacle,
+                    "obstacle": obstacle_data,
+                    "danger_level": obstacle_data["level"],
+                    "obstacle_control_authority": obstacle_data["source"],
+                })
                 self.shared_state.set("nav_direction", self.perception.detect_navigation_arrow())
                 self.shared_state.set("lane_offset", self.perception.detect_lanes())
                 self.shared_state.set("toll_detected", self.perception.detect_toll())
-                self.shared_state.set("danger_level", obstacle_data.get("level", 0))
 
                 # 3. Planning
                 perception_data = {
