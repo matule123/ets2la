@@ -8,7 +8,7 @@ from core.navigation.lane_trajectory import (
     build_lane_trajectory, derive_display_points, validate_lane_trajectory,
 )
 from core.navigation.road_network import RoadNetwork
-from core.navigation.route import Route
+from core.navigation.route import Route, curve_cte_gain
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -756,7 +756,9 @@ class RealMapLaneDataTests(unittest.TestCase):
                 self.assertAlmostEqual(
                     debug["lane_recovery_multiplier"], 1.0, places=7)
                 self.assertFalse(debug["straight_recovery_active"])
-                self.assertEqual(debug["cte_gain"], 0.0)
+                self.assertAlmostEqual(
+                    debug["cte_gain"],
+                    curve_cte_gain(radius, live_cte), places=7)
                 self.assertFalse(debug["curve_direction_hold"])
                 self.assertLess(debug["cte_geometry_residual"], 0.03)
                 self.assertLess(

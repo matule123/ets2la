@@ -100,6 +100,7 @@ class Telemetry:
                     "attached": True,
                     "speed": speed_ms,                 # approximated by the truck's
                     "x": raw_tr.get("worldX", 0.0),
+                    "y": raw_tr.get("worldY", 0.0),
                     "z": raw_tr.get("worldZ", 0.0),
                     "rotation": tr_heading,            # radians (heading)
                     "rotationX": raw_tr.get("rotationX", 0.0),

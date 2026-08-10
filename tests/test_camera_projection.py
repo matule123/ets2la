@@ -11,7 +11,7 @@ from unittest import mock
 
 from core.ar_overlay import (
     AR_MAX_ROAD_DEPTH_M, AROverlay, _first_visible_road_strip,
-    _visible_segment_parts,
+    _forward_route_suffix, _visible_segment_parts,
 )
 from PyQt6.QtCore import QPointF
 from core.camera import (
@@ -52,6 +52,32 @@ def snapshot(raw=None, view=None, now=None, render_time=1_000_000):
 
 
 class CameraSnapshotTests(unittest.TestCase):
+    def test_ar_slices_every_sample_behind_the_atomic_vehicle_pose(self):
+        world = [[0.0, 0.0, float(z)] for z in range(0, 101, 10)]
+        camera = {
+            "vehicle_position": [0.0, 0.0, 45.0],
+            "vehicle_heading": math.pi,
+            # Camera orientation is intentionally unrelated: rapidly looking
+            # backward must not bring the already-passed route back into AR.
+            "quaternion": [0.0, 0.0, 1.0, 0.0],
+        }
+        suffix = _forward_route_suffix(world, camera)
+        self.assertEqual(suffix[0], [0.0, 0.0, 50.0])
+        self.assertTrue(all(point[2] >= 50.0 for point in suffix))
+
+        camera["vehicle_position"] = [0.0, 0.0, 40.0]
+        self.assertEqual(
+            _forward_route_suffix(world, camera)[0], [0.0, 0.0, 40.0])
+
+    def test_ar_rejects_non_atomic_or_off_corridor_vehicle_pose(self):
+        world = [[0.0, 0.0, 0.0], [0.0, 0.0, 20.0],
+                 [0.0, 0.0, 40.0]]
+        self.assertEqual(_forward_route_suffix(world, {}), [])
+        self.assertEqual(_forward_route_suffix(world, {
+            "vehicle_position": [20.0, 0.0, 10.0],
+            "vehicle_heading": math.pi,
+        }), [])
+
     def test_ar_stops_at_first_non_visible_road_gap_and_distance_limit(self):
         projected = [
             (100.0, 500.0, 4.0),       # cab-hidden

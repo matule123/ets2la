@@ -649,6 +649,8 @@ class Plugin(BasePlugin):
             "path_curve_distance_m", 0.0)
         curve_factor = 1.0          # throttle multiplier (set below)
         curve_limit_ms = float("inf")
+        curve_brake = 0.0
+        curve_geometry_available = False
         if radius is not None:
             try:
                 R = float(radius)
@@ -656,6 +658,8 @@ class Plugin(BasePlugin):
             except (TypeError, ValueError, OverflowError):
                 R = 1e6
                 distance_to_curve = 0.0
+            curve_geometry_available = bool(
+                math.isfinite(R) and R > 0.0)
             if 0.0 < R < 2000.0:
                 v_now = abs(speed)                        # m/s
                 curve_limit_ms, _usable_curve_distance = \
@@ -682,12 +686,22 @@ class Plugin(BasePlugin):
         # --- Reactive curve slowdown: ease off the throttle (light brake at
         # speed) — a back-up to the proactive brake above, in case the map
         # curvature isn't published yet (e.g. no map loaded, vision only). ---
-        turn = abs(self._last_steering)
-        curve_factor = min(curve_factor,
-                           1.0 if turn < 0.18 else max(0.35, 1.0 - (turn - 0.18) * 1.6))
-        if turn > 0.45 and speed_kmh > 45:
-            requested_brake = max(requested_brake,
-                                  float(np.clip((turn - 0.45) * 0.6, 0.0, 0.35)))
+        # Steering magnitude is not road curvature: it also contains lane
+        # recovery and the trailer swept-path correction. Treating it as a
+        # second curve sensor caused needless braking while merely
+        # re-centring and could override the proven map-speed envelope. Keep
+        # this fallback only when no finite map curvature exists.
+        if not curve_geometry_available:
+            turn = abs(self._last_steering)
+            curve_factor = min(
+                curve_factor,
+                1.0 if turn < 0.18
+                else max(0.35, 1.0 - (turn - 0.18) * 1.6))
+            if turn > 0.45 and speed_kmh > 45:
+                requested_brake = max(
+                    requested_brake,
+                    float(np.clip(
+                        (turn - 0.45) * 0.6, 0.0, 0.35)))
 
         # 3. Apply braking THROUGH THE RAMP (anti-jerk). This is the key change:
         #    the truck brakes firmly but progressively, never a step to 1.0.
@@ -804,6 +818,16 @@ class Plugin(BasePlugin):
                         "guidance_heading_error_rad", 0.0) or 0.0))
                 diagnostic_guidance_curvature = float(
                     steering_debug.get("guidance_curvature", 0.0) or 0.0)
+                trailer_debug = steering_debug.get(
+                    "trailer_envelope", {}) or {}
+                diagnostic_trailer_cte = float(
+                    trailer_debug.get("trailer_cte_m", 0.0) or 0.0)
+                diagnostic_trailer_required = float(
+                    trailer_debug.get("required_offset_m", 0.0) or 0.0)
+                diagnostic_trailer_offset = float(
+                    trailer_debug.get("applied_offset_m", 0.0) or 0.0)
+                diagnostic_trailer_reason = str(
+                    trailer_debug.get("reason", "") or "")
             except (TypeError, ValueError, OverflowError):
                 live_lateral = live_heading = float("nan")
                 diagnostic_radius = None
@@ -816,6 +840,10 @@ class Plugin(BasePlugin):
                 diagnostic_guidance_lookahead = float("nan")
                 diagnostic_guidance_heading = float("nan")
                 diagnostic_guidance_curvature = float("nan")
+                diagnostic_trailer_cte = float("nan")
+                diagnostic_trailer_required = float("nan")
+                diagnostic_trailer_offset = float("nan")
+                diagnostic_trailer_reason = "malformed"
             logging.info(
                 "autopilot: active=%s nav=%s engage=%.2f lane_cte=%.3f "
                 "lane_heading=%.1fdeg vision_off=%.3f "
@@ -826,6 +854,11 @@ class Plugin(BasePlugin):
                 "low_speed_capture=%s guidance_L=%.1fm "
                 "guidance_heading=%.1fdeg guidance_k=%.5f "
                 "curve_r=%s curve_d=%.1f curve_limit=%s "
+                "brake=%.3f brake_req=%.3f curve_brake=%.3f "
+                "collision_brake=%.3f traffic_brake=%.3f light_brake=%.3f "
+                "aux_brake=%.3f vision_brake=%.3f "
+                "trailer_cte=%.3f trailer_required=%.3f trailer_offset=%.3f "
+                "trailer_reason=%s engine_steer=%.3f articulation_guard=%s "
                 "lane_revision=%s confidence=%.3f reject=%s",
                 active, nav_active, self._engage_blend,
                 live_lateral, live_heading, float(lane_offset),
@@ -844,6 +877,16 @@ class Plugin(BasePlugin):
                 diagnostic_curve_distance,
                 ("-" if not math.isfinite(curve_limit_ms)
                  else f"{curve_limit_ms * 3.6:.1f}kmh"),
+                self._last_brake, requested_brake, curve_brake,
+                collision_brake, traffic_brake, light_brake,
+                aux_brake, vision_brake,
+                diagnostic_trailer_cte, diagnostic_trailer_required,
+                diagnostic_trailer_offset,
+                diagnostic_trailer_reason.replace(" ", "_"),
+                float(self.sdk.shared_state.get(
+                    "engine_applied_steering", steering_val) or 0.0),
+                bool(self.sdk.shared_state.get(
+                    "trailer_articulation_guarded", False)),
                 snapshot_revision,
                 snapshot_confidence,
                 authority_reason)

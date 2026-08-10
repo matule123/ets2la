@@ -19,7 +19,7 @@ from core.hud import (
     HUD_CAMERA_BACK_M, HUD_EGO_AHEAD_M, HUD_ROAD_BEHIND_M, UltraPilotHUD,
     _clip_truck_road_segment,
 )
-from core.engine import UltraPilotEngine
+from core.engine import UltraPilotEngine, trailer_articulation_guard
 from core.controller import (
     Controller as PhysicalController, _discover_blinker_keys,
 )
@@ -403,6 +403,26 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         self.assertAlmostEqual(plugin._last_steering, 0.0, places=7)
         plugin.on_tick(0.10)
         self.assertAlmostEqual(plugin._last_steering, -0.06)
+
+    def test_trailer_guard_limits_only_the_command_that_increases_fold(self):
+        for sign in (-1.0, 1.0):
+            articulation = sign * math.radians(35.0)
+            dangerous = -sign * 0.80
+            recovery = sign * 0.80
+            limited, guarded = trailer_articulation_guard(
+                dangerous, articulation, 1.0)
+            safe, recovery_guarded = trailer_articulation_guard(
+                recovery, articulation, 1.0)
+            with self.subTest(sign=sign):
+                self.assertTrue(guarded)
+                self.assertLess(abs(limited), abs(dangerous))
+                self.assertFalse(recovery_guarded)
+                self.assertAlmostEqual(safe, recovery)
+
+        ordinary, guarded = trailer_articulation_guard(
+            -0.80, math.radians(20.0), 1.0)
+        self.assertFalse(guarded)
+        self.assertAlmostEqual(ordinary, -0.80)
 
     def test_scs_writer_layout_matches_shipped_controller_dll(self):
         offsets, total = {}, 0
@@ -929,6 +949,22 @@ class ControlSafetyRegressionTests(unittest.TestCase):
         self.assertGreater(plugin.sdk.controller.brake, 0.0)
         self.assertEqual(plugin.sdk.controller.throttle, 0.0)
         self.assertLess(state.get("path_curve_speed_limit_ms"), 7.0)
+
+    def test_lane_recovery_steering_does_not_manufacture_curve_braking(self):
+        # Steering contains lane recovery and trailer swept-path correction;
+        # it is not a second curvature measurement. The confirmed straight
+        # must therefore not brake merely because recovery needs wheel angle.
+        state = ready_navigation_state(
+            nav_active=True, nav_steering=0.80, acc_throttle=0.0,
+            acc_brake=0.0, path_curvature_radius=1_000_000.0,
+            path_curve_distance_m=0.0)
+        plugin = autopilot({"speed": 50.0 / 3.6, "gear": 6}, state)
+        plugin._engage_blend = 1.0
+        plugin._was_active = True
+        plugin._last_steering = 0.80
+        plugin.on_tick(0.10)
+        self.assertAlmostEqual(plugin.sdk.controller.brake, 0.0)
+        self.assertIsNone(state.get("path_curve_speed_limit_ms"))
 
     def test_captured_eighteen_metre_roundabout_reserves_steering_setup(self):
         # At 22:26:05 the compact curve was 44 m ahead but the old point-mass

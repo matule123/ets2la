@@ -15,11 +15,47 @@ from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import QApplication, QWidget
 
 from core.camera import project_world_point, project_world_points
+from core.navigation.route import Route, iter_path_xz
 
 
 AR_MIN_ROAD_DEPTH_M = 8.0
 AR_MAX_ROAD_DEPTH_M = 140.0
 AR_TOP_VISIBILITY_FRACTION = 0.06
+
+
+def _forward_route_suffix(world_points, camera_snapshot):
+    """Select original trajectory samples at/after the atomic truck pose.
+
+    HUD intentionally retains a little road behind the truck.  AR must not:
+    when the player looks sideways/backward that tail can project onto a
+    different visible road.  This function only slices existing samples; it
+    never moves, joins or invents trajectory geometry.
+    """
+    try:
+        vehicle = camera_snapshot["vehicle_position"]
+        position = (float(vehicle[0]), float(vehicle[2]))
+        heading = float(camera_snapshot["vehicle_heading"])
+        if (len(world_points) < 2
+                or not all(math.isfinite(value)
+                           for value in (*position, heading))):
+            return []
+    except (KeyError, TypeError, ValueError, IndexError, OverflowError):
+        return []
+    xz = list(iter_path_xz(world_points))
+    if len(xz) != len(world_points) or len(xz) < 2:
+        return []
+    route = Route(xz)
+    index, fraction, _progress, distance2 = route._tracking_projection(
+        position, heading)
+    if not math.isfinite(distance2) or distance2 > 12.0 ** 2:
+        return []
+    # If the axle is already inside a segment, its first endpoint is behind
+    # the vehicle and must not be rendered when the camera is turned around.
+    # Start at the following *existing* sample; no interpolated point is
+    # invented. At an exact endpoint that sample itself remains valid.
+    start = int(index) if fraction <= 1e-6 else int(index) + 1
+    start = max(0, min(start, len(world_points) - 1))
+    return list(world_points[start:])
 
 
 def _first_visible_road_strip(projected_values, viewport):
@@ -231,7 +267,7 @@ class AROverlay(QWidget):
         snapshot = self.state.get("camera_snapshot", {}) or {}
         projected = project_world_point(
             snapshot, point,
-            telemetry_timestamp=float(self.state.get(
+            telemetry_timestamp=float(snapshot.get(
                 "telemetry_timestamp", 0.0) or 0.0))
         if projected is None:
             return None
@@ -273,8 +309,15 @@ class AROverlay(QWidget):
             self._publish_status(False, route_reason or "lane trajectory is unavailable")
             return
         camera_snapshot = self.state.get("camera_snapshot", {}) or {}
-        telemetry_timestamp = float(self.state.get(
+        telemetry_timestamp = float(camera_snapshot.get(
             "telemetry_timestamp", 0.0) or 0.0)
+        world = _forward_route_suffix(world, camera_snapshot)
+        if len(world) < 2:
+            self.state.set("ar_lane_revision", -1)
+            self._publish_status(
+                False, "trajectory has no forward samples at the atomic vehicle pose",
+                current_revision)
+            return
         projected_values, camera_reason = project_world_points(
             camera_snapshot, world,
             telemetry_timestamp=telemetry_timestamp)

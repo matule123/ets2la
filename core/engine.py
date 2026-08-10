@@ -31,6 +31,30 @@ SAFETY_STEERING_RETURN_RATE = 0.50  # full lock -> centre in at most 2 s
 SAFETY_BRAKE_RAMP_UP = 2.50         # reach 0.70 brake in about 0.28 s
 
 
+def trailer_articulation_guard(steering, articulation, maximum):
+    """Prevent only a physically proven *further* trailer fold.
+
+    With UltraPilot's heading convention a right steering command is positive
+    while the resulting tractor-minus-trailer articulation is negative (and
+    vice versa).  The former guard used the opposite test and therefore
+    blocked the safe recovery lock after a hairpin while allowing the command
+    that increased the fold.  Ordinary road articulation is not jackknife:
+    intervention begins at 30 degrees and reaches its strongest bound at 40.
+    """
+    import math
+    steering = float(steering)
+    articulation = float(articulation)
+    maximum = max(0.0, float(maximum))
+    magnitude = abs(articulation)
+    onset, full = math.radians(30.0), math.radians(40.0)
+    increasing_fold = steering * articulation < 0.0
+    if not increasing_fold or magnitude <= onset:
+        return max(-maximum, min(maximum, steering)), False
+    fraction = min(1.0, (magnitude - onset) / (full - onset))
+    allowed = maximum * (1.0 - 0.70 * fraction)
+    return max(-allowed, min(allowed, steering)), True
+
+
 def _live_route_suffix(planned_items, route_distance):
     """Drop every SDK route node already passed by the live GPS distance."""
     samples = []
@@ -718,32 +742,25 @@ class UltraPilotEngine:
         max_steer = (1.0 if authoritative_gps_steering or spd_kmh < 30.0
                      else max(0.25, 1.0 - (spd_kmh - 30.0) / 110.0))
 
-        # Jackknife / trailer-swing protection (Fáza 3d). When a semi-trailer is
-        # coupled and its articulation angle is already large, winding the wheel
-        # further into the SAME direction the trailer is swinging would fold the
-        # combo (jackknife at low speed, trailer-swing at speed). We clamp the
-        # steering away from the dangerous direction, scaled by how folded the
-        # combo already is — full clamp at 35° articulation. This is a safety
-        # limit only; it never increases the steering command.
+        # Jackknife protection uses the project's actual steering/articulation
+        # sign convention. It limits only a command proven to increase an
+        # already severe fold; a recovery command is never blocked. This is a
+        # physical envelope guard, not a steering smoother.
+        articulation_guarded = False
         if self.shared_state.get("trailer_attached", False):
-            import math as _m
             try:
-                art = float(self.shared_state.get("trailer_articulation", 0.0) or 0.0)
+                art = float(self.shared_state.get(
+                    "trailer_articulation", 0.0) or 0.0)
             except (TypeError, ValueError):
                 art = 0.0
-            fold = abs(art) / _m.radians(35.0)         # 0..1+ at 35° articulation
-            if fold > 0.5:                             # only intervene past ~17°
-                # Limit how much MORE we can steer into the swing direction.
-                # art>0 → trailer tail left → swinging right → clamp +steering.
-                sign = 1.0 if art > 0 else -1.0
-                # Reserve shrinks from full toward ~0.3 as we approach a fold.
-                reserve = max(0.3, 1.0 - fold)
-                # Asymmetric cap: allow the safe direction fully, the dangerous
-                # one only up to (current steering scaled by reserve).
-                if (steering * sign) > 0:
-                    steering = sign * min(abs(steering),
-                                          max_steer * reserve, max_steer)
+            steering, articulation_guarded = trailer_articulation_guard(
+                steering, art, max_steer)
         steering = max(-max_steer, min(max_steer, steering))
+
+        self.shared_state.update_batch({
+            "engine_applied_steering": float(steering),
+            "trailer_articulation_guarded": bool(articulation_guarded),
+        })
 
         self.controller.set_steering(steering)
         self.controller.set_throttle(throttle)
@@ -1095,6 +1112,63 @@ class UltraPilotEngine:
                     self._last_game_route_distance = None
                     self._last_route_signature = None
                 self._had_game_destination = has_game_destination
+                # Keep tractor, trailer and camera in one immutable telemetry
+                # frame.  Steering and AR must never combine the next tractor
+                # pose with the previous trailer/camera pose during a fast
+                # bend or a rapid camera movement.
+                trailer = self.telemetry.get("trailer", {}) or {}
+                if trailer.get("attached"):
+                    articulation = self._articulation_angle(
+                        truck.get("rotation", 0.0),
+                        trailer.get("rotation", 0.0))
+                    trailer_payload = {
+                        "trailer_attached": True,
+                        "trailer_world_pos": (
+                            trailer.get("x", 0.0), trailer.get("z", 0.0)),
+                        "trailer_altitude": float(
+                            trailer.get("y", 0.0) or 0.0),
+                        "trailer_heading": trailer.get("rotation", 0.0),
+                        "trailer_articulation": articulation,
+                    }
+                else:
+                    trailer_payload = {
+                        "trailer_attached": False,
+                        "trailer_world_pos": None,
+                        "trailer_altitude": None,
+                        "trailer_heading": None,
+                        "trailer_articulation": 0.0,
+                    }
+                vehicle_envelope_snapshot = {
+                    "timestamp": float(telemetry_timestamp),
+                    "tractor_position": [
+                        float(truck.get("x", 0.0) or 0.0),
+                        float(truck.get("y", 0.0) or 0.0),
+                        float(truck.get("z", 0.0) or 0.0),
+                    ],
+                    "tractor_heading": float(
+                        truck.get("rotation", 0.0) or 0.0),
+                    "trailer_attached": bool(trailer.get("attached")),
+                    "trailer_position": ([
+                        float(trailer.get("x", 0.0) or 0.0),
+                        float(trailer.get("y", 0.0) or 0.0),
+                        float(trailer.get("z", 0.0) or 0.0),
+                    ] if trailer.get("attached") else None),
+                    "trailer_heading": (
+                        float(trailer.get("rotation", 0.0) or 0.0)
+                        if trailer.get("attached") else None),
+                    "trailer_articulation": float(
+                        trailer_payload["trailer_articulation"]),
+                }
+                camera_snapshot = dict(camera_snapshot)
+                camera_snapshot.update({
+                    "vehicle_position": [
+                        float(truck.get("x", 0.0) or 0.0),
+                        float(truck.get("y", 0.0) or 0.0),
+                        float(truck.get("z", 0.0) or 0.0),
+                    ],
+                    "vehicle_heading": float(
+                        truck.get("rotation", 0.0) or 0.0),
+                })
                 self.shared_state.update_batch({
                     "telemetry": self.telemetry.data,
                     "telemetry_valid": bool(truck.get("pose_valid", False)),
@@ -1109,39 +1183,17 @@ class UltraPilotEngine:
                     "truck_altitude": float(truck.get("y", 0.0) or 0.0),
                     "truck_heading": truck.get("rotation", 0.0),
                     "truck_speed_ms": truck.get("speed", 0.0),
+                    # One nested value lets navigation consume a tractor and
+                    # trailer pose from exactly one telemetry frame.
+                    "vehicle_envelope_snapshot": vehicle_envelope_snapshot,
                     # Destination city of the current job (for the gantry sign).
                     "dest_city": dest_city,
                     "game_route_distance": route_distance,
                     "game_gps_navigation_active": game_gps_navigation_active,
                     "navigation_arrival_pending": arrival_pending,
                     "game_route_time": float(truck.get("routeTime", 0.0) or 0.0),
+                    **trailer_payload,
                 })
-
-                # Trailer (articulated semi-trailer, Zone 14). We publish its
-                # world pose + the articulation angle (signed heading difference
-                # between tractor and trailer) so the HUD can draw the trailer
-                # hinged behind the cab. When no trailer is attached we publish
-                # empty values, which the HUD treats as "cab only".
-                trailer = self.telemetry.get("trailer", {}) or {}
-                if trailer.get("attached"):
-                    tr_pos = (trailer.get("x", 0.0), trailer.get("z", 0.0))
-                    articulation = self._articulation_angle(
-                        truck.get("rotation", 0.0), trailer.get("rotation", 0.0))
-                    self.shared_state.update_batch({
-                        "trailer_attached": True,
-                        "trailer_world_pos": tr_pos,
-                        "trailer_heading": trailer.get("rotation", 0.0),
-                        "trailer_articulation": articulation,
-                    })
-                else:
-                    # Clear stale trailer state when the trailer is uncoupled.
-                    if self.shared_state.get("trailer_attached", False):
-                        self.shared_state.update_batch({
-                            "trailer_attached": False,
-                            "trailer_world_pos": None,
-                            "trailer_heading": None,
-                            "trailer_articulation": 0.0,
-                        })
 
                 # Surrounding traffic + the traffic light controlling us (ETS2LA plugin).
                 try:
@@ -1171,6 +1223,20 @@ class UltraPilotEngine:
                     "telemetry_valid": False,
                     "telemetry_timestamp": telemetry_timestamp,
                     "camera_snapshot": camera_snapshot,
+                    "trailer_attached": False,
+                    "trailer_world_pos": None,
+                    "trailer_altitude": None,
+                    "trailer_heading": None,
+                    "trailer_articulation": 0.0,
+                    "vehicle_envelope_snapshot": {
+                        "timestamp": float(telemetry_timestamp),
+                        "tractor_position": None,
+                        "tractor_heading": None,
+                        "trailer_attached": False,
+                        "trailer_position": None,
+                        "trailer_heading": None,
+                        "trailer_articulation": 0.0,
+                    },
                     **telemetry_loss,
                 })
 

@@ -41,11 +41,11 @@ def iter_path_xz(points):
         if math.isfinite(x) and math.isfinite(z):
             yield x, z
 
-# Legacy Stanley calibration helpers remain public for compatibility and
-# isolated calibration tests. Authoritative GPS steering no longer sums these
-# heading and CTE gains; it uses the coherent geometric target below.
-K_HEADING = 1.0           # heading-error weight (Stanley keeps this at 1.0)
-K_CTE = 0.80              # damped lane-centre recovery; avoids edge tracking
+# Stanley calibration helpers remain public for compatibility and isolated
+# calibration tests. Authoritative GPS steering evaluates them in the same
+# Frenet frame as the Ackermann curvature below.
+K_HEADING = 1.35          # yaw damping in the common Frenet steering frame
+K_CTE = 1.05              # measured lane-centre recovery on broad/straight road
 K_CTE_CURVE = 1.80        # hold the mapped lane centre against curve cutting
 K_SOFT = 1.0              # softening constant → CTE term never explodes at v=0
 # Below walking speed, expand the same target so engagement follows one
@@ -59,16 +59,41 @@ LOW_SPEED_CAPTURE_MAX_MS = 5.0
 # angle cover a 13.3 m radius without inventing geometry or raising any gate.
 TRUCK_WHEELBASE_M = 3.8
 NORMALIZED_STEERING_ANGLE_RAD = 0.28
-STEERING_CURVATURE_SPAN_M = 6.0
-# A single geometric target replaces the former independent curvature,
-# heading and CTE commands.  Eight metres is long enough to avoid reacting to
-# individual two-metre trajectory samples, while still following an R18 lane
-# without cutting its chord.  At road speed the target expands gradually; at
-# crawl it expands towards 20 m so engaging off-centre produces one shallow
-# intercept instead of a left/right correction cycle.
+STEERING_CURVATURE_SPAN_M = 8.0
+# The lane trajectory is resampled near two metres and therefore contains a
+# small deterministic curvature quantisation.  Steering represents the
+# tractor wheelbase footprint with a symmetric spatial quadrature around the
+# reference progress.  This is a calculation over immutable road geometry,
+# not a time-domain filter of commands or telemetry.
+STEERING_CURVATURE_SAMPLE_OFFSETS_M = (-4.0, -2.0, 0.0, 2.0, 4.0)
+STEERING_CURVATURE_SAMPLE_WEIGHTS = (0.10, 0.20, 0.40, 0.20, 0.10)
+# These legacy lookahead constants remain public for recorded-route callers.
+# Authoritative lane steering uses the short spatial Frenet reference below;
+# low-speed capture still uses the 20 m value as its geometric correction cap.
 GUIDANCE_LOOKAHEAD_MIN_M = 8.0
 GUIDANCE_LOOKAHEAD_MAX_M = 30.0
 GUIDANCE_LOW_SPEED_LOOKAHEAD_M = 20.0
+# State feedback is converted to a real steering angle before it is combined
+# with the Ackermann feed-forward angle.  This is the calibrated usable SCS
+# response of the tractor, not a temporal signal filter.
+FEEDBACK_STEERING_RESPONSE = 0.40
+STEERING_REFERENCE_PREVIEW_MIN_M = 0.5
+STEERING_REFERENCE_PREVIEW_MAX_M = 4.0
+# Estimate the Frenet tangent across a physical tractor-length.  A 1.5 m
+# secant was shorter than the map's two-metre resampling interval and turned
+# harmless lane-point quantisation into alternating heading error.
+STEERING_REFERENCE_TANGENT_M = 6.0
+# A lane-centred tractor does not imply a lane-contained semi-trailer.  The
+# trailer axle follows a smaller radius.  These dimensions are deliberately
+# conservative and the resulting tractor offset is always capped by the
+# confirmed lane width; no map point or LaneId is moved.
+TRAILER_EFFECTIVE_AXLE_DISTANCE_M = 8.0
+TRACTOR_BODY_WIDTH_M = 2.55
+VEHICLE_ENVELOPE_MARGIN_M = 0.15
+TRAILER_POSE_MIN_DISTANCE_M = 1.5
+TRAILER_POSE_MAX_DISTANCE_M = 24.0
+TRAILER_PROGRESS_BEHIND_MAX_M = 32.0
+TRAILER_VERTICAL_TOLERANCE_M = 4.0
 # A longer window is retained for anticipatory curve braking; steering uses
 # the shorter local window above so it cannot cut across a bend.
 CURV_WINDOW_M = 60.0
@@ -388,6 +413,14 @@ class Route:
         product = a * b * c
         return 0.0 if product < 1e-6 else 2.0 * cross / product
 
+    def _steering_curvature_at_progress(self, progress_m: float) -> float:
+        """Curvature represented across the tractor's spatial footprint."""
+        return sum(
+            weight * self._curvature_at_progress(progress_m + offset)
+            for offset, weight in zip(
+                STEERING_CURVATURE_SAMPLE_OFFSETS_M,
+                STEERING_CURVATURE_SAMPLE_WEIGHTS))
+
     def curve_profile_ahead(self, pos: Point, heading: float,
                             horizon_m: float = CURV_WINDOW_M) -> dict:
         """Sharpest validated local curve in the forward driving horizon."""
@@ -430,6 +463,123 @@ class Route:
             return 0.0
         # 2D cross product of segment dir and (pos - a), normalised.
         return ((pos[0] - ax) * dz - (pos[1] - az) * dx) / seg
+
+    def _trailer_envelope_offset(self, progress: float, pos: Point,
+                                 heading: float, speed_ms: float,
+                                 tractor_cte: float,
+                                 envelope: Optional[dict]) -> Tuple[float, dict]:
+        """Return a proven outward tractor offset for an attached trailer.
+
+        The immutable lane remains the reference.  We independently project
+        the live trailer pose onto a small, directed window *behind* the
+        tractor and combine that measured off-tracking with the Ackermann
+        swept-path requirement of the upcoming vehicle-length of geometry.
+        Invalid, opposite, other-deck or ambiguous poses are fail-neutral and
+        do not create an offset.
+        """
+        debug = {
+            "accepted": False, "reason": "trailer is not attached",
+            "trailer_cte_m": 0.0, "measured_offtrack_m": 0.0,
+            "predicted_offtrack_m": 0.0, "required_offset_m": 0.0,
+            "available_offset_m": 0.0, "applied_offset_m": 0.0,
+            "trailer_progress_m": 0.0,
+        }
+        if not isinstance(envelope, dict) or not envelope.get("attached", False):
+            return 0.0, debug
+        try:
+            trailer_pos = tuple(map(float, envelope["position"][:2]))
+            trailer_heading = float(envelope["heading"])
+            lane_width = float(envelope["lane_width_m"])
+            tractor_altitude = float(envelope["tractor_altitude_m"])
+            trailer_altitude = float(envelope["trailer_altitude_m"])
+            values = (*trailer_pos, trailer_heading, lane_width,
+                      tractor_altitude, trailer_altitude, float(tractor_cte))
+            if not all(math.isfinite(value) for value in values):
+                raise ValueError("non-finite trailer envelope metadata")
+        except (KeyError, TypeError, ValueError, IndexError, OverflowError):
+            debug["reason"] = "trailer envelope metadata is malformed"
+            return 0.0, debug
+        if not 2.4 <= lane_width <= 12.0:
+            debug["reason"] = "confirmed lane width is unavailable"
+            return 0.0, debug
+        if abs(trailer_altitude - tractor_altitude) > TRAILER_VERTICAL_TOLERANCE_M:
+            debug["reason"] = "trailer is on a different elevation layer"
+            return 0.0, debug
+        pose_distance = math.dist(pos, trailer_pos)
+        if not TRAILER_POSE_MIN_DISTANCE_M <= pose_distance <= TRAILER_POSE_MAX_DISTANCE_M:
+            debug["reason"] = "trailer pose is not physically coupled to the tractor"
+            return 0.0, debug
+        articulation = abs((heading - trailer_heading + math.pi)
+                           % (2.0 * math.pi) - math.pi)
+        if articulation > math.radians(70.0):
+            debug["reason"] = "trailer direction is incompatible with the tractor"
+            return 0.0, debug
+
+        segment_count = len(self.points) - 1
+        minimum = max(0.0, progress - TRAILER_PROGRESS_BEHIND_MAX_M)
+        maximum = min(self._cumulative_m[-1], progress + 2.0)
+        first = max(0, bisect.bisect_right(
+            self._cumulative_m, minimum) - 2)
+        last = min(segment_count, bisect.bisect_left(
+            self._cumulative_m, maximum) + 1)
+        candidate = self._best_projection(
+            range(first, last), trailer_pos, trailer_heading)
+        if candidate is None:
+            debug["reason"] = "trailer has no directed projection on the active lane"
+            return 0.0, debug
+        _, distance2, index, _fraction, trailer_progress, alignment = candidate
+        if (alignment < 0.15 or trailer_progress > progress + 2.0
+                or progress - trailer_progress > TRAILER_PROGRESS_BEHIND_MAX_M
+                or distance2 > max(8.0, lane_width * 1.5) ** 2):
+            debug["reason"] = "trailer projection is outside the active directed lane"
+            return 0.0, debug
+
+        trailer_cte = self.cross_track_error(index, trailer_pos)
+        measured = trailer_cte - tractor_cte
+        # Integrate curvature over one moving vehicle-length ahead.  This is a
+        # spatial swept-path calculation, not a time-domain steering filter.
+        horizon = _clamp(12.0 + abs(speed_ms), 12.0, 24.0)
+        offsets = (0.0, horizon * 0.25, horizon * 0.50,
+                   horizon * 0.75, horizon)
+        weights = (0.10, 0.20, 0.30, 0.25, 0.15)
+        swept_curvature = sum(
+            weight * self._curvature_at_progress(progress + offset)
+            for offset, weight in zip(offsets, weights))
+        predicted = 0.0
+        if abs(swept_curvature) > 1.0 / 1000.0:
+            radius = 1.0 / abs(swept_curvature)
+            magnitude = (math.sqrt(
+                radius * radius + TRAILER_EFFECTIVE_AXLE_DISTANCE_M ** 2)
+                         - radius)
+            predicted = -math.copysign(magnitude, swept_curvature)
+
+        # The measured trailer axle owns the sign once it is visibly
+        # off-tracking.  Before corner entry the spatial prediction moves the
+        # tractor outward early.  Opposing S-bend demands are never added.
+        if abs(measured) > 0.10:
+            direction = math.copysign(1.0, measured)
+            predicted_same_way = (abs(predicted)
+                                  if predicted * measured > 0.0 else 0.0)
+            required = direction * max(abs(measured), predicted_same_way)
+        else:
+            required = predicted
+        available = max(
+            0.0, (lane_width - TRACTOR_BODY_WIDTH_M) * 0.5
+            - VEHICLE_ENVELOPE_MARGIN_M)
+        applied = _clamp(required, -available, available)
+        debug.update({
+            "accepted": True,
+            "reason": ("accepted" if abs(required) <= available + 1e-6
+                       else "accepted but constrained by confirmed lane width"),
+            "trailer_cte_m": float(trailer_cte),
+            "measured_offtrack_m": float(measured),
+            "predicted_offtrack_m": float(predicted),
+            "required_offset_m": float(required),
+            "available_offset_m": float(available),
+            "applied_offset_m": float(applied),
+            "trailer_progress_m": float(trailer_progress),
+        })
+        return float(applied), debug
 
     def distance_to_end(self, pos: Point, heading: float = None) -> float:
         """Path-length distance from ``pos`` (snapped to nearest waypoint) to the end."""
@@ -517,7 +667,8 @@ class Route:
 
     def steering(self, pos: Point, heading: float, speed_ms: float = 0.0,
                  lane_offset_m: float = 0.0,
-                 cross_track_error_m: Optional[float] = None) -> float:
+                 cross_track_error_m: Optional[float] = None,
+                 vehicle_envelope: Optional[dict] = None) -> float:
         """Steering command in ``[-1, 1]`` (positive = right) to follow the route.
 
         ``lane_offset_m`` shifts the target line sideways: positive = keep to the
@@ -543,6 +694,7 @@ class Route:
             "guidance_target_distance_m": 0.0,
             "guidance_heading_error_rad": 0.0,
             "guidance_curvature": 0.0,
+            "trailer_envelope": {},
         }
         if len(self.points) < 2:
             return 0.0
@@ -589,111 +741,79 @@ class Route:
             not has_confirmed_lane_error
             or cte_geometry_residual <= CURVE_DIRECTION_HOLD_CTE_AGREEMENT_M)
 
-        # --- Coherent trajectory guidance ---------------------------------
+        # --- Coherent Frenet/Ackermann guidance -----------------------------
         #
-        # The previous controller added three independently sampled demands:
-        # local-curvature feed-forward, tangent heading feedback and LaneMatch
-        # CTE feedback.  In the captured 23:10:25 hairpin those terms alternated
-        # -0.230, +0.319, -0.429 and +0.340 while the immutable trajectory and
-        # revision stayed unchanged.  This is a control-law conflict, not map
-        # noise: each term was valid in isolation but referred to a different
-        # point along the articulated vehicle's rapidly changing path.
+        # The 08:20 and 08:24 video replays proved a structural defect in the
+        # former single-chord controller: on R12--R18 bends its chord demand
+        # fell to 0.02--0.30 while the same authoritative trajectory required
+        # 0.46--1.01 Ackermann feed-forward.  CTE consequently grew to 2.407 m.
+        # A path chord is a useful intercept, but it cannot replace the road's
+        # curvature when the vehicle is already displaced.
         #
-        # Aim at one interpolated point on the *same* authoritative trajectory
-        # and convert that chord into the bicycle curvature which reaches it:
-        #
-        #     kappa = 2 sin(alpha) / chord_length
-        #
-        # On a circular lane this yields exactly 1/R.  Off-centre it produces
-        # one continuous intercept, so heading and lateral recovery cannot
-        # command opposite locks on consecutive ticks.  This is the useful
-        # geometric property of ETS2LA's short local target, adapted without
-        # copying its code or weakening UltraPilot's lane authority contract.
+        # Use one Frenet frame at one projected reference progress.  Curvature,
+        # tangent heading and CTE are converted to steering *angles* in that
+        # frame, then summed once.  There is no temporal average, direction
+        # hold or stale steering state in this calculation.
         v = max(abs(speed_ms), 0.0)
         progress = self.tracking_progress(pos, heading)
-        moving_lookahead = _clamp(
-            max(GUIDANCE_LOOKAHEAD_MIN_M, v * 1.5),
-            GUIDANCE_LOOKAHEAD_MIN_M, GUIDANCE_LOOKAHEAD_MAX_M)
-        if v < LOW_SPEED_CAPTURE_MAX_MS:
-            low_speed_lookahead = (
-                GUIDANCE_LOW_SPEED_LOOKAHEAD_M
-                - (GUIDANCE_LOW_SPEED_LOOKAHEAD_M
-                   - GUIDANCE_LOOKAHEAD_MIN_M)
-                * (v / LOW_SPEED_CAPTURE_MAX_MS))
-            guidance_lookahead = max(moving_lookahead, low_speed_lookahead)
-        else:
-            guidance_lookahead = moving_lookahead
-
-        # Close to centre, retain the full preview and therefore the exact
-        # circular 1/R command.  A proven displacement shortens the *same*
-        # geometric intercept continuously, providing enough recovery for the
-        # measured SCS steering shortfall without adding another CTE steering
-        # term.  This is still one target and one curvature calculation.
-        recovery_weight = _clamp((abs(cte) - 0.20) / 1.30, 0.0, 1.0)
-        guidance_lookahead *= 1.0 - 0.75 * recovery_weight
-        guidance_lookahead = max(
-            GUIDANCE_LOOKAHEAD_MIN_M, guidance_lookahead)
-
-        guidance_target = self._point_at_progress(
-            progress + guidance_lookahead)
-        # Recorded routes may deliberately request an offset from their road
-        # centre.  Shift only the target point; GPS lane trajectories pass
-        # zero and therefore retain their exact immutable centreline.
-        if abs(lane_offset_m) > 1e-9:
-            before = self._point_at_progress(
-                progress + max(0.0, guidance_lookahead - 1.0))
-            after = self._point_at_progress(
-                progress + guidance_lookahead + 1.0)
-            target_heading = math.atan2(
-                -(after[0] - before[0]), -(after[1] - before[1]))
-            guidance_target = (
-                guidance_target[0] + math.cos(target_heading) * lane_offset_m,
-                guidance_target[1] - math.sin(target_heading) * lane_offset_m)
-
-        # LaneLocator may project against the original, denser lane while
-        # Route follows its validated/resampled control points. Express that
-        # small signed residual as a virtual lateral displacement of the
-        # vehicle, so the confirmed LaneMatch remains authoritative without
-        # becoming an independent steering term.
-        cte_residual_signed = cte - geometric_cte
-        control_pos = (
-            pos[0] - math.cos(path_heading) * cte_residual_signed,
-            pos[1] + math.sin(path_heading) * cte_residual_signed)
-        target_dx = guidance_target[0] - control_pos[0]
-        target_dz = guidance_target[1] - control_pos[1]
-        target_distance = math.hypot(target_dx, target_dz)
-        if target_distance < 1.0:
+        reference_preview = _clamp(
+            v * 0.35, STEERING_REFERENCE_PREVIEW_MIN_M,
+            STEERING_REFERENCE_PREVIEW_MAX_M)
+        reference_progress = progress + reference_preview
+        # Heading belongs to the current Frenet frame. Moving this tangent to
+        # the curvature preview double-counts a constant-radius bend as both
+        # feed-forward and a fictitious heading error.
+        before = self._point_at_progress(max(
+            0.0, progress - STEERING_REFERENCE_TANGENT_M))
+        after = self._point_at_progress(
+            progress + STEERING_REFERENCE_TANGENT_M)
+        reference_dx, reference_dz = after[0]-before[0], after[1]-before[1]
+        if math.hypot(reference_dx, reference_dz) < 0.5:
             return 0.0
-        target_heading = math.atan2(-target_dx, -target_dz)
+        reference_heading = math.atan2(-reference_dx, -reference_dz)
         guidance_heading_error = (
-            (heading - target_heading + math.pi) % (2.0 * math.pi) - math.pi)
-        target_alignment = (
-            (-math.sin(heading) * target_dx
-             - math.cos(heading) * target_dz) / target_distance)
-        if (target_alignment <= 0.05
-                or abs(guidance_heading_error) > math.radians(85.0)):
+            (heading - reference_heading + math.pi)
+            % (2.0 * math.pi) - math.pi)
+        if abs(guidance_heading_error) > math.radians(82.0):
             return 0.0
 
-        guidance_curvature = (
-            2.0 * math.sin(guidance_heading_error) / target_distance)
-        steer = (math.atan(TRUCK_WHEELBASE_M * guidance_curvature)
-                 / NORMALIZED_STEERING_ANGLE_RAD)
+        trailer_offset, trailer_debug = self._trailer_envelope_offset(
+            progress, pos, heading, v, cte - lane_offset_m,
+            vehicle_envelope)
+        control_cte = _clamp(cte + trailer_offset, -5.0, 5.0)
+        local_curvature = self._steering_curvature_at_progress(
+            reference_progress)
+        local_radius = (1e6 if abs(local_curvature) < 1e-9
+                        else 1.0 / abs(local_curvature))
+        cte_gain = curve_cte_gain(local_radius, control_cte)
+        cte_steer = math.atan(
+            (cte_gain * control_cte) / (K_SOFT + v))
+        low_speed_capture_active = False
+        if v < LOW_SPEED_CAPTURE_MAX_MS and abs(cte_steer) > 1e-9:
+            geometric_limit = math.atan2(
+                abs(control_cte), GUIDANCE_LOW_SPEED_LOOKAHEAD_M)
+            blend = _clamp(v / LOW_SPEED_CAPTURE_MAX_MS, 0.0, 1.0)
+            capture_limit = (geometric_limit
+                             + (abs(cte_steer) - geometric_limit) * blend)
+            if abs(cte_steer) > capture_limit:
+                cte_steer = math.copysign(capture_limit, cte_steer)
+                low_speed_capture_active = True
 
-        # Local curvature is retained for speed planning, physical authority
-        # and diagnostics.  It no longer becomes a second steering demand.
-        local_curvature = self._curvature_at_progress(progress)
         feed_forward = (math.atan(TRUCK_WHEELBASE_M * local_curvature)
                         / NORMALIZED_STEERING_ANGLE_RAD)
-        # Diagnostic decomposition only: the output was calculated once above;
-        # this residual is not fed back into it.
-        scaled_feedback = steer - feed_forward
-        cte_steer = guidance_heading_error
-        cte_gain = 0.0
+        scaled_feedback = (FEEDBACK_STEERING_RESPONSE
+                           * (K_HEADING * guidance_heading_error + cte_steer)
+                           / NORMALIZED_STEERING_ANGLE_RAD)
+        steer = feed_forward + scaled_feedback
+        steering_angle = steer * NORMALIZED_STEERING_ANGLE_RAD
+        guidance_curvature = (math.tan(_clamp(
+            steering_angle, -1.20, 1.20)) / TRUCK_WHEELBASE_M)
         straight_recovery_active = bool(
-            abs(local_curvature) < 1.0 / 500.0 and abs(cte) > 0.35)
+            abs(local_curvature) < 1.0 / 500.0
+            and abs(control_cte) > 0.35)
         lane_recovery_multiplier = 1.0
-        low_speed_capture_active = bool(
-            guidance_lookahead > moving_lookahead + 1e-6)
+        guidance_lookahead = reference_preview
+        target_distance = reference_preview
         curve_direction_hold = False
         approach_profile = self.curve_profile_ahead(
             pos, heading, CURVE_DIRECTION_HOLD_APPROACH_DISTANCE_M)
@@ -735,7 +855,7 @@ class Route:
             straight_limit = 0.16
             if has_confirmed_lane_error:
                 straight_limit += 0.34 * _clamp(
-                    (abs(cte) - 0.35) / 1.15, 0.0, 1.0)
+                    (abs(control_cte) - 0.35) / 1.15, 0.0, 1.0)
             steer = _clamp(steer, -straight_limit, straight_limit)
         steer = _clamp(steer, -1.0, 1.0)
         self.last_steering_debug = {
@@ -754,6 +874,7 @@ class Route:
             "curve_direction_hold_error_proven": bool(
                 cte_error_geometrically_proven),
             "geometric_cte": float(geometric_cte),
+            "control_cte": float(control_cte),
             "cte_geometry_residual": float(cte_geometry_residual),
             "straight_recovery_active": bool(straight_recovery_active),
             "low_speed_capture_active": bool(low_speed_capture_active),
@@ -764,5 +885,6 @@ class Route:
             "guidance_target_distance_m": float(target_distance),
             "guidance_heading_error_rad": float(guidance_heading_error),
             "guidance_curvature": float(guidance_curvature),
+            "trailer_envelope": dict(trailer_debug),
         }
         return steer

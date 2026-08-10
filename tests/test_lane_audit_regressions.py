@@ -291,7 +291,7 @@ class LaneGeometryAuditTests(unittest.TestCase):
                     in zip(commands, commands[1:])), 0.031)
 
     def test_real_roundabout_feedback_cannot_reverse_confirmed_arc(self):
-        """15:07 trace: one geometric target corrects a real R18 offset."""
+        """15:07 trace: R18 recovery is combined in one physical frame."""
         for direction in (-1.0, 1.0):
             route = Route(self._arc(direction, 18.0, 48.0))
             base = route.points[15]
@@ -314,9 +314,128 @@ class LaneGeometryAuditTests(unittest.TestCase):
                     self.assertAlmostEqual(live_cte, requested_cte, places=6)
                     self.assertLess(debug["cte_geometry_residual"], 1e-6)
                     self.assertFalse(debug["curve_direction_hold"])
-                    # Positive Route CTE is left of the lane and positive
-                    # controller output steers right, back toward its centre.
-                    self.assertGreater(command * live_cte, 0.0)
+                    # The CTE component always points toward lane centre, but
+                    # the total command must retain the Ackermann turn needed
+                    # to remain on an R18 arc. Reversing the complete wheel
+                    # command here abandons the curve instead of recovering.
+                    self.assertGreater(debug["cte_steer"] * live_cte, 0.0)
+                    self.assertGreater(
+                        command * debug["local_curvature"], 0.0)
+
+    def test_attached_trailer_uses_proven_lane_width_to_swing_outward(self):
+        """The 05:30--06:10 video hairpin must account for the semi axle."""
+        for direction in (-1.0, 1.0):
+            route = Route(self._arc(direction, 18.0, 140.0))
+            tractor = route.points[30]
+            tractor_heading = self._path_heading(
+                tractor, route.points[32])
+            trailer = route.points[26]
+            trailer_heading = self._path_heading(
+                trailer, route.points[28])
+            original_geometry = tuple(route.world_points)
+            base = route.steering(
+                tractor, tractor_heading, 5.5,
+                cross_track_error_m=0.0)
+            envelope = {
+                "attached": True,
+                "position": trailer,
+                "heading": trailer_heading,
+                "lane_width_m": 4.7,
+                "tractor_altitude_m": 0.0,
+                "trailer_altitude_m": 0.0,
+                "elevation_layer": 0,
+            }
+            corrected = route.steering(
+                tractor, tractor_heading, 5.5,
+                cross_track_error_m=0.0,
+                vehicle_envelope=envelope)
+            debug = route.last_steering_debug
+            trailer_debug = debug["trailer_envelope"]
+            with self.subTest(direction=direction):
+                self.assertTrue(trailer_debug["accepted"])
+                self.assertLess(
+                    trailer_debug["applied_offset_m"]
+                    * debug["local_curvature"], 0.0)
+                self.assertLess(abs(corrected), abs(base))
+                self.assertEqual(tuple(route.world_points), original_geometry)
+
+            # A trailer pose on another deck is not permission to move the
+            # tractor target; bridge and ground-level geometry stay separate.
+            rejected = dict(envelope, trailer_altitude_m=7.0)
+            same_as_tractor_only = route.steering(
+                tractor, tractor_heading, 5.5,
+                cross_track_error_m=0.0,
+                vehicle_envelope=rejected)
+            self.assertAlmostEqual(same_as_tractor_only, base, places=9)
+            self.assertFalse(
+                route.last_steering_debug["trailer_envelope"]["accepted"])
+
+    def test_articulated_r18_replay_keeps_both_axles_near_lane_centre(self):
+        """Spatial trailer proof fixes off-tracking without steering history."""
+        def approach_and_hairpin(direction):
+            points = [(0.0, float(z)) for z in range(0, 41, 2)]
+            for index in range(1, 61):
+                angle = index * 2.0 / 18.0
+                points.append((
+                    direction * (18.0 - 18.0 * math.cos(angle)),
+                    40.0 + 18.0 * math.sin(angle)))
+            return points
+
+        def replay(direction, use_envelope):
+            route = Route(approach_and_hairpin(direction))
+            x, z = route.points[5]
+            trailer_x, trailer_z = route.points[1]
+            heading = trailer_heading = math.pi
+            speed, dt = 5.5, 0.05
+            plugin = AutopilotPlugin.__new__(AutopilotPlugin)
+            plugin._last_steering = 0.0
+            samples = []
+            for _ in range(420):
+                index = route.tracking_index((x, z), heading)
+                cte = route.cross_track_error(index, (x, z))
+                envelope = ({
+                    "attached": True,
+                    "position": (trailer_x, trailer_z),
+                    "heading": trailer_heading,
+                    "lane_width_m": 4.7,
+                    "tractor_altitude_m": 0.0,
+                    "trailer_altitude_m": 0.0,
+                } if use_envelope else None)
+                target = route.steering(
+                    (x, z), heading, speed,
+                    cross_track_error_m=cte,
+                    vehicle_envelope=envelope)
+                plugin._last_steering = plugin._ramp_steering(target, dt)
+                heading -= (speed / TRUCK_WHEELBASE_M
+                            * plugin._last_steering
+                            * NORMALIZED_STEERING_ANGLE_RAD * dt)
+                x += -math.sin(heading) * speed * dt
+                z += -math.cos(heading) * speed * dt
+                articulation = ((heading - trailer_heading + math.pi)
+                                % (2.0 * math.pi) - math.pi)
+                trailer_heading += (speed / 8.0
+                                    * math.sin(articulation) * dt)
+                trailer_x = x + 8.0 * math.sin(trailer_heading)
+                trailer_z = z + 8.0 * math.cos(trailer_heading)
+                if route.tracking_progress((x, z), heading) > 42.0:
+                    trailer_index = route.tracking_index(
+                        (trailer_x, trailer_z), trailer_heading)
+                    tractor_index = route.tracking_index((x, z), heading)
+                    samples.append((
+                        route.cross_track_error(
+                            trailer_index, (trailer_x, trailer_z)),
+                        route.cross_track_error(tractor_index, (x, z))))
+            return (max(abs(item[0]) for item in samples),
+                    max(abs(item[1]) for item in samples))
+
+        for direction in (-1.0, 1.0):
+            old_trailer_peak, _old_tractor_peak = replay(direction, False)
+            trailer_peak, tractor_peak = replay(direction, True)
+            with self.subTest(direction=direction):
+                self.assertGreater(old_trailer_peak, 1.80)
+                self.assertLess(trailer_peak, 1.00)
+                self.assertLess(tractor_peak, 1.00)
+                self.assertLess(trailer_peak, old_trailer_peak - 0.75)
 
     def test_real_222100_r54_entry_keeps_imminent_r18_curve_authority(self):
         """A proven R54-to-R18 entry is followed as one real geometry."""
@@ -408,8 +527,10 @@ class LaneGeometryAuditTests(unittest.TestCase):
         self.assertLess(command, -0.30)
         large_error_lookahead = debug["guidance_lookahead_m"]
 
-        # Recovery is continuous geometry, not a thresholded direction hold:
-        # increasing proven displacement shortens the same target smoothly.
+        # Recovery is continuous geometry, not a thresholded direction hold.
+        # The spatial preview depends only on speed and immutable road
+        # geometry; allowing CTE to move it caused the captured left/right
+        # target jumps on the same bend.
         route.steering(
             position, heading, 38.0 / 3.6,
             cross_track_error_m=-0.40)
@@ -420,10 +541,12 @@ class LaneGeometryAuditTests(unittest.TestCase):
         medium_error_debug = dict(route.last_steering_debug)
         self.assertFalse(small_error_debug["curve_direction_hold_eligible"])
         self.assertFalse(medium_error_debug["curve_direction_hold_eligible"])
-        self.assertLess(large_error_lookahead,
-                        medium_error_debug["guidance_lookahead_m"])
-        self.assertLess(medium_error_debug["guidance_lookahead_m"],
-                        small_error_debug["guidance_lookahead_m"])
+        self.assertAlmostEqual(
+            large_error_lookahead,
+            medium_error_debug["guidance_lookahead_m"], places=9)
+        self.assertAlmostEqual(
+            medium_error_debug["guidance_lookahead_m"],
+            small_error_debug["guidance_lookahead_m"], places=9)
 
     def test_captured_ten_metre_service_exit_stays_inside_lane(self):
         # The same drive exposed a short R~=10.2 m service connector: 16 m

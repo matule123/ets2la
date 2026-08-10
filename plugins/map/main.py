@@ -2364,9 +2364,45 @@ class Plugin(BasePlugin):
                     })
                     self.tags.nav_steering = 0.0
                     return
-                steer = route.steering(pos, heading, speed,
-                                       lane_offset_m=0.0,
-                                       cross_track_error_m=live_cte)
+                trailer_envelope = None
+                vehicle_snapshot = self.sdk.shared_state.get(
+                    "vehicle_envelope_snapshot", {}) or {}
+                try:
+                    vehicle_snapshot_fresh = (
+                        float(vehicle_snapshot.get("timestamp", 0.0) or 0.0)
+                        > 0.0
+                        and time.monotonic() - float(vehicle_snapshot.get(
+                            "timestamp", 0.0) or 0.0) <= 0.5)
+                except (TypeError, ValueError, OverflowError):
+                    vehicle_snapshot_fresh = False
+                if (vehicle_snapshot_fresh
+                        and vehicle_snapshot.get(
+                            "trailer_attached", False)):
+                    tractor_position = vehicle_snapshot.get(
+                        "tractor_position")
+                    trailer_position = vehicle_snapshot.get(
+                        "trailer_position")
+                    trailer_heading = vehicle_snapshot.get(
+                        "trailer_heading")
+                    if (isinstance(tractor_position, (list, tuple))
+                            and len(tractor_position) >= 3
+                            and isinstance(trailer_position, (list, tuple))
+                            and len(trailer_position) >= 3
+                            and trailer_heading is not None):
+                        trailer_envelope = {
+                            "attached": True,
+                            "position": (
+                                trailer_position[0], trailer_position[2]),
+                            "heading": trailer_heading,
+                            "lane_width_m": metadata["lane_width_m"],
+                            "tractor_altitude_m": tractor_position[1],
+                            "trailer_altitude_m": trailer_position[1],
+                            "elevation_layer": metadata["elevation_layer"],
+                        }
+                steer = route.steering(
+                    pos, heading, speed, lane_offset_m=0.0,
+                    cross_track_error_m=live_cte,
+                    vehicle_envelope=trailer_envelope)
                 curve_profile = route.curve_profile_ahead(pos, heading)
                 # Safety: if the truck is far from the snapped path (wrong map
                 # dataset, or we're off-road on a ferry / car park), the CTE is
