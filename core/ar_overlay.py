@@ -10,7 +10,7 @@ import math
 import time
 from core.navigation.navigation_intent import snapshot_matches_navigation_intent
 
-from PyQt6.QtCore import QPointF, QTimer, Qt
+from PyQt6.QtCore import QPointF, Qt
 from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import QApplication, QWidget
 
@@ -18,6 +18,7 @@ from core.camera import (
     CameraSnapshotProducer, project_world_point, project_world_points,
 )
 from core.navigation.route import Route, iter_path_xz
+from core.sdk.scs_sdk import SCSTelemetry
 
 
 AR_MIN_ROAD_DEPTH_M = 8.0
@@ -284,12 +285,17 @@ class AROverlay(QWidget):
         self.state = shared_state
         self._last_status = None
         self._last_status_at = 0.0
-        # Like ETS2LA's AR loop, sample CameraProps in the renderer process.
-        # The engine snapshot remains the shared diagnostic authority; this
-        # private snapshot removes Manager/engine-loop latency while the user
-        # moves the in-game camera quickly.
+        # Like ETS2LA's AR loop, sample CameraProps *and* SCS telemetry in the
+        # renderer process. A CameraProps-only refresh is invalid: it mixes a
+        # new view matrix with an older renderTime/truck pose and visibly
+        # slides the line off the road during quick camera movement.
         self._render_camera_producer = CameraSnapshotProducer()
+        self._render_telemetry = SCSTelemetry()
+        self._render_telemetry_connected = self._render_telemetry.connect()
+        self._render_telemetry_retry_at = 0.0
         self._render_camera_snapshot = None
+        self._last_presented_render_time = -1
+        self._published_lane_revision = None
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -300,39 +306,98 @@ class AROverlay(QWidget):
         screen = QApplication.primaryScreen()
         if screen is not None:
             self.setGeometry(screen.geometry())
-        self.timer = QTimer()
-        self.timer.timeout.connect(self._tick)
-        self.timer.start(16)
+    def render_once(self):
+        """Acquire and synchronously present at most one SCS render frame.
 
-    def _tick(self):
+        This is intentionally driven by ``run_ar`` rather than a Qt timer.
+        Camera acquisition, route projection and ``repaint`` therefore remain
+        on one thread and in one call stack, matching ETS2LA's immediate AR
+        loop without copying its GPLv3 implementation.
+        """
         if self.state.get("app_shutdown_requested", False):
-            self.timer.stop()
-            self.close()
-            app = QApplication.instance()
-            if app is not None:
-                app.quit()
-            return
-        self._render_camera_snapshot = self._fresh_render_camera_snapshot()
-        self._sync_viewport(self._render_camera_snapshot)
-        self.update()
+            return False
+
+        snapshot = self._fresh_render_camera_snapshot()
+        if not snapshot.get("valid", False):
+            # A frame boundary is a transient acquisition race. Keep the last
+            # correctly projected frame instead of flashing an empty/old one.
+            if "frame boundary" in str(snapshot.get("failure_reason", "")):
+                return True
+            self._render_camera_snapshot = snapshot
+            self.repaint()
+            return True
+
+        render_time = int(snapshot.get("render_time_us", 0) or 0)
+        if (render_time > 0
+                and render_time == self._last_presented_render_time):
+            return True
+        self._last_presented_render_time = render_time
+        self._render_camera_snapshot = snapshot
+        self._sync_viewport(snapshot)
+        self.repaint()
+        return True
 
     def _fresh_render_camera_snapshot(self):
         shared = self.state.get("camera_snapshot", {}) or {}
+        if not getattr(self, "_render_telemetry_connected", False):
+            now = time.monotonic()
+            if now - getattr(self, "_render_telemetry_retry_at", 0.0) < 1.0:
+                return shared
+            self._render_telemetry_retry_at = now
+            try:
+                self._render_telemetry_connected = bool(
+                    self._render_telemetry.connect())
+            except Exception:
+                self._render_telemetry_connected = False
+            if not self._render_telemetry_connected:
+                return shared
         try:
+            raw = self._render_telemetry.update() or {}
+            render_time = int(raw.get("renderTime", 0) or 0)
+            # A zero render clock cannot prove that CameraProps and telemetry
+            # belong to one frame. The engine's already-atomic snapshot is the
+            # safe fallback for older telemetry plugins.
+            if render_time <= 0:
+                return shared
+            sampled_at = time.monotonic()
             fresh = self._render_camera_producer.read(
-                int(shared.get("render_time_us", 0) or 0),
-                float(shared.get("telemetry_timestamp", 0.0) or 0.0))
-        except Exception:
-            return shared
+                render_time, sampled_at, now=sampled_at)
+            # Detect a frame boundary that occurred while CameraProps was
+            # copied. Never publish a hybrid of adjacent game frames.
+            end_render_time = int(
+                self._render_telemetry.read_long_long(24)[0] or 0)
+            if end_render_time != render_time:
+                return {
+                    "valid": False,
+                    "failure_reason": "camera crossed an SCS render-frame boundary",
+                    "revision": int(shared.get("revision", -1) or -1),
+                    "viewport": shared.get("viewport"),
+                }
+            placement = raw.get("truckPlacement", {}) or {}
+            x = float(placement["coordinateX"])
+            y = float(placement["coordinateY"])
+            z = float(placement["coordinateZ"])
+            turns = float(placement["rotationX"])
+            heading = (turns * math.tau + math.pi) % math.tau - math.pi
+        except Exception as error:
+            return {
+                "valid": False,
+                "failure_reason": f"atomic AR frame could not be read: {error}",
+                "revision": int(shared.get("revision", -1) or -1),
+                "viewport": shared.get("viewport"),
+            }
         if not fresh.get("valid", False):
-            return shared
-        # Truck pose still comes from the same telemetry/lane snapshot as the
-        # route. Only the camera matrix/viewport is refreshed locally.
+            return fresh
+        # Camera, render clock and vehicle pose were sampled inside one proven
+        # render tick. This private frame is used only for AR projection; the
+        # shared navigation snapshot and its revision remain untouched.
         fresh = dict(fresh)
-        for key in ("vehicle_position", "vehicle_heading",
-                    "vehicle_altitude", "telemetry_valid"):
-            if key in shared:
-                fresh[key] = shared[key]
+        fresh.update({
+            "vehicle_position": [x, y, z],
+            "vehicle_heading": heading,
+            "telemetry_valid": True,
+            "ar_frame_atomic": True,
+        })
         return fresh
 
     def _active_camera_snapshot(self):
@@ -373,45 +438,61 @@ class AROverlay(QWidget):
                 self).get("revision", -1) or -1),
             "timestamp": now,
         }
+        # Camera revision advances every render frame. Including it in the
+        # signature turned a diagnostic Manager write into a 60/120/144 Hz IPC
+        # stream and delayed the renderer we were trying to synchronize.
         signature = (payload["ready"], payload["reason"],
-                     payload["lane_revision"], payload["camera_revision"])
+                     payload["lane_revision"])
         if signature != self._last_status or now - self._last_status_at >= 1.0:
             self.state.set("ar_navigation_readiness", payload)
             self._last_status = signature
             self._last_status_at = now
 
+    def _publish_lane_revision(self, revision):
+        """Publish revision changes, not one Manager write per render frame."""
+        revision = int(revision)
+        if revision != self._published_lane_revision:
+            self.state.set("ar_lane_revision", revision)
+            self._published_lane_revision = revision
+
     def paintEvent(self, event):
         if not self.state.get("ar_enabled", True):
-            self.state.set("ar_lane_revision", -1)
+            self._publish_lane_revision(-1)
             self._publish_status(False, "AR is disabled")
             return
         if not self.state.get("game_in_truck", False):
-            self.state.set("ar_lane_revision", -1)
+            self._publish_lane_revision(-1)
             self._publish_status(False, "game telemetry is unavailable")
             return
         if self.state.get("navigation_recalculating", False):
-            self.state.set("ar_lane_revision", -1)
+            self._publish_lane_revision(-1)
             self._publish_status(False, "navigation is recalculating")
             return
 
         current_revision, world, route_reason = self._current_display_points_with_reason()
         if len(world) < 2:
-            self.state.set("ar_lane_revision", -1)
+            self._publish_lane_revision(-1)
             self._publish_status(False, route_reason or "lane trajectory is unavailable")
             return
         camera_snapshot = self._active_camera_snapshot()
+        if not camera_snapshot.get("valid", False):
+            self._publish_lane_revision(-1)
+            self._publish_status(False, str(camera_snapshot.get(
+                "failure_reason") or "atomic AR camera frame is unavailable"),
+                current_revision)
+            return
         telemetry_timestamp = float(camera_snapshot.get(
             "telemetry_timestamp", 0.0) or 0.0)
         world = _forward_route_suffix(world, camera_snapshot)
         if len(world) < 2:
-            self.state.set("ar_lane_revision", -1)
+            self._publish_lane_revision(-1)
             self._publish_status(
                 False, "trajectory has no forward samples at the atomic vehicle pose",
                 current_revision)
             return
         world = _road_profile_visible_prefix(world, camera_snapshot)
         if len(world) < 2:
-            self.state.set("ar_lane_revision", -1)
+            self._publish_lane_revision(-1)
             self._publish_status(
                 False, "trajectory is hidden by the proven road elevation profile",
                 current_revision)
@@ -420,7 +501,7 @@ class AROverlay(QWidget):
             camera_snapshot, world,
             telemetry_timestamp=telemetry_timestamp)
         if camera_reason:
-            self.state.set("ar_lane_revision", -1)
+            self._publish_lane_revision(-1)
             self._publish_status(False, camera_reason, current_revision)
             return
 
@@ -430,12 +511,12 @@ class AROverlay(QWidget):
         strip = _first_visible_road_strip(
             projected_values, camera_snapshot.get("viewport") or {})
         if not strip:
-            self.state.set("ar_lane_revision", -1)
+            self._publish_lane_revision(-1)
             self._publish_status(False, "all trajectory points are outside the camera frustum",
                                  current_revision)
             return
 
-        self.state.set("ar_lane_revision", current_revision)
+        self._publish_lane_revision(current_revision)
         self._publish_status(True, "", current_revision)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -507,10 +588,23 @@ class AROverlay(QWidget):
 
 
 def run_ar(shared_state):
+    """Run an immediate SCS-render-clock-driven AR loop.
+
+    Qt owns only the transparent native window. It does not schedule camera
+    frames: every accepted SCS render tick is acquired and synchronously
+    painted before this loop processes the next one.
+    """
     existing = QApplication.instance()
     app = existing or QApplication(sys.argv)
     overlay = AROverlay(shared_state)
     overlay.show()
-    if existing is not None:
-        return overlay
-    sys.exit(app.exec())
+    while True:
+        app.processEvents()
+        if not overlay.render_once():
+            break
+        # Yield to ETS2 and the other UltraPilot processes while still polling
+        # well above normal 60/120/144 Hz game render rates.
+        time.sleep(0.001)
+    overlay.close()
+    app.processEvents()
+    return overlay

@@ -81,7 +81,7 @@ class CameraSnapshotTests(unittest.TestCase):
         self.assertGreater(_route_alpha(120.0), 0.0)
         self.assertEqual(_route_alpha(AR_MAX_ROAD_DEPTH_M), 0.0)
 
-    def test_ar_renderer_refreshes_camera_locally_but_keeps_atomic_truck_pose(self):
+    def test_ar_renderer_accepts_only_one_atomic_local_render_frame(self):
         shared_camera = {
             "render_time_us": 123, "telemetry_timestamp": time.monotonic(),
             "vehicle_position": [9.0, 1.0, 8.0],
@@ -93,17 +93,137 @@ class CameraSnapshotTests(unittest.TestCase):
         }
 
         class LocalProducer:
-            def read(self, *_):
+            def read(self, render_time, telemetry_timestamp, now=None):
+                self.arguments = (render_time, telemetry_timestamp, now)
                 return dict(fresh_camera)
 
+        class LocalTelemetry:
+            def update(self):
+                return {
+                    "renderTime": 456,
+                    "truckPlacement": {
+                        "coordinateX": 10.0, "coordinateY": 2.0,
+                        "coordinateZ": 30.0, "rotationX": 0.25,
+                    },
+                }
+
+            def read_long_long(self, offset):
+                self.last_offset = offset
+                return 456, offset + 8
+
+        local_producer = LocalProducer()
+        local_telemetry = LocalTelemetry()
         overlay = type("RenderCamera", (), {
             "state": State({"camera_snapshot": shared_camera}),
-            "_render_camera_producer": LocalProducer(),
+            "_render_camera_producer": local_producer,
+            "_render_telemetry": local_telemetry,
+            "_render_telemetry_connected": True,
         })()
         result = AROverlay._fresh_render_camera_snapshot(overlay)
         self.assertEqual(result["position"], [4.0, 5.0, 6.0])
-        self.assertEqual(result["vehicle_position"], [9.0, 1.0, 8.0])
-        self.assertEqual(result["vehicle_heading"], 0.4)
+        self.assertEqual(result["vehicle_position"], [10.0, 2.0, 30.0])
+        self.assertAlmostEqual(result["vehicle_heading"], math.pi / 2)
+        self.assertTrue(result["ar_frame_atomic"])
+        self.assertEqual(local_producer.arguments[0], 456)
+        self.assertEqual(local_telemetry.last_offset, 24)
+
+    def test_ar_renderer_rejects_camera_telemetry_frame_boundary(self):
+        shared = {"revision": 7, "valid": True, "position": [1, 2, 3]}
+
+        class Producer:
+            def read(self, *_args, **_kwargs):
+                return {"valid": True, "position": [9, 9, 9]}
+
+        class TornTelemetry:
+            def update(self):
+                return {"renderTime": 100, "truckPlacement": {}}
+
+            def read_long_long(self, _offset):
+                return 101, 32
+
+        overlay = type("TornFrame", (), {
+            "state": State({"camera_snapshot": shared}),
+            "_render_camera_producer": Producer(),
+            "_render_telemetry": TornTelemetry(),
+            "_render_telemetry_connected": True,
+        })()
+        rejected = AROverlay._fresh_render_camera_snapshot(overlay)
+        self.assertFalse(rejected["valid"])
+        self.assertIn("frame boundary", rejected["failure_reason"])
+
+    def test_ar_immediate_loop_captures_then_repaints_in_one_call_stack(self):
+        calls = []
+        state = State({"app_shutdown_requested": False})
+        overlay = type("RenderSchedule", (), {
+            "state": state,
+            "_render_camera_snapshot": None,
+            "_last_presented_render_time": -1,
+            "_fresh_render_camera_snapshot": lambda self: (
+                calls.append("camera") or {
+                    "valid": True, "render_time_us": 99,
+                    "viewport": viewport(),
+                }),
+            "_sync_viewport": lambda self, snapshot: calls.append("viewport"),
+            "repaint": lambda self: calls.append("paint"),
+        })()
+        self.assertTrue(AROverlay.render_once(overlay))
+        self.assertEqual(calls, ["camera", "viewport", "paint"])
+        self.assertEqual(overlay._render_camera_snapshot["render_time_us"], 99)
+
+        # The same game frame is not projected a second time.
+        calls.clear()
+        self.assertTrue(AROverlay.render_once(overlay))
+        self.assertEqual(calls, ["camera"])
+
+    def test_ar_immediate_loop_stops_on_shared_shutdown(self):
+        overlay = type("StoppedRender", (), {
+            "state": State({"app_shutdown_requested": True}),
+        })()
+        self.assertFalse(AROverlay.render_once(overlay))
+
+    def test_ar_readiness_does_not_write_ipc_on_every_camera_frame(self):
+        class CountingState(State):
+            def __init__(self, values=None):
+                super().__init__(values)
+                self.writes = 0
+
+            def set(self, key, value):
+                if key == "ar_navigation_readiness":
+                    self.writes += 1
+                super().set(key, value)
+
+        state = CountingState()
+        overlay = type("Status", (), {
+            "state": state,
+            "_last_status": None,
+            "_last_status_at": 0.0,
+            "_render_camera_snapshot": {"revision": 1},
+        })()
+        AROverlay._publish_status(overlay, True, "", 8)
+        overlay._render_camera_snapshot = {"revision": 2}
+        AROverlay._publish_status(overlay, True, "", 8)
+        self.assertEqual(state.writes, 1)
+
+    def test_ar_lane_revision_is_published_only_when_it_changes(self):
+        class CountingState(State):
+            def __init__(self):
+                super().__init__()
+                self.writes = 0
+
+            def set(self, key, value):
+                if key == "ar_lane_revision":
+                    self.writes += 1
+                super().set(key, value)
+
+        state = CountingState()
+        overlay = type("LaneStatus", (), {
+            "state": state,
+            "_published_lane_revision": None,
+        })()
+        AROverlay._publish_lane_revision(overlay, 12)
+        AROverlay._publish_lane_revision(overlay, 12)
+        AROverlay._publish_lane_revision(overlay, -1)
+        self.assertEqual(state.writes, 2)
 
     def test_ar_slices_every_sample_behind_the_atomic_vehicle_pose(self):
         world = [[0.0, 0.0, float(z)] for z in range(0, 101, 10)]

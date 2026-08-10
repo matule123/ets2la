@@ -180,13 +180,9 @@ def run_ar(shared_dict):
     from core.logger import setup as _log_setup
     _log_setup()
     _set_app_id()
-    from PyQt6.QtWidgets import QApplication
-    from core.ar_overlay import AROverlay
+    from core.ar_overlay import run_ar as _run_ar
     from core.ipc.shared_state import SharedState
-    app = QApplication(sys.argv)
-    ov = AROverlay(SharedState(shared_dict))
-    ov.show()
-    sys.exit(app.exec())
+    _run_ar(SharedState(shared_dict))
 
 
 def _ensure_game_dlls():
