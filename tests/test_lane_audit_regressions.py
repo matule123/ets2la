@@ -496,9 +496,19 @@ class LaneGeometryAuditTests(unittest.TestCase):
             # tangent are different frames; 30° reproduces the logged +0.4
             # Route feedback against the -0.24 curvature feed-forward.
             heading = -curve_sign * math.radians(30.0)
-            command = route.steering(
+            first_command = route.steering(
                 position, heading, 22.0 / 3.6,
-                cross_track_error_m=cte)
+                cross_track_error_m=cte, control_dt_s=0.05)
+            # One displaced sample may reduce the Ackermann demand but cannot
+            # reverse it.  The same tractor CTE and heading must persist long
+            # enough to prove a real departure before recovery crosses zero.
+            self.assertGreater(
+                first_command * route.last_steering_debug["feed_forward"],
+                0.0)
+            for _ in range(7):
+                command = route.steering(
+                    position, heading, 22.0 / 3.6,
+                    cross_track_error_m=cte, control_dt_s=0.05)
             debug = route.last_steering_debug
             with self.subTest(curve_sign=curve_sign):
                 self.assertLess(debug["cte_geometry_residual"], 0.01)
@@ -519,12 +529,27 @@ class LaneGeometryAuditTests(unittest.TestCase):
         above, but a normal R65 bend at the lane edge must recover across zero.
         """
         route = Route(self._arc(-1.0, 65.0, 170.0))
-        position = route.points[25]
-        heading = (self._path_heading(position, route.points[28])
+        base_position = route.points[25]
+        following = route.points[26]
+        dx, dz = (following[0] - base_position[0],
+                  following[1] - base_position[1])
+        segment_length = math.hypot(dx, dz)
+        requested_cte = -2.128
+        position = (
+            base_position[0] + dz / segment_length * requested_cte,
+            base_position[1] - dx / segment_length * requested_cte,
+        )
+        heading = (self._path_heading(base_position, route.points[28])
                    - math.radians(9.0))
-        command = route.steering(
+        first_command = route.steering(
             position, heading, 38.0 / 3.6,
-            cross_track_error_m=-2.128)
+            cross_track_error_m=requested_cte, control_dt_s=0.05)
+        self.assertGreater(
+            first_command * route.last_steering_debug["feed_forward"], 0.0)
+        for _ in range(7):
+            command = route.steering(
+                position, heading, 38.0 / 3.6,
+                cross_track_error_m=requested_cte, control_dt_s=0.05)
         debug = route.last_steering_debug
         self.assertAlmostEqual(debug["feed_forward"], 0.209, delta=0.012)
         self.assertLess(debug["feedback"], -0.50)

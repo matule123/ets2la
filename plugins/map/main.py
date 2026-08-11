@@ -1492,6 +1492,21 @@ class Plugin(BasePlugin):
         turn_events = self._turn_events_payload(trajectory)
         control_points = [[float(p.x), float(p.y), float(p.z)]
                           for p in trajectory.points]
+        elevation_by_lane = {
+            segment.lane_id: int(segment.elevation_layer)
+            for segment in trajectory.segments
+        }
+        point_authorities = []
+        for point in trajectory.points:
+            lane_identity = (point.lane_id.sort_key()
+                             if point.lane_id is not None else None)
+            elevation_layer = None
+            if 0 <= int(point.segment_index) < len(trajectory.segments):
+                elevation_layer = int(
+                    trajectory.segments[point.segment_index].elevation_layer)
+            elif point.lane_id in elevation_by_lane:
+                elevation_layer = elevation_by_lane[point.lane_id]
+            point_authorities.append((lane_identity, elevation_layer))
         # Phase 4 requires controller, HUD and AR to consume geometrically
         # identical authoritative points. A redrawn 4 m chord can deviate from
         # a curved 2 m polyline, so publish the validated control samples to all
@@ -1571,7 +1586,9 @@ class Plugin(BasePlugin):
             },
         })
         self._lane_path = trajectory
-        self._lane_route = Route(control_points, name="gps-lane-trajectory")
+        self._lane_route = Route(
+            control_points, name="gps-lane-trajectory",
+            point_authorities=point_authorities)
         self._lane_failure_signature = None
         self._rolling_route_refresh_needed = False
         self._last_logged_lane_failure = None
@@ -2402,7 +2419,14 @@ class Plugin(BasePlugin):
                 steer = route.steering(
                     pos, heading, speed, lane_offset_m=0.0,
                     cross_track_error_m=live_cte,
-                    vehicle_envelope=trailer_envelope)
+                    vehicle_envelope=trailer_envelope,
+                    control_authority={
+                        "lane_identity": self._lane_match.lane_id.sort_key(),
+                        "elevation_layer": metadata["elevation_layer"],
+                        "lane_width_m": metadata["lane_width_m"],
+                        "revision": int(snapshot["revision"]),
+                    },
+                    control_dt_s=delta_time)
                 curve_profile = route.curve_profile_ahead(pos, heading)
                 # Safety: if the truck is far from the snapped path (wrong map
                 # dataset, or we're off-road on a ferry / car park), the CTE is
@@ -2413,7 +2437,20 @@ class Plugin(BasePlugin):
                 idx = route.tracking_index(pos, heading)
                 nearest = route.points[min(idx, len(route.points)-1)]
                 off_dist = math.hypot(pos[0] - nearest[0], pos[1] - nearest[1])
-                if off_dist > 50.0:
+                steering_debug = dict(getattr(
+                    route, "last_steering_debug", {}) or {})
+                if not steering_debug.get("authority_valid", True):
+                    steer = 0.0
+                    self.sdk.shared_state.update_batch({
+                        "nav_active": False, "nav_steering": 0.0,
+                        "nav_steering_debug": steering_debug,
+                        "path_curvature_radius": None,
+                        "path_curve_distance_m": None,
+                        "path_curve_signed_curvature": 0.0,
+                    })
+                    self.tags.nav_steering = 0.0
+                elif off_dist > 50.0:
+                    steer = 0.0
                     self.sdk.shared_state.update_batch({
                         "nav_active": False, "nav_steering": 0.0,
                         "path_curvature_radius": None,
@@ -2425,8 +2462,6 @@ class Plugin(BasePlugin):
                                  "map dataset may not match the game. Switch maps on the Map page.")
                     self.tags.nav_steering = 0.0
                 else:
-                    steering_debug = dict(getattr(
-                        route, "last_steering_debug", {}) or {})
                     self.sdk.shared_state.update_batch({
                         "nav_steering": float(steer), "nav_active": True,
                         "nav_steering_debug": steering_debug,

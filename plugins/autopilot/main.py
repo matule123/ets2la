@@ -859,6 +859,14 @@ class Plugin(BasePlugin):
                     steering_debug.get("heading_feedback", 0.0) or 0.0)
                 diagnostic_cte_feedback = float(
                     steering_debug.get("cte_feedback", 0.0) or 0.0)
+                diagnostic_foundation_limited = bool(
+                    steering_debug.get("curve_foundation_limited", False))
+                diagnostic_opposite_proof = float(
+                    steering_debug.get(
+                        "opposite_correction_proof_s", 0.0) or 0.0)
+                diagnostic_opposite_authorized = bool(
+                    steering_debug.get(
+                        "opposite_correction_authorized", False))
                 diagnostic_direction_hold = bool(
                     steering_debug.get("curve_direction_hold", False))
                 diagnostic_hold_fraction = float(
@@ -888,6 +896,22 @@ class Plugin(BasePlugin):
                     trailer_debug.get("applied_offset_m", 0.0) or 0.0)
                 diagnostic_trailer_reason = str(
                     trailer_debug.get("reason", "") or "")
+                diagnostic_trailer_side_proven = bool(
+                    trailer_debug.get("curve_side_proven", False))
+                diagnostic_trailer_pending_side = float(
+                    trailer_debug.get("pending_side_s", 0.0) or 0.0)
+                diagnostic_trailer_offset_rate = float(
+                    trailer_debug.get("offset_rate_mps", 0.0) or 0.0)
+                lane_id_payload = (diagnostic_match.get("active_lane_id")
+                                   or snapshot.get("active_lane_id") or {})
+                diagnostic_lane_id = (
+                    f"{lane_id_payload.get('road_uid', '-')}:"
+                    f"{lane_id_payload.get('direction', '-')}:"
+                    f"{lane_id_payload.get('lane_index', '-')}:"
+                    f"{lane_id_payload.get('prefab_token') or '-'}:"
+                    f"{lane_id_payload.get('connector_index') if lane_id_payload.get('connector_index') is not None else '-'}")
+                diagnostic_elevation_layer = diagnostic_match.get(
+                    "elevation_layer", "-")
                 dynamics_debug = dict(getattr(
                     self, "_steering_dynamics_debug", {}) or {})
                 diagnostic_raw_target = float(
@@ -924,6 +948,9 @@ class Plugin(BasePlugin):
                 diagnostic_curve_distance = float("nan")
                 diagnostic_feed_forward = diagnostic_feedback = float("nan")
                 diagnostic_heading_feedback = diagnostic_cte_feedback = float("nan")
+                diagnostic_foundation_limited = False
+                diagnostic_opposite_proof = float("nan")
+                diagnostic_opposite_authorized = False
                 diagnostic_direction_hold = False
                 diagnostic_hold_fraction = diagnostic_cte_residual = float("nan")
                 diagnostic_cte_proven = False
@@ -935,6 +962,11 @@ class Plugin(BasePlugin):
                 diagnostic_trailer_required = float("nan")
                 diagnostic_trailer_offset = float("nan")
                 diagnostic_trailer_reason = "malformed"
+                diagnostic_trailer_side_proven = False
+                diagnostic_trailer_pending_side = float("nan")
+                diagnostic_trailer_offset_rate = float("nan")
+                diagnostic_lane_id = "malformed"
+                diagnostic_elevation_layer = "-"
                 diagnostic_raw_target = diagnostic_bounded_target = float("nan")
                 diagnostic_steering_rate = diagnostic_steering_accel = float("nan")
                 diagnostic_steering_error = float("nan")
@@ -967,7 +999,9 @@ class Plugin(BasePlugin):
                 "nav_steer=%.3f nav_target=%.3f "
                 "steer_out=%.3f speed=%.0f "
                 "curve_reference=%.3f guidance_delta=%.3f curve_hold=%s "
-                "hold_fraction=%.2f cte_residual=%.3f cte_proven=%s "
+                "hold_fraction=%.2f foundation_limited=%s "
+                "opposite_proof=%.2fs opposite_authorized=%s "
+                "cte_residual=%.3f cte_proven=%s "
                 "low_speed_capture=%s guidance_L=%.1fm "
                 "guidance_heading=%.1fdeg guidance_k=%.5f "
                 "curve_r=%s curve_d=%.1f curve_limit=%s "
@@ -975,20 +1009,25 @@ class Plugin(BasePlugin):
                 "collision_brake=%.3f traffic_brake=%.3f light_brake=%.3f "
                 "aux_brake=%.3f vision_brake=%.3f "
                 "trailer_cte=%.3f trailer_required=%.3f trailer_offset=%.3f "
-                "trailer_reason=%s engine_steer=%.3f articulation_guard=%s "
+                "trailer_side_proven=%s trailer_pending=%.2fs "
+                "trailer_rate=%.3fmps trailer_reason=%s "
+                "engine_steer=%.3f articulation_guard=%s "
                 "steer_raw=%.3f steer_bounded=%.3f steer_rate=%.3f/s "
                 "steer_accel=%.3f/s2 dt=%.4f used_dt=%.4f "
                 "steer_phase=%s steer_error=%.3f stop_angle=%.3f "
                 "safe_rate=%.3f/s game_steer=%.3f game_tracking=%.3f "
                 "heading_fb=%.3f cte_fb=%.3f steer_flags=%s "
-                "intent=%s lane_revision=%s confidence=%.3f reject=%s",
+                "intent=%s lane_revision=%s LaneId=%s elevation=%s "
+                "confidence=%.3f reject=%s",
                 active, nav_active, self._engage_blend,
                 live_lateral, live_heading, float(lane_offset),
                 float(self.sdk.shared_state.get("nav_steering", 0.0) or 0.0),
                 float(self._last_steering), steering_val, speed_kmh,
                 diagnostic_feed_forward, diagnostic_feedback,
                 diagnostic_direction_hold,
-                diagnostic_hold_fraction, diagnostic_cte_residual,
+                diagnostic_hold_fraction, diagnostic_foundation_limited,
+                diagnostic_opposite_proof, diagnostic_opposite_authorized,
+                diagnostic_cte_residual,
                 diagnostic_cte_proven,
                 diagnostic_low_speed_capture,
                 diagnostic_guidance_lookahead,
@@ -1004,6 +1043,9 @@ class Plugin(BasePlugin):
                 aux_brake, vision_brake,
                 diagnostic_trailer_cte, diagnostic_trailer_required,
                 diagnostic_trailer_offset,
+                diagnostic_trailer_side_proven,
+                diagnostic_trailer_pending_side,
+                diagnostic_trailer_offset_rate,
                 diagnostic_trailer_reason.replace(" ", "_"),
                 float(self.sdk.shared_state.get(
                     "engine_applied_steering", steering_val) or 0.0),
@@ -1019,6 +1061,7 @@ class Plugin(BasePlugin):
                 diagnostic_dynamics_flags,
                 self.sdk.shared_state.get("navigation_intent_id"),
                 snapshot_revision,
+                diagnostic_lane_id, diagnostic_elevation_layer,
                 snapshot_confidence,
                 authority_reason)
 

@@ -94,6 +94,25 @@ TRAILER_POSE_MIN_DISTANCE_M = 1.5
 TRAILER_POSE_MAX_DISTANCE_M = 24.0
 TRAILER_PROGRESS_BEHIND_MAX_M = 32.0
 TRAILER_VERTICAL_TOLERANCE_M = 4.0
+# Trailer swept-path compensation is a geometric target, but the physical
+# tractor cannot move its reference line from one side of a lane to the other
+# in a single telemetry frame.  These limits apply only to that virtual
+# lateral target; they do not filter or delay the steering command.
+TRAILER_OFFSET_RATE_MPS = 0.75
+TRAILER_SIDE_CHANGE_PROOF_S = 0.30
+TRAILER_CURVATURE_PROOF_FRACTION = 0.70
+# A proven bend owns a non-zero Ackermann foundation.  Feedback may reduce it
+# to let the combination straighten naturally, but may reverse the complete
+# command only after tractor (not trailer) geometry proves a sustained lane
+# departure.  This is command composition authority, not an actuator clamp.
+CURVE_FOUNDATION_MIN_COMMAND = 0.06
+CURVE_FOUNDATION_RETAIN_FRACTION = 0.20
+CURVE_OPPOSITE_PROOF_S = 0.35
+CURVE_OPPOSITE_CTE_MIN_M = 0.65
+CURVE_OPPOSITE_HEADING_MIN_RAD = math.radians(2.5)
+CURVE_CTE_SIDE_DEADBAND_M = 0.20
+CURVE_CTE_CROSS_MIN_M = 0.45
+CURVE_CTE_CROSS_PROOF_S = 0.70
 # A longer window is retained for anticipatory curve braking; steering uses
 # the shorter local window above so it cannot cut across a bend.
 CURV_WINDOW_M = 60.0
@@ -156,7 +175,8 @@ def curve_speed_limit_ms(radius_m: float, distance_m: float,
 
 
 class Route:
-    def __init__(self, points: Optional[Sequence[Point]] = None, name: str = "route"):
+    def __init__(self, points: Optional[Sequence[Point]] = None, name: str = "route",
+                 point_authorities: Optional[Sequence[object]] = None):
         self.world_points = [tuple(p) for p in (points or [])]
         # Lane trajectories are world (X,Y,Z); steering remains strictly X/Z.
         self.points: List[Point] = [
@@ -176,12 +196,160 @@ class Route:
             self._segment_lengths.append(length)
             self._cumulative_m.append(self._cumulative_m[-1] + length)
         self._tracking_state = None
+        self._point_authorities = list(point_authorities or ())
+        if len(self._point_authorities) != len(self.points):
+            self._point_authorities = []
+        self._authority_segments = {}
+        self._authority_runs = {}
+        if self._point_authorities:
+            for index in range(len(self.points) - 1):
+                first = self._point_authorities[index]
+                second = self._point_authorities[index + 1]
+                if first == second:
+                    self._authority_segments.setdefault(first, []).append(index)
+            run_start = 0
+            for index in range(1, len(self._point_authorities) + 1):
+                if (index == len(self._point_authorities)
+                        or self._point_authorities[index]
+                            != self._point_authorities[run_start]):
+                    authority = self._point_authorities[run_start]
+                    if index - run_start >= 2:
+                        self._authority_runs.setdefault(authority, []).append(
+                            (run_start, index - 1))
+                    run_start = index
+        self._control_authority_key = None
+        self._curve_composition_state = {}
+        self._trailer_offset_state = {
+            "applied_m": 0.0, "pending_side": 0,
+            "pending_side_s": 0.0,
+        }
         self.last_steering_debug = {
             "feed_forward": 0.0, "feedback": 0.0,
             "local_curvature": 0.0, "raw": 0.0, "output": 0.0,
             "curve_direction_hold": False,
             "curve_direction_hold_eligible": False,
             "curve_direction_hold_approach": False,
+        }
+
+    @staticmethod
+    def _bounded_control_dt(control_dt_s: Optional[float]) -> float:
+        """Return a deterministic control interval safe across runtime stalls."""
+        try:
+            value = float(control_dt_s if control_dt_s is not None else 0.05)
+        except (TypeError, ValueError, OverflowError):
+            value = 0.05
+        if not math.isfinite(value):
+            value = 0.05
+        # A delayed map tick is not proof that one sample persisted throughout
+        # the delay.  In particular it must not satisfy side/reversal evidence.
+        return _clamp(value, 0.005, 0.10)
+
+    def _reset_control_composition(
+            self, authority_key=None,
+            preserve_trailer_offset: bool = False):
+        applied_trailer_offset = (
+            float(self._trailer_offset_state.get("applied_m", 0.0) or 0.0)
+            if preserve_trailer_offset else 0.0)
+        self._control_authority_key = authority_key
+        self._curve_composition_state = {
+            "curve_sign": 0,
+            "opposite_proof_s": 0.0,
+            "last_cte_side": 0,
+            "cte_cross_proof_s": 0.0,
+        }
+        self._trailer_offset_state = {
+            "applied_m": applied_trailer_offset, "pending_side": 0,
+            "pending_side_s": 0.0,
+        }
+
+    def _compose_curve_steering(
+            self, feed_forward: float, heading_feedback: float,
+            cte_feedback: float, tractor_cte: float,
+            heading_error_rad: float, cte_geometry_proven: bool,
+            lane_width_m: float, control_dt_s: Optional[float]) -> Tuple[float, dict]:
+        """Compose feed-forward and feedback with explicit geometric authority.
+
+        Ackermann curvature remains the stable foundation of one monotonic
+        bend.  Opposing heading/CTE feedback can continuously reduce that
+        foundation.  It can cross zero only after the *tractor* has a proven,
+        sustained centre/corridor departure; a trailer target alone can never
+        manufacture that permission.  A new feed-forward sign starts a new
+        bend immediately, preserving a real S-curve transition.
+        """
+        dt = self._bounded_control_dt(control_dt_s)
+        state = self._curve_composition_state
+        curve_sign = (0 if abs(feed_forward) < CURVE_FOUNDATION_MIN_COMMAND
+                      else (1 if feed_forward > 0.0 else -1))
+        previous_curve_sign = int(state.get("curve_sign", 0) or 0)
+        if curve_sign and curve_sign != previous_curve_sign:
+            # The sign comes from immutable trajectory curvature, so an actual
+            # left/right spatial transition is authoritative immediately.
+            state.update({
+                "curve_sign": curve_sign,
+                "opposite_proof_s": 0.0,
+                "last_cte_side": 0,
+                "cte_cross_proof_s": 0.0,
+            })
+        elif curve_sign == 0:
+            state["curve_sign"] = 0
+            state["opposite_proof_s"] = 0.0
+
+        last_cte_side = int(state.get("last_cte_side", 0) or 0)
+        cte_side = (0 if abs(tractor_cte) < CURVE_CTE_SIDE_DEADBAND_M
+                    else (1 if tractor_cte > 0.0 else -1))
+        cross_proof_s = max(
+            0.0, float(state.get("cte_cross_proof_s", 0.0) or 0.0) - dt)
+        if (cte_side and last_cte_side and cte_side != last_cte_side
+                and abs(tractor_cte) >= CURVE_CTE_CROSS_MIN_M):
+            cross_proof_s = CURVE_CTE_CROSS_PROOF_S
+        if cte_side:
+            state["last_cte_side"] = cte_side
+        state["cte_cross_proof_s"] = cross_proof_s
+
+        feedback = heading_feedback + cte_feedback
+        candidate = feed_forward + feedback
+        corridor_threshold = max(
+            CURVE_OPPOSITE_CTE_MIN_M,
+            min(1.00, max(2.4, lane_width_m) * 0.20))
+        feedback_agrees_opposite = bool(
+            curve_sign
+            and feedback * curve_sign < 0.0
+            and heading_feedback * curve_sign < 0.0
+            and abs(heading_error_rad) >= CURVE_OPPOSITE_HEADING_MIN_RAD)
+        departure_position_proven = bool(
+            abs(tractor_cte) >= corridor_threshold
+            or (cross_proof_s > 0.0
+                and abs(tractor_cte) >= CURVE_OPPOSITE_CTE_MIN_M))
+        opposite_sample_proven = bool(
+            curve_sign and cte_geometry_proven
+            and departure_position_proven
+            and feedback_agrees_opposite)
+        proof_s = float(state.get("opposite_proof_s", 0.0) or 0.0)
+        if opposite_sample_proven:
+            proof_s = min(CURVE_OPPOSITE_PROOF_S * 2.0, proof_s + dt)
+        else:
+            proof_s = max(0.0, proof_s - 2.0 * dt)
+        state["opposite_proof_s"] = proof_s
+        opposite_authorized = proof_s >= CURVE_OPPOSITE_PROOF_S
+
+        foundation_limited = False
+        minimum_foundation = abs(feed_forward) * CURVE_FOUNDATION_RETAIN_FRACTION
+        if curve_sign and not opposite_authorized:
+            candidate_in_curve_direction = candidate * curve_sign
+            if candidate_in_curve_direction < minimum_foundation:
+                candidate = curve_sign * minimum_foundation
+                foundation_limited = True
+
+        return float(candidate), {
+            "curve_foundation_active": bool(curve_sign),
+            "curve_foundation_sign": int(curve_sign),
+            "curve_foundation_minimum": float(minimum_foundation),
+            "curve_foundation_limited": bool(foundation_limited),
+            "opposite_sample_proven": bool(opposite_sample_proven),
+            "opposite_correction_authorized": bool(opposite_authorized),
+            "opposite_correction_proof_s": float(proof_s),
+            "cte_cross_proof_s": float(cross_proof_s),
+            "corridor_threshold_m": float(corridor_threshold),
         }
 
     # --- Construction / persistence ------------------------------------------
@@ -268,6 +436,56 @@ class Route:
             if best is None or candidate[0] < best[0]:
                 best = candidate
         return best if best is not None else fallback
+
+    def _authority_projection(self, authority, pos: Point, heading: float):
+        """Project only onto points owned by one proven lane/deck identity."""
+        if not self._point_authorities or authority is None:
+            return None
+        indices = self._authority_segments.get(authority, ())
+        if not indices:
+            return None
+        if self._tracking_state is not None:
+            last_progress = float(self._tracking_state[4])
+            local_indices = [index for index in indices
+                             if last_progress - 8.0
+                             <= self._cumulative_m[index]
+                             <= last_progress + 40.0]
+            if local_indices:
+                indices = local_indices
+        return self._best_projection(indices, pos, heading)
+
+    def _authority_bounds(self, authority, progress: float):
+        """Return the contiguous progress interval for one lane/deck identity."""
+        if not self._point_authorities or authority is None:
+            return None
+        runs = self._authority_runs.get(authority, ())
+        if not runs:
+            return None
+        first, last = min(runs, key=lambda run: min(
+            abs(self._cumulative_m[run[0]] - progress),
+            abs(self._cumulative_m[run[1]] - progress),
+            0.0 if (self._cumulative_m[run[0]] <= progress
+                    <= self._cumulative_m[run[1]]) else float("inf")))
+        minimum = self._cumulative_m[first]
+        maximum = self._cumulative_m[last]
+        return minimum, maximum
+
+    def _authority_tangent(self, authority, progress: float):
+        """Return a local tangent that cannot cross a LaneId/deck boundary."""
+        bounds = self._authority_bounds(authority, progress)
+        if bounds is None:
+            return None
+        minimum, maximum = bounds
+        before_progress = max(minimum, progress - STEERING_REFERENCE_TANGENT_M)
+        after_progress = min(maximum, progress + STEERING_REFERENCE_TANGENT_M)
+        # Near a segment boundary use a one-sided secant on that same LaneId;
+        # do not borrow the adjacent prefab/road tangent.
+        if after_progress - before_progress < 0.5:
+            before_progress, after_progress = minimum, maximum
+        if after_progress - before_progress < 0.5:
+            return None
+        return (self._point_at_progress(before_progress),
+                self._point_at_progress(after_progress))
 
     def _tracking_projection(self, pos: Point, heading: float):
         if len(self.points) < 2:
@@ -382,26 +600,34 @@ class Route:
         """Current progress shared by steering, speed and turn semantics."""
         return float(self._tracking_projection(pos, heading)[2])
 
-    def _curvature_at_progress(self, progress_m: float,
-                               span_m: float = STEERING_CURVATURE_SPAN_M) -> float:
+    def _curvature_at_progress(
+            self, progress_m: float,
+            span_m: float = STEERING_CURVATURE_SPAN_M,
+            progress_bounds: Optional[Tuple[float, float]] = None) -> float:
         """Signed Menger curvature around one route-progress sample."""
         if len(self.points) < 3 or self._cumulative_m[-1] < 2.0:
             return 0.0
         total = self._cumulative_m[-1]
+        minimum, maximum = (0.0, total)
+        if progress_bounds is not None:
+            minimum = _clamp(float(progress_bounds[0]), 0.0, total)
+            maximum = _clamp(float(progress_bounds[1]), minimum, total)
+            if maximum - minimum < 2.0:
+                return 0.0
         span = max(2.0, float(span_m))
-        centre = _clamp(float(progress_m), 0.0, total)
-        before = max(0.0, centre - span)
-        after = min(total, centre + span)
+        centre = _clamp(float(progress_m), minimum, maximum)
+        before = max(minimum, centre - span)
+        after = min(maximum, centre + span)
         # Near either trajectory end retain a full, one-sided sample rather
         # than collapsing two points and manufacturing infinite curvature.
         if centre - before < 1.0:
             before = centre
-            centre = min(total, before + span)
-            after = min(total, before + span * 2.0)
+            centre = min(maximum, before + span)
+            after = min(maximum, before + span * 2.0)
         elif after - centre < 1.0:
             after = centre
-            centre = max(0.0, after - span)
-            before = max(0.0, after - span * 2.0)
+            centre = max(minimum, after - span)
+            before = max(minimum, after - span * 2.0)
         first = self._point_at_progress(before)
         middle = self._point_at_progress(centre)
         last = self._point_at_progress(after)
@@ -413,10 +639,14 @@ class Route:
         product = a * b * c
         return 0.0 if product < 1e-6 else 2.0 * cross / product
 
-    def _steering_curvature_at_progress(self, progress_m: float) -> float:
+    def _steering_curvature_at_progress(
+            self, progress_m: float, authority=None) -> float:
         """Curvature represented across the tractor's spatial footprint."""
+        bounds = self._authority_bounds(authority, progress_m)
         return sum(
-            weight * self._curvature_at_progress(progress_m + offset)
+            weight * (self._curvature_at_progress(progress_m + offset)
+                      if bounds is None else self._curvature_at_progress(
+                          progress_m + offset, progress_bounds=bounds))
             for offset, weight in zip(
                 STEERING_CURVATURE_SAMPLE_OFFSETS_M,
                 STEERING_CURVATURE_SAMPLE_WEIGHTS))
@@ -467,7 +697,9 @@ class Route:
     def _trailer_envelope_offset(self, progress: float, pos: Point,
                                  heading: float, speed_ms: float,
                                  tractor_cte: float,
-                                 envelope: Optional[dict]) -> Tuple[float, dict]:
+                                 envelope: Optional[dict],
+                                 control_dt_s: Optional[float] = None
+                                 ) -> Tuple[float, dict]:
         """Return a proven outward tractor offset for an attached trailer.
 
         The immutable lane remains the reference.  We independently project
@@ -483,8 +715,15 @@ class Route:
             "predicted_offtrack_m": 0.0, "required_offset_m": 0.0,
             "available_offset_m": 0.0, "applied_offset_m": 0.0,
             "trailer_progress_m": 0.0,
+            "curve_side_proven": False,
+            "pending_side_s": 0.0,
+            "offset_rate_mps": 0.0,
         }
         if not isinstance(envelope, dict) or not envelope.get("attached", False):
+            self._trailer_offset_state.update({
+                "applied_m": 0.0, "pending_side": 0,
+                "pending_side_s": 0.0,
+            })
             return 0.0, debug
         try:
             trailer_pos = tuple(map(float, envelope["position"][:2]))
@@ -498,21 +737,26 @@ class Route:
                 raise ValueError("non-finite trailer envelope metadata")
         except (KeyError, TypeError, ValueError, IndexError, OverflowError):
             debug["reason"] = "trailer envelope metadata is malformed"
+            self._trailer_offset_state["applied_m"] = 0.0
             return 0.0, debug
         if not 2.4 <= lane_width <= 12.0:
             debug["reason"] = "confirmed lane width is unavailable"
+            self._trailer_offset_state["applied_m"] = 0.0
             return 0.0, debug
         if abs(trailer_altitude - tractor_altitude) > TRAILER_VERTICAL_TOLERANCE_M:
             debug["reason"] = "trailer is on a different elevation layer"
+            self._trailer_offset_state["applied_m"] = 0.0
             return 0.0, debug
         pose_distance = math.dist(pos, trailer_pos)
         if not TRAILER_POSE_MIN_DISTANCE_M <= pose_distance <= TRAILER_POSE_MAX_DISTANCE_M:
             debug["reason"] = "trailer pose is not physically coupled to the tractor"
+            self._trailer_offset_state["applied_m"] = 0.0
             return 0.0, debug
         articulation = abs((heading - trailer_heading + math.pi)
                            % (2.0 * math.pi) - math.pi)
         if articulation > math.radians(70.0):
             debug["reason"] = "trailer direction is incompatible with the tractor"
+            self._trailer_offset_state["applied_m"] = 0.0
             return 0.0, debug
 
         segment_count = len(self.points) - 1
@@ -526,12 +770,14 @@ class Route:
             range(first, last), trailer_pos, trailer_heading)
         if candidate is None:
             debug["reason"] = "trailer has no directed projection on the active lane"
+            self._trailer_offset_state["applied_m"] = 0.0
             return 0.0, debug
         _, distance2, index, _fraction, trailer_progress, alignment = candidate
         if (alignment < 0.15 or trailer_progress > progress + 2.0
                 or progress - trailer_progress > TRAILER_PROGRESS_BEHIND_MAX_M
                 or distance2 > max(8.0, lane_width * 1.5) ** 2):
             debug["reason"] = "trailer projection is outside the active directed lane"
+            self._trailer_offset_state["applied_m"] = 0.0
             return 0.0, debug
 
         trailer_cte = self.cross_track_error(index, trailer_pos)
@@ -542,35 +788,90 @@ class Route:
         offsets = (0.0, horizon * 0.25, horizon * 0.50,
                    horizon * 0.75, horizon)
         weights = (0.10, 0.20, 0.30, 0.25, 0.15)
-        swept_curvature = sum(
-            weight * self._curvature_at_progress(progress + offset)
-            for offset, weight in zip(offsets, weights))
+        active_authority = None
+        if (isinstance(self._control_authority_key, tuple)
+                and len(self._control_authority_key) >= 2):
+            active_authority = self._control_authority_key[1]
+        active_bounds = self._authority_bounds(active_authority, progress)
+        curvature_samples = [
+            (self._curvature_at_progress(progress + offset)
+             if active_bounds is None else self._curvature_at_progress(
+                 progress + offset, progress_bounds=active_bounds))
+            for offset in offsets]
+        swept_curvature = sum(weight * curvature for weight, curvature in zip(
+            weights, curvature_samples))
+        dominant_sign = (0 if abs(swept_curvature) < 1.0 / 1000.0
+                         else (1 if swept_curvature > 0.0 else -1))
+        coherent_weight = sum(
+            weight for weight, curvature in zip(weights, curvature_samples)
+            if dominant_sign and curvature * dominant_sign > 1.0 / 1500.0)
+        curve_side_proven = bool(
+            dominant_sign
+            and coherent_weight >= TRAILER_CURVATURE_PROOF_FRACTION)
         predicted = 0.0
-        if abs(swept_curvature) > 1.0 / 1000.0:
+        if curve_side_proven:
             radius = 1.0 / abs(swept_curvature)
             magnitude = (math.sqrt(
                 radius * radius + TRAILER_EFFECTIVE_AXLE_DISTANCE_M ** 2)
                          - radius)
             predicted = -math.copysign(magnitude, swept_curvature)
 
-        # The measured trailer axle owns the sign once it is visibly
-        # off-tracking.  Before corner entry the spatial prediction moves the
-        # tractor outward early.  Opposing S-bend demands are never added.
-        if abs(measured) > 0.10:
-            direction = math.copysign(1.0, measured)
-            predicted_same_way = (abs(predicted)
-                                  if predicted * measured > 0.0 else 0.0)
-            required = direction * max(abs(measured), predicted_same_way)
-        else:
-            required = predicted
+        # Immutable curvature owns the side.  The measured trailer axle may
+        # increase the magnitude only when it agrees with that spatial proof;
+        # it cannot flip the target as the articulation crosses the lane
+        # centre from one telemetry frame to the next.
+        required = predicted
+        measurement_conflict = bool(
+            abs(measured) > 0.10 and predicted * measured < 0.0)
+        if abs(measured) > 0.10 and predicted * measured > 0.0:
+            required = math.copysign(
+                max(abs(predicted), abs(measured)), predicted)
         available = max(
             0.0, (lane_width - TRACTOR_BODY_WIDTH_M) * 0.5
             - VEHICLE_ENVELOPE_MARGIN_M)
-        applied = _clamp(required, -available, available)
+        target = _clamp(required, -available, available)
+        dt = self._bounded_control_dt(control_dt_s)
+        state = self._trailer_offset_state
+        applied_before = float(state.get("applied_m", 0.0) or 0.0)
+        applied_side = (0 if abs(applied_before) < 1e-6
+                        else (1 if applied_before > 0.0 else -1))
+        target_side = (0 if abs(target) < 1e-6
+                       else (1 if target > 0.0 else -1))
+        pending_side = int(state.get("pending_side", 0) or 0)
+        pending_side_s = float(state.get("pending_side_s", 0.0) or 0.0)
+        side_change = bool(
+            applied_side and target_side and target_side != applied_side)
+        effective_target = target
+        if side_change:
+            if curve_side_proven:
+                if pending_side != target_side:
+                    pending_side, pending_side_s = target_side, 0.0
+                pending_side_s += dt
+            else:
+                pending_side, pending_side_s = 0, 0.0
+            # First release the previous outward target.  Only after the new
+            # curvature side persists may compensation pass through zero.
+            if pending_side_s < TRAILER_SIDE_CHANGE_PROOF_S:
+                effective_target = 0.0
+        else:
+            pending_side, pending_side_s = 0, 0.0
+        maximum_delta = TRAILER_OFFSET_RATE_MPS * dt
+        applied = applied_before + _clamp(
+            effective_target - applied_before, -maximum_delta, maximum_delta)
+        if abs(applied) < 1e-9:
+            applied = 0.0
+        state.update({
+            "applied_m": float(applied),
+            "pending_side": int(pending_side),
+            "pending_side_s": float(pending_side_s),
+        })
         debug.update({
             "accepted": True,
-            "reason": ("accepted" if abs(required) <= available + 1e-6
-                       else "accepted but constrained by confirmed lane width"),
+            "reason": (
+                "accepted; measured side conflicts with spatial curvature"
+                if measurement_conflict else
+                ("accepted" if abs(required) <= available + 1e-6
+                 else "accepted but constrained by confirmed lane width")),
             "trailer_cte_m": float(trailer_cte),
             "measured_offtrack_m": float(measured),
             "predicted_offtrack_m": float(predicted),
@@ -578,6 +879,10 @@ class Route:
             "available_offset_m": float(available),
             "applied_offset_m": float(applied),
             "trailer_progress_m": float(trailer_progress),
+            "curve_side_proven": bool(curve_side_proven),
+            "pending_side_s": float(pending_side_s),
+            "offset_rate_mps": float(
+                (applied - applied_before) / dt if dt > 0.0 else 0.0),
         })
         return float(applied), debug
 
@@ -668,7 +973,9 @@ class Route:
     def steering(self, pos: Point, heading: float, speed_ms: float = 0.0,
                  lane_offset_m: float = 0.0,
                  cross_track_error_m: Optional[float] = None,
-                 vehicle_envelope: Optional[dict] = None) -> float:
+                 vehicle_envelope: Optional[dict] = None,
+                 control_authority: Optional[dict] = None,
+                 control_dt_s: Optional[float] = None) -> float:
         """Steering command in ``[-1, 1]`` (positive = right) to follow the route.
 
         ``lane_offset_m`` shifts the target line sideways: positive = keep to the
@@ -695,24 +1002,86 @@ class Route:
             "guidance_heading_error_rad": 0.0,
             "guidance_curvature": 0.0,
             "trailer_envelope": {},
+            "authority_valid": True,
+            "authority_lane_id": None,
+            "authority_revision": None,
         }
         if len(self.points) < 2:
             return 0.0
+
+        authority_lane = None
+        authority_revision = None
+        authority_elevation = None
+        lane_width_m = 4.0
+        if isinstance(control_authority, dict):
+            authority_lane = control_authority.get("lane_identity")
+            authority_revision = control_authority.get("revision")
+            authority_elevation = control_authority.get("elevation_layer")
+            try:
+                lane_width_m = float(control_authority.get(
+                    "lane_width_m", lane_width_m))
+            except (TypeError, ValueError, OverflowError):
+                lane_width_m = 4.0
+        route_authority = ((authority_lane, authority_elevation)
+                           if authority_lane is not None else None)
+        composition_authority = (authority_revision, route_authority)
+        if composition_authority != self._control_authority_key:
+            previous_authority = self._control_authority_key
+            same_revision_lane_transition = bool(
+                authority_revision is not None
+                and route_authority is not None
+                and isinstance(previous_authority, tuple)
+                and len(previous_authority) >= 2
+                and previous_authority[0] == authority_revision
+                and previous_authority[1] is not None)
+            # Reversal evidence is lane-local and always resets.  The physical
+            # trailer offset, however, must remain rate-continuous across a
+            # proven LaneId boundary in the same immutable trajectory.  The
+            # new lane curvature will either retain it or release it through
+            # zero with the existing spatial side proof.  A new revision still
+            # resets it fail-neutral because its geometry is new authority.
+            self._reset_control_composition(
+                composition_authority,
+                preserve_trailer_offset=same_revision_lane_transition)
 
         # A plain nearest-waypoint lookup is ambiguous on divided motorways,
         # roundabouts and junctions.  Use the heading-aware segment selected by
         # the same geometry used for localisation, otherwise steering can jump
         # onto a neighbouring arm and immediately pull across the median.
-        idx = self.tracking_index(pos, heading)
+        authority_projection = self._authority_projection(
+            route_authority, pos, heading)
+        if self._point_authorities and route_authority is not None:
+            if authority_projection is None:
+                self.last_steering_debug.update({
+                    "authority_valid": False,
+                    "authority_lane_id": authority_lane,
+                    "authority_revision": authority_revision,
+                })
+                return 0.0
+            _score, _distance2, idx, _fraction, progress, _alignment = (
+                authority_projection)
+            self._tracking_state = (
+                (float(pos[0]), float(pos[1])), float(heading),
+                idx, _fraction, progress)
+        else:
+            idx, _fraction, progress, _distance2 = self._tracking_projection(
+                pos, heading)
 
         # This short tangent selects and verifies the forward route segment; it
         # is not a second steering target. The geometric guidance target below
         # is interpolated by arc-length on the same confirmed trajectory.
-        projection = self.lookahead_point(idx, pos, 0.0)
+        projection = self._point_at_progress(progress)
         tangent_window = _clamp(3.0 + abs(speed_ms) * 0.15, 3.0, 6.0)
-        tangent_target = self.lookahead_point(idx, pos, tangent_window)
-        path_dx = tangent_target[0] - projection[0]
-        path_dz = tangent_target[1] - projection[1]
+        authority_tangent = self._authority_tangent(
+            route_authority, progress)
+        if authority_tangent is not None:
+            tangent_first, tangent_target = authority_tangent
+            path_dx = tangent_target[0] - tangent_first[0]
+            path_dz = tangent_target[1] - tangent_first[1]
+        else:
+            tangent_target = self._point_at_progress(progress + tangent_window)
+            path_dx = tangent_target[0] - projection[0]
+            path_dz = tangent_target[1] - projection[1]
         path_length = math.hypot(path_dx, path_dz)
         if path_length < 0.5:
             return 0.0
@@ -752,10 +1121,10 @@ class Route:
         #
         # Use one Frenet frame at one projected reference progress.  Curvature,
         # tangent heading and CTE are converted to steering *angles* in that
-        # frame, then summed once.  There is no temporal average, direction
-        # hold or stale steering state in this calculation.
+        # frame, then summed once. There is no temporal average of telemetry or
+        # commands. The state below records only sustained geometric authority
+        # for an exceptional sign reversal and resets on LaneId/revision.
         v = max(abs(speed_ms), 0.0)
-        progress = self.tracking_progress(pos, heading)
         reference_preview = _clamp(
             v * 0.35, STEERING_REFERENCE_PREVIEW_MIN_M,
             STEERING_REFERENCE_PREVIEW_MAX_M)
@@ -763,10 +1132,13 @@ class Route:
         # Heading belongs to the current Frenet frame. Moving this tangent to
         # the curvature preview double-counts a constant-radius bend as both
         # feed-forward and a fictitious heading error.
-        before = self._point_at_progress(max(
-            0.0, progress - STEERING_REFERENCE_TANGENT_M))
-        after = self._point_at_progress(
-            progress + STEERING_REFERENCE_TANGENT_M)
+        if authority_tangent is not None:
+            before, after = authority_tangent
+        else:
+            before = self._point_at_progress(max(
+                0.0, progress - STEERING_REFERENCE_TANGENT_M))
+            after = self._point_at_progress(
+                progress + STEERING_REFERENCE_TANGENT_M)
         reference_dx, reference_dz = after[0]-before[0], after[1]-before[1]
         if math.hypot(reference_dx, reference_dz) < 0.5:
             return 0.0
@@ -779,10 +1151,10 @@ class Route:
 
         trailer_offset, trailer_debug = self._trailer_envelope_offset(
             progress, pos, heading, v, cte - lane_offset_m,
-            vehicle_envelope)
+            vehicle_envelope, control_dt_s=control_dt_s)
         control_cte = _clamp(cte + trailer_offset, -5.0, 5.0)
         local_curvature = self._steering_curvature_at_progress(
-            reference_progress)
+            reference_progress, authority=route_authority)
         local_radius = (1e6 if abs(local_curvature) < 1e-9
                         else 1.0 / abs(local_curvature))
         cte_gain = curve_cte_gain(local_radius, control_cte)
@@ -807,7 +1179,11 @@ class Route:
         cte_feedback = (FEEDBACK_STEERING_RESPONSE * cte_steer
                         / NORMALIZED_STEERING_ANGLE_RAD)
         scaled_feedback = heading_feedback + cte_feedback
-        steer = feed_forward + scaled_feedback
+        steer, composition_debug = self._compose_curve_steering(
+            feed_forward, heading_feedback, cte_feedback,
+            cte, guidance_heading_error,
+            cte_error_geometrically_proven,
+            lane_width_m, control_dt_s)
         steering_angle = steer * NORMALIZED_STEERING_ANGLE_RAD
         guidance_curvature = (math.tan(_clamp(
             steering_angle, -1.20, 1.20)) / TRUCK_WHEELBASE_M)
@@ -897,5 +1273,9 @@ class Route:
             "steering_limit": float(steering_limit),
             "saturated": bool(abs(raw_steer) > steering_limit + 1e-9),
             "trailer_envelope": dict(trailer_debug),
+            "authority_valid": True,
+            "authority_lane_id": authority_lane,
+            "authority_revision": authority_revision,
+            **composition_debug,
         }
         return steer
