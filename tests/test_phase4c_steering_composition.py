@@ -123,18 +123,30 @@ class Phase4CSteeringCompositionTests(unittest.TestCase):
             "pending_side_s": 0.25,
         })
         route._curve_composition_state["opposite_proof_s"] = 0.30
+        route._curve_composition_state.update({
+            "coherent_feedback": 0.08,
+            "coherent_feedback_rate": 0.02,
+            "coherent_feedback_accel": -0.01,
+        })
 
         route._reset_control_composition(
-            (9, (lane_b, 0)), preserve_trailer_offset=True)
+            (9, (lane_b, 0)), preserve_trailer_offset=True,
+            preserve_curve_feedback=True)
 
         self.assertEqual(route._trailer_offset_state["applied_m"], 0.825)
         self.assertEqual(route._trailer_offset_state["pending_side"], 0)
         self.assertEqual(route._trailer_offset_state["pending_side_s"], 0.0)
         self.assertEqual(
             route._curve_composition_state["opposite_proof_s"], 0.0)
+        self.assertEqual(
+            route._curve_composition_state["coherent_feedback"], 0.08)
+        self.assertEqual(
+            route._curve_composition_state["feedback_worsening_s"], 0.0)
 
         route._reset_control_composition((10, (lane_b, 0)))
         self.assertEqual(route._trailer_offset_state["applied_m"], 0.0)
+        self.assertEqual(
+            route._curve_composition_state["coherent_feedback"], 0.0)
 
     def test_r18_r35_r83_and_roundabout_keep_monotonic_curve_direction(self):
         for direction in (-1.0, 1.0):

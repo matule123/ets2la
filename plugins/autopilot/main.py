@@ -855,10 +855,30 @@ class Plugin(BasePlugin):
                     steering_debug.get("feed_forward", 0.0) or 0.0)
                 diagnostic_feedback = float(
                     steering_debug.get("feedback", 0.0) or 0.0)
+                diagnostic_feedback_applied = float(
+                    steering_debug.get(
+                        "feedback_applied", diagnostic_feedback) or 0.0)
                 diagnostic_heading_feedback = float(
                     steering_debug.get("heading_feedback", 0.0) or 0.0)
                 diagnostic_cte_feedback = float(
                     steering_debug.get("cte_feedback", 0.0) or 0.0)
+                diagnostic_feedback_rate = float(
+                    steering_debug.get(
+                        "coherent_feedback_rate_per_s", 0.0) or 0.0)
+                diagnostic_feedback_accel = float(
+                    steering_debug.get(
+                        "coherent_feedback_acceleration_per_s2", 0.0)
+                    or 0.0)
+                diagnostic_feedback_jerk = float(
+                    steering_debug.get(
+                        "coherent_feedback_jerk_per_s3", 0.0) or 0.0)
+                diagnostic_feedback_trend_active = bool(
+                    steering_debug.get("feedback_trend_active", False))
+                diagnostic_feedback_error_metric = float(
+                    steering_debug.get(
+                        "feedback_error_metric", 0.0) or 0.0)
+                diagnostic_curve_coherence = bool(
+                    steering_debug.get("curve_coherence_enabled", False))
                 diagnostic_foundation_limited = bool(
                     steering_debug.get("curve_foundation_limited", False))
                 diagnostic_opposite_proof = float(
@@ -947,7 +967,12 @@ class Plugin(BasePlugin):
                 diagnostic_radius = None
                 diagnostic_curve_distance = float("nan")
                 diagnostic_feed_forward = diagnostic_feedback = float("nan")
+                diagnostic_feedback_applied = float("nan")
                 diagnostic_heading_feedback = diagnostic_cte_feedback = float("nan")
+                diagnostic_feedback_rate = diagnostic_feedback_accel = float("nan")
+                diagnostic_feedback_jerk = diagnostic_feedback_error_metric = float("nan")
+                diagnostic_feedback_trend_active = False
+                diagnostic_curve_coherence = False
                 diagnostic_foundation_limited = False
                 diagnostic_opposite_proof = float("nan")
                 diagnostic_opposite_authorized = False
@@ -979,8 +1004,16 @@ class Plugin(BasePlugin):
                 **dict(getattr(self, "_steering_dynamics_debug", {}) or {}),
                 "feed_forward": diagnostic_feed_forward,
                 "feedback": diagnostic_feedback,
+                "feedback_applied": diagnostic_feedback_applied,
                 "heading_feedback": diagnostic_heading_feedback,
                 "cte_feedback": diagnostic_cte_feedback,
+                "coherent_feedback_rate_per_s": diagnostic_feedback_rate,
+                "coherent_feedback_acceleration_per_s2": (
+                    diagnostic_feedback_accel),
+                "coherent_feedback_jerk_per_s3": diagnostic_feedback_jerk,
+                "feedback_trend_active": diagnostic_feedback_trend_active,
+                "feedback_error_metric": diagnostic_feedback_error_metric,
+                "curve_coherence_enabled": diagnostic_curve_coherence,
                 "lane_cte_m": live_lateral,
                 "lane_heading_deg": live_heading,
                 "curvature_per_m": diagnostic_guidance_curvature,
@@ -998,7 +1031,8 @@ class Plugin(BasePlugin):
                 "lane_heading=%.1fdeg vision_off=%.3f "
                 "nav_steer=%.3f nav_target=%.3f "
                 "steer_out=%.3f speed=%.0f "
-                "curve_reference=%.3f guidance_delta=%.3f curve_hold=%s "
+                "curve_reference=%.3f guidance_delta=%.3f "
+                "guidance_applied=%.3f curve_hold=%s "
                 "hold_fraction=%.2f foundation_limited=%s "
                 "opposite_proof=%.2fs opposite_authorized=%s "
                 "cte_residual=%.3f cte_proven=%s "
@@ -1016,7 +1050,10 @@ class Plugin(BasePlugin):
                 "steer_accel=%.3f/s2 dt=%.4f used_dt=%.4f "
                 "steer_phase=%s steer_error=%.3f stop_angle=%.3f "
                 "safe_rate=%.3f/s game_steer=%.3f game_tracking=%.3f "
-                "heading_fb=%.3f cte_fb=%.3f steer_flags=%s "
+                "heading_fb=%.3f cte_fb=%.3f "
+                "feedback_rate=%.3f/s feedback_accel=%.3f/s2 "
+                "feedback_jerk=%.3f/s3 feedback_trend=%s "
+                "feedback_metric=%.3f curve_coherence=%s steer_flags=%s "
                 "intent=%s lane_revision=%s LaneId=%s elevation=%s "
                 "confidence=%.3f reject=%s",
                 active, nav_active, self._engage_blend,
@@ -1024,6 +1061,7 @@ class Plugin(BasePlugin):
                 float(self.sdk.shared_state.get("nav_steering", 0.0) or 0.0),
                 float(self._last_steering), steering_val, speed_kmh,
                 diagnostic_feed_forward, diagnostic_feedback,
+                diagnostic_feedback_applied,
                 diagnostic_direction_hold,
                 diagnostic_hold_fraction, diagnostic_foundation_limited,
                 diagnostic_opposite_proof, diagnostic_opposite_authorized,
@@ -1058,6 +1096,11 @@ class Plugin(BasePlugin):
                 diagnostic_stopping_distance, diagnostic_safe_rate,
                 diagnostic_game_steering, diagnostic_game_tracking,
                 diagnostic_heading_feedback, diagnostic_cte_feedback,
+                diagnostic_feedback_rate, diagnostic_feedback_accel,
+                diagnostic_feedback_jerk,
+                diagnostic_feedback_trend_active,
+                diagnostic_feedback_error_metric,
+                diagnostic_curve_coherence,
                 diagnostic_dynamics_flags,
                 self.sdk.shared_state.get("navigation_intent_id"),
                 snapshot_revision,

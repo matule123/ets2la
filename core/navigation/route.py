@@ -113,6 +113,32 @@ CURVE_OPPOSITE_HEADING_MIN_RAD = math.radians(2.5)
 CURVE_CTE_SIDE_DEADBAND_M = 0.20
 CURVE_CTE_CROSS_MIN_M = 0.45
 CURVE_CTE_CROSS_PROOF_S = 0.70
+# Phase 4D shapes the single combined Route correction (heading + CTE) when a
+# proven trailer swept-path offset is active. Immutable curvature remains the
+# immediate foundation and SteeringDynamics remains the sole physical actuator.
+# Sustained error growth enables a new correction target; proven improvement
+# releases it. Its derivatives are bounded so guidance noise cannot pulse an
+# otherwise coherent curve foundation.
+CURVE_FEEDBACK_WORSENING_PROOF_S = 0.15
+CURVE_FEEDBACK_RELEASE_PROOF_S = 0.25
+CURVE_FEEDBACK_TREND_DEADBAND = 0.010
+CURVE_FEEDBACK_MAX_FOUNDATION = 0.30
+CURVE_COHERENT_FOUNDATION_RETAIN_FRACTION = 0.35
+CURVE_FEEDBACK_SAFE_CTE_FRACTION = 0.12
+CURVE_FEEDBACK_SAFE_CTE_MIN_M = 0.35
+CURVE_FEEDBACK_SAFE_CTE_MAX_M = 0.65
+CURVE_FEEDBACK_SAFE_HEADING_RAD = math.radians(3.0)
+CURVE_FEEDBACK_RATE_LOW_SPEED_PER_S = 0.28
+CURVE_FEEDBACK_RATE_HIGH_SPEED_PER_S = 0.10
+CURVE_FEEDBACK_ACCEL_LOW_SPEED_PER_S2 = 2.0
+CURVE_FEEDBACK_ACCEL_HIGH_SPEED_PER_S2 = 0.60
+CURVE_FEEDBACK_JERK_LOW_SPEED_PER_S3 = 14.0
+CURVE_FEEDBACK_JERK_HIGH_SPEED_PER_S3 = 4.0
+CURVE_FEEDBACK_LOW_SPEED_MS = 5.0
+CURVE_FEEDBACK_HIGH_SPEED_MS = 22.0
+CURVE_FEEDBACK_URGENT_RATE_PER_S = 0.90
+CURVE_FEEDBACK_URGENT_ACCEL_PER_S2 = 5.0
+CURVE_FEEDBACK_URGENT_JERK_PER_S3 = 30.0
 # A longer window is retained for anticipatory curve braking; steering uses
 # the shorter local window above so it cannot cut across a bend.
 CURV_WINDOW_M = 60.0
@@ -246,27 +272,138 @@ class Route:
 
     def _reset_control_composition(
             self, authority_key=None,
-            preserve_trailer_offset: bool = False):
+            preserve_trailer_offset: bool = False,
+            preserve_curve_feedback: bool = False):
         applied_trailer_offset = (
             float(self._trailer_offset_state.get("applied_m", 0.0) or 0.0)
             if preserve_trailer_offset else 0.0)
+        previous_composition = self._curve_composition_state
+        preserved_curve_sign = (
+            int(previous_composition.get("curve_sign", 0) or 0)
+            if preserve_curve_feedback else 0)
+        preserved_feedback = (
+            float(previous_composition.get(
+                "coherent_feedback", 0.0) or 0.0)
+            if preserve_curve_feedback else 0.0)
+        preserved_feedback_rate = (
+            float(previous_composition.get(
+                "coherent_feedback_rate", 0.0) or 0.0)
+            if preserve_curve_feedback else 0.0)
+        preserved_feedback_accel = (
+            float(previous_composition.get(
+                "coherent_feedback_accel", 0.0) or 0.0)
+            if preserve_curve_feedback else 0.0)
         self._control_authority_key = authority_key
         self._curve_composition_state = {
-            "curve_sign": 0,
+            "curve_sign": preserved_curve_sign,
             "opposite_proof_s": 0.0,
             "last_cte_side": 0,
             "cte_cross_proof_s": 0.0,
+            "coherent_feedback": preserved_feedback,
+            "coherent_feedback_rate": preserved_feedback_rate,
+            "coherent_feedback_accel": preserved_feedback_accel,
+            "feedback_error_metric": None,
+            "feedback_worsening_s": 0.0,
+            "feedback_release_s": 0.0,
+            "feedback_active": False,
         }
         self._trailer_offset_state = {
             "applied_m": applied_trailer_offset, "pending_side": 0,
             "pending_side_s": 0.0,
         }
 
+    @staticmethod
+    def _curve_feedback_limits(speed_ms: float, urgent: bool):
+        speed_fraction = _clamp(
+            (abs(float(speed_ms)) - CURVE_FEEDBACK_LOW_SPEED_MS)
+            / (CURVE_FEEDBACK_HIGH_SPEED_MS
+               - CURVE_FEEDBACK_LOW_SPEED_MS), 0.0, 1.0)
+        rate = (CURVE_FEEDBACK_RATE_LOW_SPEED_PER_S
+                + (CURVE_FEEDBACK_RATE_HIGH_SPEED_PER_S
+                   - CURVE_FEEDBACK_RATE_LOW_SPEED_PER_S) * speed_fraction)
+        acceleration = (CURVE_FEEDBACK_ACCEL_LOW_SPEED_PER_S2
+                        + (CURVE_FEEDBACK_ACCEL_HIGH_SPEED_PER_S2
+                           - CURVE_FEEDBACK_ACCEL_LOW_SPEED_PER_S2)
+                        * speed_fraction)
+        jerk = (CURVE_FEEDBACK_JERK_LOW_SPEED_PER_S3
+                + (CURVE_FEEDBACK_JERK_HIGH_SPEED_PER_S3
+                   - CURVE_FEEDBACK_JERK_LOW_SPEED_PER_S3) * speed_fraction)
+        if urgent:
+            rate = max(rate, CURVE_FEEDBACK_URGENT_RATE_PER_S)
+            acceleration = max(
+                acceleration, CURVE_FEEDBACK_URGENT_ACCEL_PER_S2)
+            jerk = max(jerk, CURVE_FEEDBACK_URGENT_JERK_PER_S3)
+        return rate, acceleration, jerk
+
+    def _advance_coherent_feedback(
+            self, target: float, dt: float, speed_ms: float,
+            urgent: bool) -> Tuple[float, dict]:
+        """Advance only the feedback correction with derivative bounds.
+
+        This is not a second steering actuator: curvature is not delayed and
+        the returned value is still summed exactly once before the single
+        SteeringDynamics stage.  State represents the correction contribution
+        and its first two derivatives, as requested by the curve-coherence
+        contract.
+        """
+        state = self._curve_composition_state
+        current = float(state.get("coherent_feedback", 0.0) or 0.0)
+        previous_rate = float(
+            state.get("coherent_feedback_rate", 0.0) or 0.0)
+        previous_accel = float(
+            state.get("coherent_feedback_accel", 0.0) or 0.0)
+        max_rate, max_accel, max_jerk = self._curve_feedback_limits(
+            speed_ms, urgent)
+        error = float(target) - current
+        if (abs(error) <= 1e-5 and abs(previous_rate) <= 1e-4
+                and abs(previous_accel) <= max_jerk * dt):
+            value, rate, acceleration, jerk = float(target), 0.0, 0.0, (
+                -previous_accel / dt)
+        else:
+            # Critically damped component-space tracking gives a monotonic
+            # correction for a stationary target.  Rate, acceleration and
+            # jerk are then explicit hard bounds; curvature itself bypasses
+            # this state and therefore has no added phase lag.
+            # Safe-corridor correction is deliberately slower than the game's
+            # wheel because it represents error trend, not an actuator.  A
+            # proven departure takes the urgent path below and remains fast.
+            natural_frequency = 7.0 if urgent else 5.0
+            desired_accel = _clamp(
+                natural_frequency * natural_frequency * error
+                - 2.0 * natural_frequency * previous_rate,
+                -max_accel, max_accel)
+            acceleration = previous_accel + _clamp(
+                desired_accel - previous_accel,
+                -max_jerk * dt, max_jerk * dt)
+            acceleration = _clamp(acceleration, -max_accel, max_accel)
+            rate = _clamp(
+                previous_rate + 0.5 * (previous_accel + acceleration) * dt,
+                -max_rate, max_rate)
+            value = current + 0.5 * (previous_rate + rate) * dt
+            jerk = (acceleration - previous_accel) / dt
+        state.update({
+            "coherent_feedback": float(value),
+            "coherent_feedback_rate": float(rate),
+            "coherent_feedback_accel": float(acceleration),
+        })
+        return float(value), {
+            "coherent_feedback_target": float(target),
+            "coherent_feedback_applied": float(value),
+            "coherent_feedback_rate_per_s": float(rate),
+            "coherent_feedback_acceleration_per_s2": float(acceleration),
+            "coherent_feedback_jerk_per_s3": float(jerk),
+            "coherent_feedback_rate_limit_per_s": float(max_rate),
+            "coherent_feedback_accel_limit_per_s2": float(max_accel),
+            "coherent_feedback_jerk_limit_per_s3": float(max_jerk),
+        }
+
     def _compose_curve_steering(
             self, feed_forward: float, heading_feedback: float,
             cte_feedback: float, tractor_cte: float,
             heading_error_rad: float, cte_geometry_proven: bool,
-            lane_width_m: float, control_dt_s: Optional[float]) -> Tuple[float, dict]:
+            lane_width_m: float, control_dt_s: Optional[float],
+            speed_ms: float = 0.0,
+            curve_coherence_enabled: bool = False) -> Tuple[float, dict]:
         """Compose feed-forward and feedback with explicit geometric authority.
 
         Ackermann curvature remains the stable foundation of one monotonic
@@ -289,7 +426,19 @@ class Route:
                 "opposite_proof_s": 0.0,
                 "last_cte_side": 0,
                 "cte_cross_proof_s": 0.0,
+                "feedback_error_metric": None,
+                "feedback_worsening_s": 0.0,
+                "feedback_release_s": 0.0,
+                "feedback_active": False,
             })
+            if previous_curve_sign and curve_sign != previous_curve_sign:
+                # A spatial S transition is new immutable authority.  Do not
+                # carry the previous bend's feedback into the new direction.
+                state.update({
+                    "coherent_feedback": 0.0,
+                    "coherent_feedback_rate": 0.0,
+                    "coherent_feedback_accel": 0.0,
+                })
         elif curve_sign == 0:
             state["curve_sign"] = 0
             state["opposite_proof_s"] = 0.0
@@ -307,7 +456,16 @@ class Route:
         state["cte_cross_proof_s"] = cross_proof_s
 
         feedback = heading_feedback + cte_feedback
-        candidate = feed_forward + feedback
+        if (curve_coherence_enabled and curve_sign
+                and not previous_curve_sign):
+            # Entering the first proven bend must not discard an already valid
+            # correction. Coherence governs subsequent modulation, while a
+            # true S-curve sign change still resets the old bend above.
+            state.update({
+                "coherent_feedback": float(feedback),
+                "coherent_feedback_rate": 0.0,
+                "coherent_feedback_accel": 0.0,
+            })
         corridor_threshold = max(
             CURVE_OPPOSITE_CTE_MIN_M,
             min(1.00, max(2.4, lane_width_m) * 0.20))
@@ -332,8 +490,122 @@ class Route:
         state["opposite_proof_s"] = proof_s
         opposite_authorized = proof_s >= CURVE_OPPOSITE_PROOF_S
 
+        safe_cte = _clamp(
+            max(2.4, lane_width_m) * CURVE_FEEDBACK_SAFE_CTE_FRACTION,
+            CURVE_FEEDBACK_SAFE_CTE_MIN_M,
+            CURVE_FEEDBACK_SAFE_CTE_MAX_M)
+        error_metric = max(
+            abs(tractor_cte) / max(safe_cte, 1e-6),
+            abs(heading_error_rad)
+            / max(CURVE_FEEDBACK_SAFE_HEADING_RAD, 1e-6))
+        previous_metric = state.get("feedback_error_metric")
+        metric_delta = (0.0 if previous_metric is None
+                        else error_metric - float(previous_metric))
+        state["feedback_error_metric"] = float(error_metric)
+        worsening = bool(
+            curve_sign and previous_metric is not None
+            and metric_delta > CURVE_FEEDBACK_TREND_DEADBAND)
+        improving = bool(
+            curve_sign and previous_metric is not None
+            and metric_delta < -CURVE_FEEDBACK_TREND_DEADBAND)
+        worsening_s = float(
+            state.get("feedback_worsening_s", 0.0) or 0.0)
+        release_s = float(state.get("feedback_release_s", 0.0) or 0.0)
+        if worsening and error_metric >= 0.45:
+            worsening_s = min(
+                CURVE_FEEDBACK_WORSENING_PROOF_S * 2.0,
+                worsening_s + dt)
+            release_s = max(0.0, release_s - 2.0 * dt)
+        else:
+            worsening_s = max(0.0, worsening_s - dt)
+            if improving or error_metric <= 0.45:
+                release_s = min(
+                    CURVE_FEEDBACK_RELEASE_PROOF_S * 2.0,
+                    release_s + dt)
+            else:
+                release_s = max(0.0, release_s - dt)
+        feedback_active = bool(state.get("feedback_active", False))
+        urgent_feedback = bool(
+            opposite_authorized
+            or (cte_geometry_proven and error_metric >= 1.0))
+        if not curve_sign or urgent_feedback:
+            feedback_active = True
+        elif worsening_s >= CURVE_FEEDBACK_WORSENING_PROOF_S:
+            feedback_active = True
+        elif (feedback_active
+              and release_s >= CURVE_FEEDBACK_RELEASE_PROOF_S
+              and error_metric < 1.0):
+            feedback_active = False
+        state.update({
+            "feedback_worsening_s": float(worsening_s),
+            "feedback_release_s": float(release_s),
+            "feedback_active": bool(feedback_active),
+        })
+        if not curve_sign or not curve_coherence_enabled:
+            # Phase 4D is a curve-coherence contract.  Straight recovery must
+            # not acquire another delayed controller.  It is also unnecessary
+            # when no proven trailer swept-path target is opposing the curve:
+            # keep historical feedback and synchronize state for re-entry.
+            previous_applied = float(
+                state.get("coherent_feedback", 0.0) or 0.0)
+            feedback_target = applied_feedback = float(feedback)
+            state.update({
+                "coherent_feedback": float(feedback),
+                "coherent_feedback_rate": 0.0,
+                "coherent_feedback_accel": 0.0,
+            })
+            coherent_debug = {
+                "coherent_feedback_target": float(feedback),
+                "coherent_feedback_applied": float(feedback),
+                "coherent_feedback_rate_per_s": 0.0,
+                "coherent_feedback_acceleration_per_s2": 0.0,
+                "coherent_feedback_jerk_per_s3": 0.0,
+                "coherent_feedback_rate_limit_per_s": 0.0,
+                "coherent_feedback_accel_limit_per_s2": 0.0,
+                "coherent_feedback_jerk_limit_per_s3": 0.0,
+                "coherent_feedback_straight_bypass": True,
+                "curve_coherence_enabled": bool(curve_coherence_enabled),
+                "coherent_feedback_sync_delta": float(
+                    feedback - previous_applied),
+            }
+        else:
+            current_feedback = float(
+                state.get("coherent_feedback", 0.0) or 0.0)
+            # A quiet curve holds its last coherent correction instead of
+            # chasing every sample. Worsening/unsafe geometry accepts the new
+            # feedback; proven improvement releases it continuously to zero.
+            if feedback_active or urgent_feedback:
+                feedback_target = float(feedback)
+            elif release_s >= CURVE_FEEDBACK_RELEASE_PROOF_S:
+                # Release only the transient heading correction.  The CTE
+                # term contains the proven spatial trailer target and cannot
+                # be discarded in a tight bend merely because error is now
+                # improving.  It still reaches the command through the same
+                # derivative-bounded correction state.
+                feedback_target = float(cte_feedback)
+            else:
+                feedback_target = current_feedback
+            applied_feedback, coherent_debug = self._advance_coherent_feedback(
+                feedback_target, dt, speed_ms, urgent_feedback)
+            coherent_debug["coherent_feedback_straight_bypass"] = False
+            coherent_debug["curve_coherence_enabled"] = True
+        candidate = feed_forward + applied_feedback
+
         foundation_limited = False
         minimum_foundation = abs(feed_forward) * CURVE_FOUNDATION_RETAIN_FRACTION
+        coherent_foundation = bool(
+            curve_coherence_enabled and curve_sign
+            and not urgent_feedback and error_metric < 1.0)
+        if coherent_foundation:
+            # Inside the proven safe band, noisy counter-curve feedback must
+            # not erase most of the immutable foundation.  This is scoped to
+            # the moderate loaded-trailer regime and is immediately released
+            # for a proven departure; the global Phase 4C safety rule remains
+            # unchanged.
+            minimum_foundation = max(
+                minimum_foundation,
+                abs(feed_forward)
+                * CURVE_COHERENT_FOUNDATION_RETAIN_FRACTION)
         if curve_sign and not opposite_authorized:
             candidate_in_curve_direction = candidate * curve_sign
             if candidate_in_curve_direction < minimum_foundation:
@@ -344,12 +616,23 @@ class Route:
             "curve_foundation_active": bool(curve_sign),
             "curve_foundation_sign": int(curve_sign),
             "curve_foundation_minimum": float(minimum_foundation),
+            "curve_coherent_foundation": bool(coherent_foundation),
             "curve_foundation_limited": bool(foundation_limited),
             "opposite_sample_proven": bool(opposite_sample_proven),
             "opposite_correction_authorized": bool(opposite_authorized),
             "opposite_correction_proof_s": float(proof_s),
             "cte_cross_proof_s": float(cross_proof_s),
             "corridor_threshold_m": float(corridor_threshold),
+            "raw_feedback": float(feedback),
+            "feedback_error_metric": float(error_metric),
+            "feedback_metric_delta": float(metric_delta),
+            "feedback_worsening": bool(worsening),
+            "feedback_improving": bool(improving),
+            "feedback_worsening_proof_s": float(worsening_s),
+            "feedback_release_proof_s": float(release_s),
+            "feedback_trend_active": bool(feedback_active),
+            "feedback_urgent": bool(urgent_feedback),
+            **coherent_debug,
         }
 
     # --- Construction / persistence ------------------------------------------
@@ -1042,7 +1325,8 @@ class Route:
             # resets it fail-neutral because its geometry is new authority.
             self._reset_control_composition(
                 composition_authority,
-                preserve_trailer_offset=same_revision_lane_transition)
+                preserve_trailer_offset=same_revision_lane_transition,
+                preserve_curve_feedback=same_revision_lane_transition)
 
         # A plain nearest-waypoint lookup is ambiguous on divided motorways,
         # roundabouts and junctions.  Use the heading-aware segment selected by
@@ -1183,7 +1467,15 @@ class Route:
             feed_forward, heading_feedback, cte_feedback,
             cte, guidance_heading_error,
             cte_error_geometrically_proven,
-            lane_width_m, control_dt_s)
+            lane_width_m, control_dt_s, speed_ms=v,
+            curve_coherence_enabled=bool(
+                trailer_debug.get("accepted", False)
+                and abs(trailer_offset) > 0.05
+                # Tight R18-class geometry needs the proven spatial CTE
+                # correction immediately.  The captured pulse is the
+                # moderate R77--R117 regime where feedback noise can cancel
+                # most of a much smaller foundation.
+                and abs(feed_forward) < CURVE_FEEDBACK_MAX_FOUNDATION))
         steering_angle = steer * NORMALIZED_STEERING_ANGLE_RAD
         guidance_curvature = (math.tan(_clamp(
             steering_angle, -1.20, 1.20)) / TRUCK_WHEELBASE_M)
@@ -1240,6 +1532,9 @@ class Route:
         self.last_steering_debug = {
             "feed_forward": float(feed_forward),
             "feedback": float(scaled_feedback),
+            "feedback_applied": float(
+                composition_debug.get(
+                    "coherent_feedback_applied", scaled_feedback)),
             "heading_feedback": float(heading_feedback),
             "cte_feedback": float(cte_feedback),
             "feed_forward_angle_rad": float(
