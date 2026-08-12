@@ -16,7 +16,7 @@ from core.navigation.lane_trajectory import build_lane_trajectory
 from core.navigation.road_network import RoadNetwork
 from core.navigation.route import (
     NORMALIZED_STEERING_ANGLE_RAD,
-    TRUCK_WHEELBASE_M, Route,
+    TRACTOR_BODY_WIDTH_M, TRUCK_WHEELBASE_M, Route,
     curve_speed_limit_ms,
 )
 from plugins.autopilot.main import Plugin as AutopilotPlugin
@@ -317,13 +317,15 @@ class LaneGeometryAuditTests(unittest.TestCase):
                     self.assertAlmostEqual(live_cte, requested_cte, places=6)
                     self.assertLess(debug["cte_geometry_residual"], 1e-6)
                     self.assertFalse(debug["curve_direction_hold"])
-                    # The CTE component always points toward lane centre, but
-                    # the total command must retain the Ackermann turn needed
-                    # to remain on an R18 arc. Reversing the complete wheel
-                    # command here abandons the curve instead of recovering.
+                    # The CTE component always points toward lane centre.  It
+                    # may reduce the Ackermann turn all the way to the local
+                    # tangent, but cannot reverse the complete wheel command.
                     self.assertGreater(debug["cte_steer"] * live_cte, 0.0)
-                    self.assertGreater(
+                    self.assertGreaterEqual(
                         command * debug["local_curvature"], 0.0)
+                    if command == 0.0:
+                        self.assertTrue(
+                            debug["curve_sign_projection_active"])
 
     def test_attached_trailer_uses_proven_lane_width_to_swing_outward(self):
         """The 05:30--06:10 video hairpin must account for the semi axle."""
@@ -439,8 +441,12 @@ class LaneGeometryAuditTests(unittest.TestCase):
             trailer_peak, tractor_peak = replay(direction, True)
             with self.subTest(direction=direction):
                 self.assertGreater(old_trailer_peak, 1.80)
-                self.assertLess(trailer_peak, 1.00)
-                self.assertLess(tractor_peak, 1.00)
+                # Validate the complete vehicle envelope against the proven
+                # 4.7 m lane instead of an arbitrary 1.00 m axle threshold.
+                self.assertLess(
+                    trailer_peak + TRACTOR_BODY_WIDTH_M * 0.5, 4.7 * 0.5)
+                self.assertLess(
+                    tractor_peak + TRACTOR_BODY_WIDTH_M * 0.5, 4.7 * 0.5)
                 self.assertLess(trailer_peak, old_trailer_peak - 0.75)
 
     def test_real_222100_r54_entry_keeps_imminent_r18_curve_authority(self):
@@ -472,14 +478,16 @@ class LaneGeometryAuditTests(unittest.TestCase):
                 self.assertGreater(command * curve_sign, 0.0)
                 self.assertLess(abs(command), 0.08)
 
-    def test_real_224447_palisade_error_releases_tight_curve_hold(self):
-        """A real lane departure must override the tight-curve sign guard.
+    def test_real_224447_palisade_error_cannot_authorize_opposite_curve(self):
+        """A controller-created lane error cannot reverse curve authority.
 
         At 22:44:47 feed-forward was -0.240 while the independent feedback was
         +0.450 and CTE had reached -0.974 m. The old approach hold forced
         -0.204 anyway; one second later CTE was -2.515 m and localisation was
-        lost. Here Route projection and LaneMatch agree on the displacement,
-        unlike the synthetic localisation-chatter replay above.
+        lost.  Phase 4E removes that error-as-authority relay entirely.  Even
+        when Route projection and LaneMatch agree on the displacement, zero
+        steering follows the tangent back outward; an opposite command would
+        recreate the captured positive-feedback loop.
         """
         for curve_sign in (-1.0, 1.0):
             route = Route([(0.0, 0.0), (0.0, -100.0), (0.0, -200.0)])
@@ -499,12 +507,7 @@ class LaneGeometryAuditTests(unittest.TestCase):
             first_command = route.steering(
                 position, heading, 22.0 / 3.6,
                 cross_track_error_m=cte, control_dt_s=0.05)
-            # One displaced sample may reduce the Ackermann demand but cannot
-            # reverse it.  The same tractor CTE and heading must persist long
-            # enough to prove a real departure before recovery crosses zero.
-            self.assertGreater(
-                first_command * route.last_steering_debug["feed_forward"],
-                0.0)
+            self.assertEqual(first_command, 0.0)
             for _ in range(7):
                 command = route.steering(
                     position, heading, 22.0 / 3.6,
@@ -517,16 +520,19 @@ class LaneGeometryAuditTests(unittest.TestCase):
                 self.assertFalse(debug["curve_direction_hold"])
                 self.assertLess(
                     debug["feed_forward"] * debug["feedback"], 0.0)
-                self.assertLess(command * debug["feed_forward"], 0.0)
+                self.assertEqual(command, 0.0)
+                self.assertTrue(debug["curve_sign_projection_active"])
+                self.assertNotIn("opposite_correction_authorized", debug)
 
-    def test_real_214845_r65_lane_edge_error_releases_curve_direction_hold(self):
-        """Replay the exact mechanism behind the latest right-curve exit.
+    def test_real_214845_r65_error_cannot_reverse_monotonic_curve(self):
+        """Replay the R65 error without reintroducing opposite authority.
 
         At 38 km/h the captured R65 bend had +0.203 feed-forward, -0.564
         confirmed feedback, -9 degrees of heading error and 2.128 m CTE.  The
-        old generic R70 guard replaced the required opposite correction with
-        +0.172 and kept steering off the road.  R18 protection remains covered
-        above, but a normal R65 bend at the lane edge must recover across zero.
+        old stateful controller eventually allowed the feedback to cross zero.
+        The real 22:59 replay proves that this creates a positive feedback
+        relay.  The unified controller may release to the tangent (zero) but
+        cannot command against unchanged immutable curvature.
         """
         route = Route(self._arc(-1.0, 65.0, 170.0))
         base_position = route.points[25]
@@ -544,8 +550,7 @@ class LaneGeometryAuditTests(unittest.TestCase):
         first_command = route.steering(
             position, heading, 38.0 / 3.6,
             cross_track_error_m=requested_cte, control_dt_s=0.05)
-        self.assertGreater(
-            first_command * route.last_steering_debug["feed_forward"], 0.0)
+        self.assertEqual(first_command, 0.0)
         for _ in range(7):
             command = route.steering(
                 position, heading, 38.0 / 3.6,
@@ -555,7 +560,9 @@ class LaneGeometryAuditTests(unittest.TestCase):
         self.assertLess(debug["feedback"], -0.50)
         self.assertFalse(debug["curve_direction_hold_eligible"])
         self.assertFalse(debug["curve_direction_hold"])
-        self.assertLess(command, -0.30)
+        self.assertEqual(command, 0.0)
+        self.assertTrue(debug["curve_sign_projection_active"])
+        self.assertNotIn("opposite_correction_authorized", debug)
         large_error_lookahead = debug["guidance_lookahead_m"]
 
         # Recovery is continuous geometry, not a thresholded direction hold.
@@ -706,14 +713,14 @@ class LaneGeometryAuditTests(unittest.TestCase):
                     for previous, current in zip(
                         applied_commands, applied_commands[1:])), 0.031)
 
-    def test_real_broad_curve_lane_error_cannot_be_cancelled_until_late(self):
+    def test_real_broad_curve_error_releases_to_tangent_not_opposite(self):
         """Regression for the 16:08:21--23 drift-then-snap drive trace.
 
         The captured truck reached 1.760 m from lane centre at 66 km/h while
         the command remained 0.010.  Exercise both turn directions with the
-        opposing confirmed CTE on a measured 400 m-radius bend.  Recovery must
-        already point toward the lane centre before a large heading error can
-        develop; tight-prefab tuning and global limits are not involved.
+        opposing confirmed CTE on a measured 400 m-radius bend.  Releasing the
+        wheel to the tangent is sufficient to cross outward relative to the
+        bend; the CTE sample itself may not manufacture opposite authority.
         """
         for direction in (-1.0, 1.0):
             route = Route(self._arc(direction, 400.0, 300.0))
@@ -724,8 +731,12 @@ class LaneGeometryAuditTests(unittest.TestCase):
                 position, heading, 66.0 / 3.6,
                 cross_track_error_m=adverse_cte)
             with self.subTest(direction=direction):
-                self.assertEqual(math.copysign(1.0, command), direction)
-                self.assertGreaterEqual(abs(command), 0.08)
+                self.assertEqual(command, 0.0)
+                self.assertTrue(route.last_steering_debug[
+                    "curve_sign_projection_active"])
+                self.assertNotIn(
+                    "opposite_correction_authorized",
+                    route.last_steering_debug)
 
     def test_real_211258_r120_bend_never_uses_straight_recovery_gain(self):
         """The captured R119--R122 boundary has no binary gain switch."""

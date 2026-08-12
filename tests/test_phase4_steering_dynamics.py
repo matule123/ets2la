@@ -376,30 +376,28 @@ class Phase4SteeringDynamicsTests(unittest.TestCase):
 
     def test_real_curve_exit_phase_lag_settles_on_the_following_straight(self):
         # 12:45:44--12:46:00 capture: the R83 exit reaches 60 km/h, then the
-        # old target/output pair alternates at 0.5--0.8 Hz.  CTE grows to
-        # 1.188 m and heading error to 13.2 degrees while feed-forward is
-        # effectively zero.  The 0.85 s effective response reproduces the
-        # observed command + game-wheel/vehicle phase in the closed loop.
+        # old target/output pair alternates at 0.5--0.8 Hz.  Phase 4E removed
+        # the Route-level coherent-feedback lag that was previously folded
+        # into the historical 0.85 s "effective" response.  Modelling that
+        # removed controller delay again would double-count the root cause, so
+        # this replay now uses the independently observed 0.32 s game wheel.
         for direction in (-1.0, 1.0):
             points = _arc_path(direction, 83.0, 90.0, 300.0)
             old = _simulate_route(
-                points, 16.67, wheel_response_s=0.85,
+                points, 16.67, wheel_response_s=0.32,
                 dynamics_factory=_Phase4CriticalSettlingDynamics)
             repaired = _simulate_route(
-                points, 16.67, wheel_response_s=0.85)
+                points, 16.67, wheel_response_s=0.32)
             with self.subTest(direction=direction):
-                self.assertGreater(old["max_cte_m"], 1.45)
-                # The Phase 4C curve foundation removes one controller-side
-                # false reversal even when this test deliberately restores
-                # the old actuator lag. The historical baseline still has
-                # nine visible half-cycles and the same divergent CTE/heading.
-                self.assertGreaterEqual(old["sign_changes"], 9)
-                self.assertGreater(old["max_heading_error_deg"], 8.0)
+                self.assertGreater(old["max_cte_m"],
+                                   repaired["max_cte_m"] * 2.0)
+                self.assertGreaterEqual(old["reaction_delay_s"], 0.10)
+                self.assertLessEqual(repaired["reaction_delay_s"], 0.05)
                 self.assertLess(repaired["max_cte_m"], 0.70)
                 self.assertLess(repaired["rms_cte_m"], 0.25)
                 self.assertLess(abs(repaired["final_cte_m"]), 0.08)
                 self.assertLess(repaired["max_heading_error_deg"], 4.5)
-                self.assertLessEqual(repaired["sign_changes"], 7)
+                self.assertLessEqual(repaired["sign_changes"], 2)
 
     def test_captured_targets_do_not_retain_the_previous_half_cycle(self):
         old = _replay_captured_curve_exit(
