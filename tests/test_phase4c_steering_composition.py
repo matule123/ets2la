@@ -24,51 +24,50 @@ class Phase4CSteeringCompositionTests(unittest.TestCase):
         return math.atan2(-(second[0] - first[0]),
                           -(second[1] - first[1]))
 
-    def test_real_log_225929_225934_positive_feedback_is_removed(self):
+    def test_legacy_log_terms_are_not_a_second_steering_authority(self):
         # Exact one-second controller contributions from the failed
         # 2026-08-11 drive.  The old stateful controller returned +0.473 at
         # 22:59:33 in this *left* bend; the unified composition is deliberately
         # a pure function of the three signed steering contributions.
         samples = (
-            # time, curve_ref, heading_fb, cte_fb, Route CTE, heading, expected
-            ("22:59:29.360", -0.020, 0.020, 0.011, 0.034, 0.6, 0.000),
-            ("22:59:30.383", -0.036, 0.010, 0.024, 0.118, 0.3, -0.002),
-            ("22:59:31.396", -0.042, 0.001, 0.036, 0.205, 0.0, -0.005),
-            ("22:59:32.428", -0.083, 0.083, 0.077, 0.311, 2.5, 0.000),
-            ("22:59:33.428", -0.103, 0.251, 0.392, 2.478, 7.5, 0.000),
+            # time, curve_ref, heading_fb, cte_fb, Route CTE, heading
+            ("22:59:29.360", -0.020, 0.020, 0.011, 0.034, 0.6),
+            ("22:59:30.383", -0.036, 0.010, 0.024, 0.118, 0.3),
+            ("22:59:31.396", -0.042, 0.001, 0.036, 0.205, 0.0),
+            ("22:59:32.428", -0.083, 0.083, 0.077, 0.311, 2.5),
+            ("22:59:33.428", -0.103, 0.251, 0.392, 2.478, 7.5),
             ("22:59:34.830", -0.134, -0.930, -0.450, -3.169, -27.6,
-             -1.514),
+             ),
         )
         route = Route([(0.0, 0.0), (0.0, -20.0)])
-        projected_times = []
         for (timestamp, feed_forward, heading_fb, cte_fb, tractor_cte,
-             heading_deg, expected) in samples:
+             heading_deg) in samples:
             command, debug = route._compose_curve_steering(
                 feed_forward, heading_fb, cte_fb)
-            self.assertAlmostEqual(command, expected, places=9,
+            self.assertAlmostEqual(
+                command, feed_forward + heading_fb + cte_fb, places=9,
                                    msg=timestamp)
-            self.assertGreaterEqual(command * feed_forward, 0.0,
-                                    msg=timestamp)
             self.assertAlmostEqual(
                 debug["raw_feedback"], heading_fb + cte_fb, places=9)
+            self.assertFalse(debug["curve_sign_projection_active"])
             self.assertNotIn("opposite_correction_authorized", debug)
             self.assertNotIn("opposite_correction_proof_s", debug)
-            if debug["curve_sign_projection_active"]:
-                projected_times.append(timestamp)
-        self.assertEqual(projected_times, [
-            "22:59:29.360", "22:59:32.428", "22:59:33.428"])
+        # These captured values came from the removed three-controller path.
+        # Production Route now obtains all three debug terms by decomposing one
+        # pursuit solution; this helper cannot clip or authorize it again.
+        self.assertFalse(hasattr(route, "_curve_composition_state"))
 
-    def test_feedback_may_reduce_curve_to_zero_but_never_reverse_it(self):
+    def test_composition_preserves_the_complete_geometric_solution(self):
         route = Route([(0.0, 0.0), (0.0, -20.0)])
         reduced, reduced_debug = route._compose_curve_steering(
             -0.240, 0.080, 0.100)
-        projected, projected_debug = route._compose_curve_steering(
+        crossed, crossed_debug = route._compose_curve_steering(
             -0.240, 0.180, 0.270)
         self.assertAlmostEqual(reduced, -0.060)
         self.assertFalse(reduced_debug["curve_sign_projection_active"])
-        self.assertEqual(projected, 0.0)
-        self.assertTrue(projected_debug["curve_sign_projection_active"])
-        self.assertNotIn("opposite_correction_authorized", projected_debug)
+        self.assertAlmostEqual(crossed, 0.210)
+        self.assertFalse(crossed_debug["curve_sign_projection_active"])
+        self.assertNotIn("opposite_correction_authorized", crossed_debug)
 
     def test_s_curve_changes_foundation_direction_immediately(self):
         route = Route([(0.0, 0.0), (0.0, -20.0)])
@@ -211,7 +210,7 @@ class Phase4CSteeringCompositionTests(unittest.TestCase):
         self.assertLess(max(predicted) - min(predicted), 1e-9)
         self.assertLess(max(applied) - min(applied), 1e-9)
 
-    def test_cte_heading_noise_cannot_authorize_curve_reversal(self):
+    def test_composition_has_no_noise_driven_authority_state(self):
         route = Route([(0.0, 0.0), (0.0, -20.0)])
         outputs = []
         for index in range(80):
@@ -219,8 +218,11 @@ class Phase4CSteeringCompositionTests(unittest.TestCase):
             command, debug = route._compose_curve_steering(
                 0.40, -0.34 * noise, -0.20 * noise)
             outputs.append(command)
-        self.assertTrue(all(command >= 0.0 for command in outputs))
-        self.assertIn(0.0, outputs)
+        self.assertTrue(all(abs(value - 0.94) < 1e-12
+                            for value in outputs[::2]))
+        self.assertTrue(all(abs(value + 0.14) < 1e-12
+                            for value in outputs[1::2]))
+        self.assertFalse(debug["curve_sign_projection_active"])
         self.assertNotIn("opposite_correction_authorized", debug)
 
     def test_lane_tangent_is_scoped_to_lane_id_revision_and_deck(self):

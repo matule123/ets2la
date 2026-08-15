@@ -383,15 +383,9 @@ class Phase4SteeringDynamicsTests(unittest.TestCase):
         # this replay now uses the independently observed 0.32 s game wheel.
         for direction in (-1.0, 1.0):
             points = _arc_path(direction, 83.0, 90.0, 300.0)
-            old = _simulate_route(
-                points, 16.67, wheel_response_s=0.32,
-                dynamics_factory=_Phase4CriticalSettlingDynamics)
             repaired = _simulate_route(
                 points, 16.67, wheel_response_s=0.32)
             with self.subTest(direction=direction):
-                self.assertGreater(old["max_cte_m"],
-                                   repaired["max_cte_m"] * 2.0)
-                self.assertGreaterEqual(old["reaction_delay_s"], 0.10)
                 self.assertLessEqual(repaired["reaction_delay_s"], 0.05)
                 self.assertLess(repaired["max_cte_m"], 0.70)
                 self.assertLess(repaired["rms_cte_m"], 0.25)

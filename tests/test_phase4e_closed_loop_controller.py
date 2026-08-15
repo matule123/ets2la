@@ -137,7 +137,8 @@ def _authority_payload(lane_identity, *, revision, elevation_layer=None):
 
 def _simulate_closed_loop(
         points, speed_ms, *, noisy_lane_match=False, delayed_ticks=False,
-        authority_change_progress_m=None, with_trailer=False):
+        authority_change_progress_m=None, with_trailer=False,
+        initial_lateral_m=0.0, initial_heading_error_deg=0.0):
     """Run command -> actuator -> bicycle pose -> next command at 20 Hz.
 
     ``SteeringDynamics`` is UltraPilot's physical execution stage.  The queue
@@ -147,7 +148,13 @@ def _simulate_closed_loop(
     route = Route(points)
     dynamics = SteeringDynamics()
     x, z = route.points[0]
-    heading = _heading_between(route.points[0], route.points[2])
+    path_heading = _heading_between(route.points[0], route.points[2])
+    initial_dx = route.points[2][0] - route.points[0][0]
+    initial_dz = route.points[2][1] - route.points[0][1]
+    initial_length = math.hypot(initial_dx, initial_dz)
+    x += initial_dz / initial_length * float(initial_lateral_m)
+    z -= initial_dx / initial_length * float(initial_lateral_m)
+    heading = path_heading + math.radians(float(initial_heading_error_deg))
     game_wheel = 0.0
     delay = deque([0.0] * GAME_COMMAND_DELAY_TICKS,
                   maxlen=GAME_COMMAND_DELAY_TICKS + 1)
@@ -285,6 +292,9 @@ def _simulate_closed_loop(
             abs(sample["acceleration"]) for sample in samples),
         "max_jerk": max(acceleration_steps, default=0.0),
         "sign_changes": _sign_changes(outputs),
+        "final_cte_m": ctes[-1],
+        "final_heading_error_deg": math.degrees(
+            samples[-1]["heading_error_rad"]),
         "progress_monotonic": all(
             second["progress_m"] + 1e-6 >= first["progress_m"]
             for first, second in zip(samples, samples[1:])),
@@ -292,7 +302,7 @@ def _simulate_closed_loop(
 
 
 class Phase4EClosedLoopControllerTests(unittest.TestCase):
-    def test_real_225932_positive_feedback_cannot_turn_against_left_curve(self):
+    def test_real_225932_relay_and_212431_negative_zero_gate_are_removed(self):
         # 22:59:33: the old opposite-authority relay applied +0.576 to a
         # -0.103 left-curve foundation and emitted +0.473 (right steering).
         curve_reference = -0.103
@@ -301,21 +311,37 @@ class Phase4EClosedLoopControllerTests(unittest.TestCase):
         self.assertAlmostEqual(legacy_command, +0.473, places=6)
 
         route = Route([(0.0, 0.0), (0.0, 20.0)])
-        new_command, debug = route._compose_curve_steering(
+        decomposed_legacy_terms, debug = route._compose_curve_steering(
             curve_reference,
             heading_feedback=+0.251,
             cte_feedback=+0.392,
         )
-        self.assertEqual(new_command, 0.0)
-        self.assertTrue(debug["curve_sign_projection_active"])
-        self.assertLessEqual(new_command * -1.0, 0.0)
+        self.assertAlmostEqual(decomposed_legacy_terms, +0.540, places=9)
+        self.assertFalse(debug["curve_sign_projection_active"])
         self.assertNotIn("opposite_correction_authorized", debug)
 
-        # The preceding 22:59:32 row must obey the same invariant rather than
-        # becoming the first self-created error in a later control frame.
-        preceding, _ = route._compose_curve_steering(
-            -0.083, +0.083, +0.077)
-        self.assertEqual(preceding, 0.0)
+        # 21:24:31--33 was a different failure of the replacement gate: local
+        # curvature logged as -0.000, but the old sign projection still forced
+        # the required +0.250 recovery to zero. The composition layer now
+        # preserves the one geometric pursuit result even for tiny curvature.
+        microscopic, microscopic_debug = route._compose_curve_steering(
+            -1e-7, +0.133, +0.117)
+        self.assertAlmostEqual(microscopic, 0.2499999, places=9)
+        self.assertFalse(
+            microscopic_debug["curve_sign_projection_active"])
+
+        # Feed the command through the real 20 Hz actuator/bicycle loop on a
+        # numerically left but physically straight R500 km lane. Recovery must
+        # be allowed to oppose that microscopic sign and must not create the
+        # 2.805 m localisation-loss excursion from the log.
+        points, _ = _path_from_sections(((-2e-6, 180.0),))
+        metrics = _simulate_closed_loop(
+            points, 12.0, initial_lateral_m=1.159,
+            initial_heading_error_deg=3.0)
+        self.assertLess(metrics["samples"][0]["curvature_per_m"], 0.0)
+        self.assertGreater(metrics["samples"][0]["raw"], 0.0)
+        self.assertLess(metrics["max_cte_m"], 1.55)
+        self.assertLess(abs(metrics["final_cte_m"]), 0.05)
 
     def test_left_right_r35_r83_are_stable_at_low_and_road_speed(self):
         for direction in (-1.0, 1.0):
@@ -349,6 +375,62 @@ class Phase4EClosedLoopControllerTests(unittest.TestCase):
                         self.assertLessEqual(metrics["max_acceleration"], 14.01)
                         self.assertLessEqual(metrics["max_jerk"], 561.0)
                         self.assertTrue(metrics["progress_monotonic"])
+
+    def test_r18_roundabout_is_stable_in_both_directions(self):
+        for direction in (-1.0, 1.0):
+            points, boundaries = _constant_curve_path(
+                direction, 18.0, sweep_deg=270.0, exit_m=45.0)
+            metrics = _simulate_closed_loop(points, 5.5)
+            turn = [sample for sample in metrics["samples"]
+                    if boundaries[0] + 8.0 < sample["progress_m"]
+                    < boundaries[1] - 4.0]
+            with self.subTest(direction=direction):
+                self.assertLess(metrics["max_cte_m"], 0.35)
+                self.assertLess(metrics["rms_cte_m"], 0.12)
+                self.assertLess(metrics["max_heading_error_deg"], 5.0)
+                self.assertEqual(_sign_changes(
+                    [sample["output"] for sample in turn]), 0)
+                self.assertLessEqual(metrics["max_step"], 0.031)
+
+    def test_offcentre_and_heading_error_recover_before_lane_loss(self):
+        paths = [("straight", _path_from_sections(((0.0, 180.0),))[0])]
+        for direction in (-1.0, 1.0):
+            paths.append((
+                "r83-%+d" % direction,
+                _constant_curve_path(direction, 83.0)[0]))
+        initial_states = (
+            (-1.20, -3.0), (-1.20, +3.0),
+            (+1.20, -3.0), (+1.20, +3.0),
+        )
+        for name, points in paths:
+            for lateral_m, heading_deg in initial_states:
+                metrics = _simulate_closed_loop(
+                    points, 12.0, initial_lateral_m=lateral_m,
+                    initial_heading_error_deg=heading_deg)
+                with self.subTest(
+                        path=name, lateral=lateral_m,
+                        heading=heading_deg):
+                    self.assertLess(metrics["max_cte_m"], 1.60)
+                    self.assertLess(abs(metrics["final_cte_m"]), 0.08)
+                    self.assertLess(metrics["max_heading_error_deg"], 6.5)
+                    self.assertLessEqual(metrics["max_step"], 0.031)
+                    self.assertLessEqual(metrics["sign_changes"], 4)
+                    self.assertTrue(metrics["progress_monotonic"])
+
+    def test_66_kmh_lane_error_recovers_inside_authority_boundary(self):
+        points, _ = _path_from_sections(((0.0, 300.0),))
+        for lateral_m, heading_deg in (
+                (-1.20, -3.0), (-1.20, +3.0),
+                (+1.20, -3.0), (+1.20, +3.0)):
+            metrics = _simulate_closed_loop(
+                points, 66.0 / 3.6, initial_lateral_m=lateral_m,
+                initial_heading_error_deg=heading_deg)
+            with self.subTest(lateral=lateral_m, heading=heading_deg):
+                self.assertLess(metrics["max_cte_m"], 1.75)
+                self.assertLess(abs(metrics["final_cte_m"]), 0.05)
+                self.assertLess(metrics["max_heading_error_deg"], 5.5)
+                self.assertLessEqual(metrics["max_step"], 0.031)
+                self.assertLessEqual(metrics["sign_changes"], 4)
 
     def test_s_curve_reverses_once_and_remains_closed_loop_stable(self):
         points, boundaries = _s_curve_path()
@@ -466,6 +548,71 @@ class Phase4EClosedLoopControllerTests(unittest.TestCase):
                             - before["heading_error_rad"]),
                         math.radians(0.5))
         self.assertLess(abs(after["raw"] - before["raw"]), 0.04)
+
+    def test_quantised_elevation_change_uses_real_3d_continuity(self):
+        """A continuous grade may cross layer 47->49 without a wheel step."""
+        points, _authorities, boundary = _point_authority_r83_fixture()
+        world_points = [
+            (point[0], index * 0.20, point[1])
+            for index, point in enumerate(points)
+        ]
+        authorities = [
+            (ROAD_R83_LANE, 47) if index <= boundary
+            else (PREFAB_R83_LANE, 49)
+            for index in range(len(points))
+        ]
+        commands = []
+        for index, lane, revision, layer in (
+                (boundary - 1, ROAD_R83_LANE, 12, 47),
+                (boundary + 1, PREFAB_R83_LANE, 13, 49)):
+            route = Route(
+                world_points, point_authorities=authorities)
+            heading = _heading_between(
+                route.points[index - 1], route.points[index + 1])
+            command = route.steering(
+                route.points[index], heading, 11.0,
+                cross_track_error_m=0.0,
+                control_authority=_authority_payload(
+                    lane, revision=revision, elevation_layer=layer),
+                control_dt_s=DT_S)
+            self.assertTrue(route.last_steering_debug["authority_valid"])
+            commands.append(command)
+        self.assertLess(abs(commands[1] - commands[0]), 0.04)
+
+        probe = Route(world_points, point_authorities=authorities)
+        self.assertTrue(probe._authority_geometry_compatible(
+            authorities[boundary], authorities[boundary + 1],
+            boundary, boundary + 1))
+
+    def test_bridge_vertical_step_cannot_enter_pursuit_geometry(self):
+        """A nearby elevated road is not a forward pursuit target."""
+        lower = [(0.0, 0.0, float(z)) for z in range(0, 21, 2)]
+        upper = [
+            (float(x), 7.0, 22.0) for x in range(0, 21, 2)
+        ]
+        world_points = lower + upper
+        boundary = len(lower) - 1
+        authorities = [
+            (ROAD_R83_LANE, 0) if index <= boundary
+            else (PREFAB_R83_LANE, 2)
+            for index in range(len(world_points))
+        ]
+        route = Route(world_points, point_authorities=authorities)
+        self.assertFalse(route._authority_geometry_compatible(
+            authorities[boundary], authorities[boundary + 1],
+            boundary, boundary + 1))
+        index = boundary - 1
+        command = route.steering(
+            route.points[index], math.pi, 8.0,
+            cross_track_error_m=0.0,
+            control_authority=_authority_payload(
+                ROAD_R83_LANE, revision=12, elevation_layer=0),
+            control_dt_s=DT_S)
+        self.assertTrue(route.last_steering_debug["authority_valid"])
+        self.assertLess(abs(command), 1e-9)
+        self.assertLessEqual(
+            route.last_steering_debug["pursuit_target_progress_m"],
+            route._cumulative_m[boundary] + 1e-9)
 
     def test_early_live_lane_id_cannot_jump_to_distant_future_run(self):
         """A future prefab LaneId 13 m ahead is not current authority."""

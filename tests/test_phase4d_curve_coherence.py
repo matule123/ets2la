@@ -33,27 +33,22 @@ class StatelessCurveCompositionTests(unittest.TestCase):
         return route._compose_curve_steering(
             feed_forward, heading_fb, cte_fb)
 
-    def test_real_monotonic_curve_replay_is_exact_and_never_reverses(self):
+    def test_removed_controller_terms_are_composed_without_hidden_state(self):
         route = Route([(0.0, 0.0), (0.0, -20.0)])
         commands = []
         for sample in self.REAL_CURVE_SAMPLES:
             timestamp, feed_forward, heading_fb, cte_fb, *_rest = sample
             command, debug = self._compose(route, sample)
             unprojected = feed_forward + heading_fb + cte_fb
-            expected = (0.0 if unprojected * feed_forward < 0.0
-                        else unprojected)
             commands.append(command)
-            self.assertAlmostEqual(command, expected, places=12,
+            self.assertAlmostEqual(command, unprojected, places=12,
                                    msg=timestamp)
-            self.assertGreaterEqual(command * feed_forward, 0.0,
-                                    msg=timestamp)
-            self.assertEqual(
-                debug["curve_sign_projection_active"],
-                unprojected * feed_forward < 0.0)
+            self.assertFalse(debug["curve_sign_projection_active"])
             self.assertNotIn("opposite_correction_authorized", debug)
             self.assertNotIn("coherent_feedback_rate_per_s", debug)
             self.assertNotIn("feedback_worsening_s", debug)
-        self.assertTrue(all(command <= 0.0 for command in commands))
+        self.assertTrue(any(command > 0.0 for command in commands))
+        self.assertTrue(any(command < 0.0 for command in commands))
 
     def test_same_inputs_are_independent_of_history_speed_and_dt(self):
         target = (-0.18, 0.035, 0.070, 0.42, math.radians(1.8))
@@ -71,7 +66,7 @@ class StatelessCurveCompositionTests(unittest.TestCase):
         self.assertTrue(all(value == results[0] for value in results))
         self.assertAlmostEqual(results[0], -0.075, places=12)
 
-    def test_feedback_reduces_both_curve_directions_to_zero_not_beyond(self):
+    def test_composition_does_not_reintroduce_a_curve_sign_gate(self):
         route = Route([(0.0, 0.0), (0.0, -20.0)])
         for direction in (-1.0, 1.0):
             for correction in (0.04, 0.12, 0.30, 0.90):
@@ -81,18 +76,16 @@ class StatelessCurveCompositionTests(unittest.TestCase):
                     -direction * correction * 0.60)
                 with self.subTest(direction=direction,
                                   correction=correction):
-                    self.assertGreaterEqual(command * direction, 0.0)
-                    self.assertLessEqual(abs(command), 0.24 + 1e-12)
-                    self.assertEqual(
-                        debug["curve_sign_projection_active"],
-                        correction > 0.24)
-            # A severe controller-created error is not geometric authority to
-            # steer against the immutable monotonic bend.
+                    self.assertAlmostEqual(
+                        command, direction * (0.24 - correction), places=12)
+                    self.assertFalse(debug["curve_sign_projection_active"])
+            # The helper is only an exact decomposition of the authoritative
+            # pursuit result. It neither grants nor removes steering authority.
             command, debug = route._compose_curve_steering(
                 direction * 0.24, -direction * 0.30,
                 -direction * 0.35)
-            self.assertEqual(command, 0.0)
-            self.assertTrue(debug["curve_sign_projection_active"])
+            self.assertAlmostEqual(command, -direction * 0.41, places=12)
+            self.assertFalse(debug["curve_sign_projection_active"])
             self.assertNotIn("opposite_correction_authorized", debug)
 
     def test_true_s_curve_switches_foundation_sign_immediately(self):
