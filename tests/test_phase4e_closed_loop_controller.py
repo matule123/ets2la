@@ -215,6 +215,8 @@ def _simulate_closed_loop(
             control_authority=authority,
             control_dt_s=dt,
         )
+        trailer_debug = route.last_steering_debug.get(
+            "trailer_envelope", {})
         curvature = float(route.last_steering_debug.get(
             "local_curvature", 0.0))
         output = dynamics.update(
@@ -237,9 +239,16 @@ def _simulate_closed_loop(
             trailer_heading += (
                 float(speed_ms) / TRAILER_EFFECTIVE_AXLE_DISTANCE_M
                 * math.sin(articulation) * dt)
-            trailer_speed = float(speed_ms) * math.cos(articulation)
-            trailer_x += -math.sin(trailer_heading) * trailer_speed * dt
-            trailer_z += -math.cos(trailer_heading) * trailer_speed * dt
+            # Keep the axle kinematically tied to the tractor hitch. Two
+            # independently Euler-integrated world positions accumulated a
+            # fictitious metre-scale hitch stretch on long bends and made the
+            # trailer-envelope replay measure numerical drift as off-tracking.
+            trailer_x = (
+                x + math.sin(trailer_heading)
+                * TRAILER_EFFECTIVE_AXLE_DISTANCE_M)
+            trailer_z = (
+                z + math.cos(trailer_heading)
+                * TRAILER_EFFECTIVE_AXLE_DISTANCE_M)
 
         new_segment = route.tracking_index((x, z), heading)
         new_progress = route.tracking_progress((x, z), heading)
@@ -262,8 +271,9 @@ def _simulate_closed_loop(
             "lane": lane_name,
             "revision": revision,
             "trailer_offset_m": float(
-                route.last_steering_debug.get("trailer_envelope", {}).get(
-                    "applied_offset_m", 0.0)),
+                trailer_debug.get("applied_offset_m", 0.0)),
+            "trailer_cte_m": float(
+                trailer_debug.get("trailer_cte_m", 0.0)),
         })
         elapsed += dt
         frame += 1
@@ -302,6 +312,128 @@ def _simulate_closed_loop(
 
 
 class Phase4EClosedLoopControllerTests(unittest.TestCase):
+    def test_unscoped_curve_uses_a_centred_tangent_and_exact_curvature(self):
+        """Legacy paths cannot lose half their turn to a forward secant."""
+        for direction in (-1.0, 1.0):
+            for radius_m in (18.0, 35.0, 83.0):
+                points, boundaries = _constant_curve_path(
+                    direction, radius_m, sweep_deg=180.0)
+                route = Route(points)
+                progress = boundaries[0] + radius_m * 0.70
+                position = route._point_at_progress(progress)
+                heading = _heading_between(
+                    route._point_at_progress(progress - 6.0),
+                    route._point_at_progress(progress + 6.0))
+                route.steering(
+                    position, heading, 8.0, cross_track_error_m=0.0,
+                    control_dt_s=DT_S)
+                debug = route.last_steering_debug
+                expected = direction / radius_m
+                with self.subTest(direction=direction, radius=radius_m):
+                    self.assertAlmostEqual(
+                        debug["preview_curvature"], expected, delta=3e-5)
+                    self.assertAlmostEqual(
+                        debug["local_curvature"], expected, delta=3e-5)
+                    self.assertEqual(
+                        math.copysign(1.0, debug["feed_forward"]),
+                        direction)
+
+    def test_clamped_preview_endpoint_is_counted_only_once(self):
+        """A LaneId endpoint cannot gain steering weight by duplication."""
+        points = [
+            (0.0, 0.0), (0.0, 5.0), (0.0, 10.0),
+            (0.5, 15.0), (2.0, 20.0), (5.0, 24.0),
+        ]
+        route = Route(points)
+        progress = 18.0
+        maximum = route._cumulative_m[-1]
+        origin = route._point_at_progress(progress)
+        heading = _heading_between(
+            route._point_at_progress(progress - 3.0),
+            route._point_at_progress(progress + 3.0))
+        solution = route._pursuit_geometry_solution(
+            origin, heading, progress, 8.0, maximum)
+        unique_progresses = (22.0, 24.0, maximum)
+        unique_angles = [route._pursuit_steering_angle(
+            origin, heading, route._point_at_progress(value))[0]
+                         for value in unique_progresses]
+        self.assertAlmostEqual(
+            solution[0], statistics.fmean(unique_angles), places=12)
+        # Three requested horizons clamp to ``maximum``. The old result gave
+        # that one endpoint 3/5 of all authority instead of one unique vote.
+        duplicated = statistics.fmean(
+            unique_angles[:2] + [unique_angles[-1]] * 3)
+        self.assertGreater(abs(solution[0] - duplicated), 0.002)
+
+    def test_20260815_loaded_compound_bends_keep_one_curve_direction(self):
+        """Closed-loop reconstruction of the 22:23:37--22:25:53 drive."""
+        points, boundaries = _path_from_sections((
+            (0.0, 50.0),
+            (-1.0 / 115.0, 85.0),
+            (-1.0 / 30.0, 55.0),
+            (0.0, 35.0),
+            (+1.0 / 22.0, 85.0),
+            (0.0, 70.0),
+        ))
+        metrics = _simulate_closed_loop(
+            points, 8.0, with_trailer=True,
+            noisy_lane_match=True, delayed_ticks=True)
+        bends = (
+            (boundaries[0] + 10.0, boundaries[1] - 8.0, -1.0),
+            (boundaries[1] + 10.0, boundaries[2] - 8.0, -1.0),
+            (boundaries[3] + 10.0, boundaries[4] - 8.0, +1.0),
+        )
+        for start, end, direction in bends:
+            samples = [sample for sample in metrics["samples"]
+                       if start < sample["progress_m"] < end]
+            self.assertTrue(samples)
+            self.assertEqual(_sign_changes(
+                [sample["output"] for sample in samples]), 0)
+            self.assertFalse(any(
+                sample["raw"] * direction < -1e-9
+                for sample in samples))
+            self.assertLessEqual(max(
+                abs(sample["cte_m"]) for sample in samples), 0.95)
+            self.assertLessEqual(max(
+                abs(sample["trailer_cte_m"]) for sample in samples), 1.05)
+        self.assertLessEqual(metrics["max_heading_error_deg"], 7.0)
+        self.assertLessEqual(metrics["max_step"], 0.061)
+        self.assertLess(abs(metrics["final_cte_m"]), 0.08)
+        self.assertTrue(metrics["progress_monotonic"])
+
+    def test_loaded_trailer_r18_r35_r83_balances_both_axles(self):
+        scenarios = (
+            (18.0, 5.5, 270.0),
+            (35.0, 8.5, 140.0),
+            (83.0, 16.67, 105.0),
+        )
+        for direction in (-1.0, 1.0):
+            for radius_m, speed_ms, sweep_deg in scenarios:
+                points, boundaries = _constant_curve_path(
+                    direction, radius_m, sweep_deg=sweep_deg, exit_m=75.0)
+                metrics = _simulate_closed_loop(
+                    points, speed_ms, with_trailer=True)
+                turn = [sample for sample in metrics["samples"]
+                        if boundaries[0] + 10.0
+                        < sample["progress_m"] < boundaries[1] - 6.0]
+                with self.subTest(direction=direction, radius=radius_m):
+                    self.assertTrue(turn)
+                    # 4.7 m lane minus half of the 2.55 m body leaves 1.075 m
+                    # axle-centre authority on either side. Both tractor and
+                    # trailer stay inside it without holding the tractor at
+                    # the former 60% outward bias.
+                    self.assertLess(max(
+                        abs(sample["cte_m"]) for sample in turn), 1.075)
+                    self.assertLess(max(
+                        abs(sample["trailer_cte_m"])
+                        for sample in turn), 1.075)
+                    self.assertEqual(_sign_changes(
+                        [sample["output"] for sample in turn]), 0)
+                    self.assertTrue(all(
+                        sample["trailer_offset_m"]
+                        * sample["curvature_per_m"] <= 0.0
+                        for sample in turn))
+
     def test_real_225932_relay_and_212431_negative_zero_gate_are_removed(self):
         # 22:59:33: the old opposite-authority relay applied +0.576 to a
         # -0.103 left-curve foundation and emitted +0.473 (right steering).

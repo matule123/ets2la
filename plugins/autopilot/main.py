@@ -884,6 +884,8 @@ class Plugin(BasePlugin):
                         "guidance_heading_error_rad", 0.0) or 0.0))
                 diagnostic_guidance_curvature = float(
                     steering_debug.get("guidance_curvature", 0.0) or 0.0)
+                diagnostic_preview_curvature = float(
+                    steering_debug.get("preview_curvature", 0.0) or 0.0)
                 trailer_debug = steering_debug.get(
                     "trailer_envelope", {}) or {}
                 diagnostic_trailer_cte = float(
@@ -896,6 +898,14 @@ class Plugin(BasePlugin):
                     trailer_debug.get("reason", "") or "")
                 diagnostic_trailer_side_proven = bool(
                     trailer_debug.get("curve_side_proven", False))
+                diagnostic_trailer_curvature = float(
+                    trailer_debug.get(
+                        "preview_curvature_per_m", 0.0) or 0.0)
+                diagnostic_trailer_fraction = float(
+                    trailer_debug.get(
+                        "balanced_reference_fraction", 0.0) or 0.0)
+                diagnostic_trailer_curve_source = str(
+                    trailer_debug.get("curvature_source", "none") or "none")
                 lane_id_payload = (diagnostic_match.get("active_lane_id")
                                    or snapshot.get("active_lane_id") or {})
                 diagnostic_lane_id = (
@@ -951,11 +961,15 @@ class Plugin(BasePlugin):
                 diagnostic_guidance_lookahead = float("nan")
                 diagnostic_guidance_heading = float("nan")
                 diagnostic_guidance_curvature = float("nan")
+                diagnostic_preview_curvature = float("nan")
                 diagnostic_trailer_cte = float("nan")
                 diagnostic_trailer_required = float("nan")
                 diagnostic_trailer_offset = float("nan")
                 diagnostic_trailer_reason = "malformed"
                 diagnostic_trailer_side_proven = False
+                diagnostic_trailer_curvature = float("nan")
+                diagnostic_trailer_fraction = float("nan")
+                diagnostic_trailer_curve_source = "malformed"
                 diagnostic_lane_id = "malformed"
                 diagnostic_elevation_layer = "-"
                 diagnostic_raw_target = diagnostic_bounded_target = float("nan")
@@ -977,6 +991,10 @@ class Plugin(BasePlugin):
                 "lane_cte_m": live_lateral,
                 "lane_heading_deg": live_heading,
                 "curvature_per_m": diagnostic_guidance_curvature,
+                "preview_curvature_per_m": diagnostic_preview_curvature,
+                "trailer_curvature_per_m": diagnostic_trailer_curvature,
+                "trailer_reference_fraction": diagnostic_trailer_fraction,
+                "trailer_curvature_source": diagnostic_trailer_curve_source,
                 "lookahead_m": diagnostic_guidance_lookahead,
                 "observed_game_steering": diagnostic_game_steering,
                 "game_steer_tracking_error": diagnostic_game_tracking,
@@ -996,13 +1014,15 @@ class Plugin(BasePlugin):
                 "hold_fraction=%.2f sign_projected=%s "
                 "cte_residual=%.3f cte_proven=%s "
                 "low_speed_capture=%s guidance_L=%.1fm "
-                "guidance_heading=%.1fdeg guidance_k=%.5f "
+                "guidance_heading=%.1fdeg guidance_k=%.5f preview_k=%.5f "
                 "curve_r=%s curve_d=%.1f curve_limit=%s "
                 "brake=%.3f brake_req=%.3f curve_brake=%.3f "
                 "collision_brake=%.3f traffic_brake=%.3f light_brake=%.3f "
                 "aux_brake=%.3f vision_brake=%.3f "
                 "trailer_cte=%.3f trailer_required=%.3f trailer_offset=%.3f "
-                "trailer_side_proven=%s trailer_reason=%s "
+                "trailer_k=%.5f trailer_fraction=%.2f "
+                "trailer_side_proven=%s trailer_curve_source=%s "
+                "trailer_reason=%s "
                 "engine_steer=%.3f articulation_guard=%s "
                 "steer_raw=%.3f steer_bounded=%.3f steer_rate=%.3f/s "
                 "steer_accel=%.3f/s2 dt=%.4f used_dt=%.4f "
@@ -1025,6 +1045,7 @@ class Plugin(BasePlugin):
                 diagnostic_guidance_lookahead,
                 diagnostic_guidance_heading,
                 diagnostic_guidance_curvature,
+                diagnostic_preview_curvature,
                 ("-" if diagnostic_radius is None
                  else f"{diagnostic_radius:.1f}"),
                 diagnostic_curve_distance,
@@ -1035,7 +1056,10 @@ class Plugin(BasePlugin):
                 aux_brake, vision_brake,
                 diagnostic_trailer_cte, diagnostic_trailer_required,
                 diagnostic_trailer_offset,
+                diagnostic_trailer_curvature,
+                diagnostic_trailer_fraction,
                 diagnostic_trailer_side_proven,
+                diagnostic_trailer_curve_source,
                 diagnostic_trailer_reason.replace(" ", "_"),
                 float(self.sdk.shared_state.get(
                     "engine_applied_steering", steering_val) or 0.0),

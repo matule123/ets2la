@@ -79,14 +79,17 @@ GUIDANCE_LOW_SPEED_LOOKAHEAD_M = 20.0
 # authoritative pursuit controller does not apply a second feedback response.
 FEEDBACK_STEERING_RESPONSE = 0.40
 # The controller acts on a point far enough ahead that the requested road-wheel
-# angle is valid when it reaches the tyres.  0.90 s covers the measured command
+# angle is valid when it reaches the tyres.  0.912 s covers the measured command
 # queue, UltraPilot actuator trajectory and the game's roughly 0.32 s wheel
-# response with enough margin for an already-growing lateral/heading error.
+# response.  The frame-complete 2026-08-15 replay required one additional
+# spatial control step beyond the former 0.90 s horizon so curve demand begins
+# before the visible wheel lag; this is confirmed-route distance, not a
+# temporal filter or delayed command sample.
 # This is a distance on immutable route geometry, not a temporal average or a
 # delayed steering sample. One wheelbase of base distance keeps parking/prefab
 # manoeuvres well-conditioned at low speed.
 STEERING_PURSUIT_BASE_M = 4.0
-STEERING_PURSUIT_RESPONSE_S = 0.90
+STEERING_PURSUIT_RESPONSE_S = 0.912
 STEERING_PURSUIT_MAX_M = 28.0
 # LaneTrajectory is sampled at roughly two metres.  A single target can land
 # on one quantised lateral sample and turn harmless centimetre-scale map noise
@@ -128,14 +131,14 @@ TRAILER_POSE_MIN_DISTANCE_M = 1.5
 TRAILER_POSE_MAX_DISTANCE_M = 24.0
 TRAILER_PROGRESS_BEHIND_MAX_M = 32.0
 TRAILER_VERTICAL_TOLERANCE_M = 4.0
-TRAILER_CURVATURE_PROOF_FRACTION = 0.70
 # On a constant-radius bend the trailer axle cuts inward by
-# sqrt(R^2 + Ltr^2) - R.  Half is the steady-state min-max solution.  The
-# deterministic articulated 20 Hz entry replay needs another 10% of that same
-# immutable spatial prediction while the trailer articulation is still
-# building, after which the confirmed lane-envelope cap remains authoritative.
-# Live trailer CTE never changes this fraction or its side.
-TRAILER_BALANCED_REFERENCE_FRACTION = 0.60
+# sqrt(R^2 + Ltr^2) - R.  Half is the analytic min-max centre: tractor and
+# trailer axle then use equal portions of the confirmed lane envelope.  One
+# percent of the same spatial prediction covers polyline/chassis discretising
+# error in the R18 articulated replay; unlike the former 60% reserve it does
+# not deliberately hold the tractor far outside the lane centre through the
+# whole bend. Live trailer CTE never changes this fraction or its side.
+TRAILER_BALANCED_REFERENCE_FRACTION = 0.51
 # A longer window is retained for anticipatory curve braking; steering uses
 # the shorter local window above so it cannot cut across a bend.
 CURV_WINDOW_M = 60.0
@@ -325,12 +328,22 @@ class Route:
         weighted_progress = 0.0
         total_weight = 0.0
         representative_target = self._point_at_progress(progress)
+        used_progresses = []
         for offset_m, weight in STEERING_PURSUIT_OFFSETS_M:
             target_progress = min(
                 float(maximum_progress),
                 float(progress) + min(
                     STEERING_PURSUIT_MAX_M,
                     max(0.5, float(lookahead_m) + float(offset_m))))
+            # At an authority endpoint several requested horizons can clamp
+            # to the same map point. Counting that one endpoint repeatedly
+            # changes the geometric weighting solely because a LaneId run
+            # ended, producing an otherwise unexplained steering pulse.  A
+            # physical target position participates exactly once.
+            if any(abs(target_progress - used) <= 1e-6
+                   for used in used_progresses):
+                continue
+            used_progresses.append(target_progress)
             target = self._point_at_progress(target_progress)
             angle, bearing, distance = self._pursuit_steering_angle(
                 origin, heading, target)
@@ -816,6 +829,7 @@ class Route:
                                  heading: float, speed_ms: float,
                                  tractor_cte: float,
                                  envelope: Optional[dict],
+                                 preview_curvature_per_m: float = 0.0,
                                  active_authority=None,
                                  ) -> Tuple[float, dict]:
         """Return a proven outward tractor offset for an attached trailer.
@@ -836,6 +850,9 @@ class Route:
             "available_offset_m": 0.0, "applied_offset_m": 0.0,
             "trailer_progress_m": 0.0,
             "curve_side_proven": False,
+            "preview_curvature_per_m": float(
+                preview_curvature_per_m),
+            "curvature_source": "pursuit_midpoint_path",
             "balanced_reference_fraction": float(
                 TRAILER_BALANCED_REFERENCE_FRACTION),
         }
@@ -848,7 +865,8 @@ class Route:
             tractor_altitude = float(envelope["tractor_altitude_m"])
             trailer_altitude = float(envelope["trailer_altitude_m"])
             values = (*trailer_pos, trailer_heading, lane_width,
-                      tractor_altitude, trailer_altitude, float(tractor_cte))
+                      tractor_altitude, trailer_altitude, float(tractor_cte),
+                      float(preview_curvature_per_m))
             if not all(math.isfinite(value) for value in values):
                 raise ValueError("non-finite trailer envelope metadata")
         except (KeyError, TypeError, ValueError, IndexError, OverflowError):
@@ -891,30 +909,16 @@ class Route:
 
         trailer_cte = self.cross_track_error(index, trailer_pos)
         measured = trailer_cte - tractor_cte
-        # Integrate curvature over one moving vehicle-length ahead.  This is a
-        # spatial swept-path calculation, not a time-domain steering filter.
-        horizon = _clamp(12.0 + abs(speed_ms), 12.0, 24.0)
-        offsets = (0.0, horizon * 0.25, horizon * 0.50,
-                   horizon * 0.75, horizon)
-        weights = (0.10, 0.20, 0.30, 0.25, 0.15)
-        active_bounds = self._authority_geometry_bounds(
-            active_authority, progress,
-            horizon + STEERING_CURVATURE_SPAN_M)
-        curvature_samples = [
-            (self._curvature_at_progress(progress + offset)
-             if active_bounds is None else self._curvature_at_progress(
-                 progress + offset, progress_bounds=active_bounds))
-            for offset in offsets]
-        swept_curvature = sum(weight * curvature for weight, curvature in zip(
-            weights, curvature_samples))
+        # Trailer placement and actuator scheduling must not own competing
+        # estimates of the same bend. ``preview_curvature_per_m`` is the one
+        # canonical path curvature at the pursuit midpoint and inside the same
+        # validated authority bounds. The old trailer-only 12--24 m estimator
+        # changed side/magnitude at different map positions and moved the
+        # virtual tractor origin while the steering target itself was stable.
+        swept_curvature = float(preview_curvature_per_m)
         dominant_sign = (0 if abs(swept_curvature) < 1.0 / 1000.0
                          else (1 if swept_curvature > 0.0 else -1))
-        coherent_weight = sum(
-            weight for weight, curvature in zip(weights, curvature_samples)
-            if dominant_sign and curvature * dominant_sign > 1.0 / 1500.0)
-        curve_side_proven = bool(
-            dominant_sign
-            and coherent_weight >= TRAILER_CURVATURE_PROOF_FRACTION)
+        curve_side_proven = bool(dominant_sign)
         predicted = 0.0
         if curve_side_proven:
             radius = 1.0 / abs(swept_curvature)
@@ -1134,9 +1138,19 @@ class Route:
             path_dx = tangent_target[0] - tangent_first[0]
             path_dz = tangent_target[1] - tangent_first[1]
         else:
-            tangent_target = self._point_at_progress(progress + tangent_window)
-            path_dx = tangent_target[0] - projection[0]
-            path_dz = tangent_target[1] - projection[1]
+            # A forward-only secant is not the lane tangent on a curve: its
+            # heading is already rotated by roughly half the sampled arc.  It
+            # therefore cancelled about half of pure-pursuit's curve bearing
+            # and made the truck drive straight into a bend before applying a
+            # late, sharp correction.  Use the same centred spatial derivative
+            # as authority-scoped routes even when a legacy/recorded path has
+            # no point-authority metadata.
+            tangent_before = self._point_at_progress(
+                progress - tangent_window)
+            tangent_target = self._point_at_progress(
+                progress + tangent_window)
+            path_dx = tangent_target[0] - tangent_before[0]
+            path_dz = tangent_target[1] - tangent_before[1]
         path_length = math.hypot(path_dx, path_dz)
         if path_length < 0.5:
             return 0.0
@@ -1218,9 +1232,27 @@ class Route:
                 maximum_target_progress, pursuit_bounds[1])
         reference_heading = path_heading
 
+        (feed_forward_angle, foundation_bearing_error,
+         _foundation_distance, foundation_progress,
+         _foundation_target) = self._pursuit_geometry_solution(
+            projection, reference_heading, progress, pursuit_lookahead,
+            maximum_target_progress)
+        preview_curvature = (
+            math.tan(_clamp(feed_forward_angle, -1.20, 1.20))
+            / TRUCK_WHEELBASE_M)
+        # Use one canonical immutable-path curvature for both trailer swept
+        # path and actuator authority.  The removed trailer-only 12--24 m
+        # estimator could change at a different location from this pursuit
+        # arc.  Sampling the pursuit midpoint retains exact R18/R35/R83 map
+        # curvature while keeping both consumers on one spatial reference.
+        reference_progress = 0.5 * (progress + foundation_progress)
+        local_curvature = self._steering_curvature_at_progress(
+            reference_progress, authority=route_authority)
         trailer_offset, trailer_debug = self._trailer_envelope_offset(
             progress, pos, heading, v, cte - lane_offset_m,
-            vehicle_envelope, active_authority=route_authority)
+            vehicle_envelope,
+            preview_curvature_per_m=local_curvature,
+            active_authority=route_authority)
         control_cte = _clamp(cte + trailer_offset, -5.0, 5.0)
         # Shift only the controller's virtual observation by the small residual
         # between route projection and the confirmed LaneMatch (plus the proven
@@ -1233,11 +1265,6 @@ class Route:
             float(pos[0]) + normal_x * control_residual,
             float(pos[1]) + normal_z * control_residual)
 
-        (feed_forward_angle, foundation_bearing_error,
-         _foundation_distance, _foundation_progress,
-         _foundation_target) = self._pursuit_geometry_solution(
-            projection, reference_heading, progress, pursuit_lookahead,
-            maximum_target_progress)
         (lateral_angle, lateral_bearing_error,
          _lateral_distance, _lateral_progress,
          _lateral_target) = self._pursuit_geometry_solution(
@@ -1257,12 +1284,9 @@ class Route:
         steer, composition_debug = self._compose_curve_steering(
             feed_forward, heading_feedback, cte_feedback)
 
-        # The pursuit arc is represented by its midpoint curvature for trailer
-        # swept-path proof, speed scheduling and actuator diagnostics. It does
-        # not add a second steering command.
-        reference_progress = 0.5 * (progress + target_progress)
-        local_curvature = self._steering_curvature_at_progress(
-            reference_progress, authority=route_authority)
+        # ``local_curvature`` above is the single spatial curvature used by
+        # trailer placement, actuator scheduling and diagnostics. The pursuit
+        # angle itself remains the sole steering command.
         local_radius = (1e6 if abs(local_curvature) < 1e-9
                         else 1.0 / abs(local_curvature))
         cte_gain = curve_cte_gain(local_radius, control_cte)
@@ -1334,6 +1358,7 @@ class Route:
                 heading_feedback_angle),
             "cte_feedback_angle_rad": float(cte_feedback_angle),
             "local_curvature": float(local_curvature),
+            "preview_curvature": float(preview_curvature),
             "raw": float(raw_steer),
             "output": float(steer),
             "curve_direction_hold": bool(curve_direction_hold),

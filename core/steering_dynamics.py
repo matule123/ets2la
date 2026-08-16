@@ -54,13 +54,6 @@ STEERING_CURVE_FULL_AUTHORITY_PER_M = 1.0 / 80.0
 STEERING_DEMAND_FULL_AUTHORITY = 0.25
 STEERING_NOISE_DEADBAND = 0.004
 STEERING_SETTLE_EPSILON = 1e-5
-# At the final few thousandths of normalized angle, the continuous
-# sqrt(2*a*distance) stopping envelope can still cross the target inside one
-# discrete control frame.  This 25 ms terminal horizon caps only that final
-# velocity so a final from-rest acceleration does not create a correction
-# larger than the current error. It acts on the current target and stores no
-# samples; an already moving actuator still obeys its acceleration bound.
-STEERING_TERMINAL_APPROACH_S = 0.025
 
 
 class SteeringDynamics:
@@ -191,10 +184,36 @@ class SteeringDynamics:
         stopping_distance = (
             previous_rate * previous_rate / (2.0 * max_accel)
             if max_accel > 1e-9 else float("inf"))
-        continuous_safe_rate = math.sqrt(max(
-            0.0, 2.0 * max_accel * abs(error)))
-        terminal_rate = abs(error) / STEERING_TERMINAL_APPROACH_S
-        safe_rate = min(continuous_safe_rate, terminal_rate)
+        # Plan the *end-of-frame* rate, rather than applying the continuous
+        # ``sqrt(2*a*distance)`` envelope to the beginning of a discrete
+        # frame.  The old calculation could accelerate for one frame too
+        # long, cross a constant target, reverse acceleration on the next
+        # frame and repeat that half-cycle several times.  In the 2026-08-15
+        # recording this was visible as a millisecond unload/reload of the
+        # wheel even while Route requested one steady curve direction.
+        #
+        # For signed start/end rates s0/s1 towards the target, require the
+        # distance travelled this frame plus the remaining braking distance
+        # to fit inside the current error e:
+        #
+        #   0.5 * (s0 + s1) * dt + s1^2 / (2*a) <= e
+        #
+        # Solving the positive root gives the fastest acceleration-limited
+        # trajectory that can still stop at the current target.  It is a
+        # discrete kinematic plan, not target smoothing or stored history.
+        direction = 1.0 if error > 0.0 else -1.0
+        signed_previous_rate = previous_rate * direction
+        discriminant = max(
+            0.0,
+            (max_accel * used_dt) ** 2
+            - 4.0 * (
+                max_accel * used_dt * signed_previous_rate
+                - 2.0 * max_accel * abs(error)))
+        discrete_safe_end_rate = max(
+            0.0,
+            (-max_accel * used_dt + math.sqrt(discriminant)) * 0.5)
+        terminal_rate = discrete_safe_end_rate
+        safe_rate = discrete_safe_end_rate
         target_eta = (
             abs(error) / max(max_rate, 1e-9)
             + abs(previous_rate) / max(max_accel, 1e-9))
@@ -206,7 +225,6 @@ class SteeringDynamics:
             rate_limited = acceleration_limited = False
             trajectory_phase = "settled"
         else:
-            direction = 1.0 if error > 0.0 else -1.0
             desired_rate = direction * min(max_rate, safe_rate)
             requested_rate_delta = desired_rate - previous_rate
             allowed_rate_delta = max_accel * used_dt
@@ -221,7 +239,6 @@ class SteeringDynamics:
             rate_limited = bool(
                 safe_rate > max_rate + 1e-9
                 and abs(new_rate) >= max_rate - 1e-9)
-            signed_previous_rate = previous_rate * direction
             signed_new_rate = new_rate * direction
             if signed_previous_rate < -1e-9:
                 trajectory_phase = "reverse"
@@ -233,13 +250,26 @@ class SteeringDynamics:
                 trajectory_phase = "cruise"
             else:
                 trajectory_phase = "accelerate"
-            # Report the acceleration actually integrated after a rate clamp.
-            # Constant-acceleration kinematics keep the command and its first
-            # two derivatives inside the advertised physical envelope.  A
-            # tiny target crossing is corrected on the next tick with the same
-            # bounds; it is never hidden by snapping or temporal averaging.
-            new_command = (self.command
-                           + 0.5 * (previous_rate + new_rate) * used_dt)
+            # If maximum braking reaches zero before the end of this frame,
+            # integrate only the physical braking portion and hold for the
+            # remainder. Averaging the same rate change over the *whole* frame
+            # was the final source of a sub-frame target crossing: it applied
+            # weaker deceleration than the stopping-distance proof assumed.
+            terminal_stop = bool(
+                safe_rate <= 1e-12
+                and signed_previous_rate > 0.0
+                and signed_previous_rate <= max_accel * used_dt + 1e-12)
+            if terminal_stop:
+                stop_time = signed_previous_rate / max(max_accel, 1e-12)
+                terminal_travel = 0.5 * signed_previous_rate * stop_time
+                new_command = self.command + direction * terminal_travel
+                if abs(abs(error) - terminal_travel) <= 1e-10:
+                    new_command = bounded_target
+                new_rate = 0.0
+                acceleration = -direction * max_accel
+            else:
+                new_command = (self.command
+                               + 0.5 * (previous_rate + new_rate) * used_dt)
             self.command = _clamp(new_command, -max_command, max_command)
             self.rate = new_rate
 

@@ -306,6 +306,66 @@ def _simulate_route(points, speed_ms, *, wheel_response_s=0.32,
 
 
 class Phase4SteeringDynamicsTests(unittest.TestCase):
+    def test_discrete_braking_never_crosses_a_stationary_curve_target(self):
+        """A steady bend cannot create its own unload/reload half-cycles."""
+        dts = (0.011, 0.017, 0.024, 0.033, 0.019)
+        for target in (-0.32, -0.20, 0.20, 0.32):
+            dynamics = SteeringDynamics()
+            direction = math.copysign(1.0, target)
+            previous = dynamics.command
+            for index in range(240):
+                output = dynamics.update(
+                    target, dts[index % len(dts)], speed_ms=8.0,
+                    curvature_per_m=direction / 35.0)
+                debug = dynamics.last_debug
+                with self.subTest(target=target, index=index):
+                    # The target is an invariant boundary. The old discrete
+                    # integrator crossed it four times at 60 Hz even though
+                    # Route supplied one constant command.
+                    self.assertGreaterEqual(
+                        (target - output) * direction, -1e-10)
+                    self.assertGreaterEqual(
+                        dynamics.rate * direction, -1e-10)
+                    self.assertLessEqual(
+                        abs(dynamics.rate),
+                        debug["max_rate_per_s"] + 1e-9)
+                    self.assertLessEqual(
+                        abs(debug["acceleration_per_s2"]),
+                        debug["max_acceleration_per_s2"] + 1e-9)
+                    self.assertLessEqual(
+                        abs(output - previous),
+                        debug["max_rate_per_s"]
+                        * debug["dt_used_s"] + 1e-9)
+                previous = output
+            self.assertAlmostEqual(dynamics.command, target, places=9)
+            self.assertAlmostEqual(dynamics.rate, 0.0, places=9)
+
+    def test_same_direction_curve_unwind_has_one_physical_rate_reversal(self):
+        """A decreasing bend demand settles once instead of chattering."""
+        dts = (0.0270, 0.0351, 0.0384, 0.0267, 0.0328)
+        for direction in (-1.0, 1.0):
+            dynamics = SteeringDynamics()
+            targets = ([direction * 0.32] * 100
+                       + [direction * (0.32 - 0.20 * (index + 1) / 120)
+                          for index in range(120)]
+                       + [direction * 0.12] * 160)
+            rates = []
+            outputs = []
+            for index, target in enumerate(targets):
+                outputs.append(dynamics.update(
+                    target, dts[index % len(dts)], speed_ms=11.0,
+                    curvature_per_m=direction / 35.0))
+                rates.append(dynamics.rate)
+            # Building the curve and unwinding it justify one change of rate
+            # direction. Once the target becomes constant, neither command nor
+            # rate may start another correction half-cycle.
+            self.assertLessEqual(_sign_changes(rates, threshold=0.002), 1)
+            tail = outputs[-120:]
+            self.assertTrue(all(
+                (direction * 0.12 - value) * direction <= 1e-9
+                for value in tail))
+            self.assertAlmostEqual(outputs[-1], direction * 0.12, places=9)
+
     def test_reproduced_first_order_root_cause_has_unbounded_rate_reversal(self):
         dt = 0.01
         dts = [dt] * 240
@@ -544,6 +604,8 @@ class Phase4SteeringDynamicsTests(unittest.TestCase):
                 "game_steer_tracking_error",
                 "feed_forward", "heading_feedback", "cte_feedback",
                 "lane_cte_m", "lane_heading_deg", "curvature_per_m",
+                "preview_curvature_per_m", "trailer_curvature_per_m",
+                "trailer_reference_fraction", "trailer_curvature_source",
                 "lookahead_m", "navigation_intent_id", "revision"):
             self.assertIn(key, first)
         for _ in range(10):
