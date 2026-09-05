@@ -808,11 +808,11 @@ class UltraPilotEngine:
             self.shared_state.set(CTL_SELECT_DRIVE, None)
 
     def run_loop(self):
-        last_time = time.time()
+        last_time = time.monotonic()
         while self.running:
             if self.shared_state.get("app_shutdown_requested", False):
                 break
-            current_time = time.time()
+            current_time = time.monotonic()
             delta_time = current_time - last_time
             last_time = current_time
 
@@ -1146,6 +1146,12 @@ class UltraPilotEngine:
                     }
                 vehicle_envelope_snapshot = {
                     "timestamp": float(telemetry_timestamp),
+                    "tractor_speed_ms": float(truck.get("speed", 0.0) or 0.0),
+                    "game_steer_right": -float(truck.get("gameSteer", 0.0) or 0.0),
+                    "sdk_frame_us": truck.get("sdkFrameTimeUs", 0),
+                    "road_wheel_angles_rad": truck.get("roadWheelAnglesRad", []),
+                    "yaw_rate_rad_s": truck.get("yawRateRadS", 0.0),
+                    "yaw_rate_valid": truck.get("yawRateValid", False),
                     "tractor_position": [
                         float(truck.get("x", 0.0) or 0.0),
                         float(truck.get("y", 0.0) or 0.0),
@@ -1342,7 +1348,7 @@ class UltraPilotEngine:
                 logging.error("Engine frame error (recovered): %s", e)
 
             # 6. Maintain target FPS
-            sleep_time = (1.0 / self.fps) - (time.time() - current_time)
+            sleep_time = (1.0 / self.fps) - (time.monotonic() - current_time)
             if sleep_time > 0:
                 time.sleep(sleep_time)
 

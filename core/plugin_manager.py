@@ -53,9 +53,9 @@ def plugin_worker(plugin_class: Type[BasePlugin], plugin_name: str,
         plugin.on_start()
 
         tick_dt = 0.01  # 100 Hz
-        last_time = time.time()
+        last_time = time.monotonic()
         while not stop_event.is_set():
-            current_time = time.time()
+            current_time = time.monotonic()
             delta_time = current_time - last_time
             last_time = current_time
 

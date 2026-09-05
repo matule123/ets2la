@@ -192,7 +192,14 @@ class SCSTelemetry:
             tf["routeDistance"] = self.read_float(1060)[0]      # metres
             tf["routeTime"] = self.read_float(1064)[0]          # seconds
             tf["speedLimit"] = self.read_float(1068)[0]         # m/s
+            # SCS truck.wheel.steering is ROTATIONS, counterclockwise from
+            # above, not gameSteer's normalized input and not radians.
+            tf["wheelSteeringTurns"] = self.read_float(1200, 16)[0]
             data["truckFloat"] = tf
+            data["wheelSteerable"] = self.read_bool(1500, 16)[0]
+            data["wheelPositionZ"] = self.read_float(1804, 16)[0]
+            # local angular velocity vector: rotations/s, Y is yaw.
+            data["yawRateTurnsPerSecond"] = self.read_float(1884)[0]
 
             # --- Zone 5: truck bools ---
             tb = {}

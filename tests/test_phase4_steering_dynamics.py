@@ -388,7 +388,7 @@ class Phase4SteeringDynamicsTests(unittest.TestCase):
         self.assertLessEqual(new_metrics["max_rate"], 0.601)
         self.assertLessEqual(new_metrics["max_step"], 0.0061)
 
-    def test_straight_noise_deadband_does_not_hide_real_curve_demand(self):
+    def test_physical_executor_does_not_erase_small_valid_commands(self):
         dt = 0.01
         noise = [0.0035 * math.sin(index * dt * 2.0 * math.pi * 3.0)
                  for index in range(300)]
@@ -397,8 +397,14 @@ class Phase4SteeringDynamicsTests(unittest.TestCase):
         quiet = [dynamics.update(value, dt, speed_ms=20.0,
                                  curvature_per_m=0.0) for value in noise]
         self.assertGreater(_sign_changes(old, threshold=0.001), 10)
-        self.assertEqual(_sign_changes(quiet, threshold=0.001), 0)
-        self.assertLessEqual(max(map(abs, quiet)), 1e-12)
+        self.assertGreater(_sign_changes(quiet, threshold=0.001), 10)
+        self.assertLessEqual(max(map(abs, quiet)), .004)
+        self.assertFalse(dynamics.last_debug["deadband_active"])
+        # Noise rejection is a controller property. An actuator deadband was
+        # masking real high-speed corrections and creating steady-state CTE.
+        for _ in range(100):
+            small = dynamics.update(.003, dt, speed_ms=20.)
+        self.assertAlmostEqual(small, .003, places=5)
 
         response = [dynamics.update(0.30, dt, speed_ms=20.0,
                                     curvature_per_m=1.0 / 45.0)
@@ -555,12 +561,12 @@ class Phase4SteeringDynamicsTests(unittest.TestCase):
     def test_scs_abi_publishes_manual_and_game_wheel_positions(self):
         reader = SCSTelemetry.__new__(SCSTelemetry)
         reader.mm = object()
-        reader.read_bool = lambda offset: (False, offset + 1)
+        reader.read_bool = lambda offset, count=1: (False if count == 1 else [False]*count, offset + count)
         reader.read_long_long = lambda offset: (0, offset + 8)
         reader.read_int = lambda offset: (0, offset + 4)
-        reader.read_float = lambda offset: ({
+        reader.read_float = lambda offset, count=1: ({
             956: 0.17, 972: -0.23,
-        }.get(offset, 0.0), offset + 4)
+        }.get(offset, 0.0) if count == 1 else [0.0]*count, offset + 4*count)
         reader.read_double = lambda offset: (0.0, offset + 8)
         snapshot = reader.update()
         self.assertAlmostEqual(snapshot["truckFloat"]["userSteer"], 0.17)

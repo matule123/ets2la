@@ -97,7 +97,11 @@ class SettingsManager:
                 "enabled": False,
                 "kp": 0.3,
                 "ki": 0.01,
-                "kd": 0.1
+                "kd": 0.1,
+                # Provisional input -> road-wheel calibration for the tested
+                # truck/setup. Runtime validates 0.60..0.95 rad and fails
+                # closed outside it; no online adaptation is performed.
+                "steering_lock_rad": 0.78
             },
             "hud": {
                 "enabled": True,

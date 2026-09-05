@@ -6,6 +6,7 @@ import json
 import tempfile
 from sdk.base_plugin import BasePlugin
 from core.navigation.route import Route
+from core.lateral_controller import REFERENCE_LOCK_RAD
 from core.navigation.lane_trajectory import build_lane_trajectory
 from core.navigation.route_diagnostics import (
     RouteBuildDiagnostics, classify_failure, dataset_fingerprint,
@@ -1067,7 +1068,7 @@ class Plugin(BasePlugin):
         self._lane_authority_identity = None
         return snapshot
 
-    def _update_lane_trajectory(self, pos, heading):
+    def _update_lane_trajectory(self, pos, heading, observation_altitude=None):
         """Build and atomically publish the sole GPS lane trajectory snapshot."""
         raw_uids = self.sdk.get("game_route_node_uids", []) or []
         uids = self._normalise_gps_uids(raw_uids)
@@ -1153,7 +1154,8 @@ class Plugin(BasePlugin):
             return None
 
         build_uids = self._runtime_gps_window(uids)
-        altitude = float(self.sdk.get("truck_altitude", 0.0) or 0.0)
+        altitude = float(observation_altitude if observation_altitude is not None
+                         else self.sdk.get("truck_altitude", 0.0) or 0.0)
         current = self.sdk.get("lane_trajectory", {}) or {}
         previous_lane_path = self._lane_path
         build_revision = int(self.sdk.get(
@@ -2151,6 +2153,22 @@ class Plugin(BasePlugin):
         pos = self.sdk.get("truck_world_pos")
         heading = self.sdk.get("truck_heading", 0.0) or 0.0
         speed = self.sdk.get("truck_speed_ms", 0.0) or 0.0
+        settings = self.sdk.get("settings", {}) or {}
+        autopilot_settings = (settings.get("autopilot", {})
+                              if isinstance(settings, dict) else {}) or {}
+        steering_lock_rad = autopilot_settings.get(
+            "steering_lock_rad", REFERENCE_LOCK_RAD)
+        observation_altitude = None
+        # One IPC value is one telemetry observation. Separate scalar reads
+        # can straddle an Engine update and pair position n with heading n+1.
+        vehicle_observation = self.sdk.get("vehicle_envelope_snapshot", {}) or {}
+        if "tractor_speed_ms" in vehicle_observation:
+            observed_position = vehicle_observation.get("tractor_position")
+            if isinstance(observed_position, (list, tuple)) and len(observed_position) == 3:
+                pos = (observed_position[0], observed_position[2])
+                heading = vehicle_observation["tractor_heading"]
+                speed = vehicle_observation["tractor_speed_ms"]
+                observation_altitude = observed_position[1]
 
         self._handle_command(pos)
         try:
@@ -2200,7 +2218,10 @@ class Plugin(BasePlugin):
         # Lazily load the downloaded road network (engine process) the first
         # time we have a position. Cheap no-op once attempted.
         self._load_road_net()
-        self._update_lane_trajectory(pos, heading)
+        if observation_altitude is None:
+            self._update_lane_trajectory(pos, heading)
+        else:
+            self._update_lane_trajectory(pos, heading, observation_altitude)
         self._record_explored_road()
         self._exploration_save_t += delta_time
         if self._exploration_save_t >= 15.0:
@@ -2293,8 +2314,22 @@ class Plugin(BasePlugin):
                 self._deactivate_recorded_route(clear_outputs=True)
                 return
 
-            steer = self.active_route.steering(pos, heading, speed,
-                                               lane_offset_m=self._lane_offset())
+            steer = self.active_route.steering(
+                pos, heading, speed, lane_offset_m=self._lane_offset(),
+                steering_lock_rad=steering_lock_rad)
+            if not self.active_route.last_steering_debug.get(
+                    "authority_valid", True):
+                self.sdk.shared_state.update_batch({
+                    "nav_active": False, "nav_steering": 0.0,
+                    "nav_steering_debug": dict(
+                        self.active_route.last_steering_debug),
+                    "navigation_unreliable": True,
+                    "navigation_failure_reason": self.active_route.
+                        last_steering_debug.get(
+                            "control_failure", "invalid steering command"),
+                })
+                self.tags.nav_steering = 0.0
+                return
             curve_profile = self.active_route.curve_profile_ahead(pos, heading)
             idx = self.active_route.closest_index(pos)
             upcoming = self._distance_window(
@@ -2382,8 +2417,7 @@ class Plugin(BasePlugin):
                     self.tags.nav_steering = 0.0
                     return
                 trailer_envelope = None
-                vehicle_snapshot = self.sdk.shared_state.get(
-                    "vehicle_envelope_snapshot", {}) or {}
+                vehicle_snapshot = vehicle_observation
                 try:
                     vehicle_snapshot_fresh = (
                         float(vehicle_snapshot.get("timestamp", 0.0) or 0.0)
@@ -2416,6 +2450,11 @@ class Plugin(BasePlugin):
                             "trailer_altitude_m": trailer_position[1],
                             "elevation_layer": metadata["elevation_layer"],
                         }
+                vehicle_curvature = None
+                if vehicle_observation.get("yaw_rate_valid") and abs(speed) > 1.0:
+                    yaw_rate = float(vehicle_observation["yaw_rate_rad_s"])
+                    if math.isfinite(yaw_rate):
+                        vehicle_curvature = yaw_rate / abs(speed)
                 steer = route.steering(
                     pos, heading, speed, lane_offset_m=0.0,
                     cross_track_error_m=live_cte,
@@ -2426,7 +2465,9 @@ class Plugin(BasePlugin):
                         "lane_width_m": metadata["lane_width_m"],
                         "revision": int(snapshot["revision"]),
                     },
-                    control_dt_s=delta_time)
+                    control_dt_s=delta_time,
+                    vehicle_curvature_per_m=vehicle_curvature,
+                    steering_lock_rad=steering_lock_rad)
                 curve_profile = route.curve_profile_ahead(pos, heading)
                 # Safety: if the truck is far from the snapped path (wrong map
                 # dataset, or we're off-road on a ferry / car park), the CTE is
@@ -2439,6 +2480,20 @@ class Plugin(BasePlugin):
                 off_dist = math.hypot(pos[0] - nearest[0], pos[1] - nearest[1])
                 steering_debug = dict(getattr(
                     route, "last_steering_debug", {}) or {})
+                steering_debug.update({
+                    "computed_at": time.monotonic(),
+                    "observation_timestamp": vehicle_observation.get("timestamp"),
+                    "sdk_frame_us": vehicle_observation.get("sdk_frame_us"),
+                    "observation_xz": pos, "observation_heading_rad": heading,
+                    "observation_speed_ms": speed,
+                    "navigation_intent_id": snapshot.get("navigation_intent_id"),
+                    "route_build_id": snapshot.get("route_build_id"),
+                    "source_game_session_id": snapshot.get(
+                        "source_game_session_id"),
+                    "source_map_key": snapshot.get("source_map_key"),
+                    "source_dataset_fingerprint": snapshot.get(
+                        "source_dataset_fingerprint"),
+                })
                 if not steering_debug.get("authority_valid", True):
                     steer = 0.0
                     self.sdk.shared_state.update_batch({

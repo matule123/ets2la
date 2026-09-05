@@ -758,7 +758,7 @@ class RealMapLaneDataTests(unittest.TestCase):
                 self.assertFalse(debug["straight_recovery_active"])
                 self.assertAlmostEqual(
                     debug["cte_gain"],
-                    curve_cte_gain(radius, live_cte), places=7)
+                    1.0 / debug["feedback_length_m"] ** 2, places=7)
                 self.assertFalse(debug["curve_direction_hold"])
                 self.assertLess(debug["cte_geometry_residual"], 0.03)
                 self.assertLess(

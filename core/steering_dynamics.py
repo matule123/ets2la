@@ -24,8 +24,8 @@ def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
-# Conservative estimated actuator parameters.  ``1.0`` normalized command is
-# the usable 0.28 rad road-wheel angle defined by the geometric truck model.
+# Normalized input limits, independent of chassis/tyre-angle calibration.
+# These bounds are retained, not presented as measured mechanical maxima.
 STEERING_DYNAMICS_MIN_DT_S = 0.001
 # A normal 60/100 Hz frame uses its real dt. Up to 100 ms is still integrated
 # as real elapsed actuator time; a longer scheduler stall is never converted
@@ -38,8 +38,8 @@ STEERING_LOW_SPEED_FULL_AUTHORITY_MS = 5.0
 STEERING_RATE_LOW_SPEED_PER_S = 0.60
 STEERING_RATE_HIGH_SPEED_PER_S = 0.38
 # The first R18 replay used 4.0/s2 here.  That was physically smooth, but it
-# added about 300 ms of command phase lag on top of the game's measured
-# ~320 ms wheel response.  The truck consequently entered the prefab before
+# added about 300 ms of command phase lag on top of the modelled
+# ~320 ms wheel response.  The simulated truck entered the prefab before
 # the requested road-wheel rate had been established.  These bounds remain
 # more than an order of magnitude below the old instantaneous 120/s2 reversal,
 # while allowing a confirmed tight curve to build the existing 0.60/s rate in
@@ -52,7 +52,6 @@ STEERING_STRAIGHT_DAMPING = 0.72
 STEERING_STRAIGHT_ACCEL_DAMPING = 0.35
 STEERING_CURVE_FULL_AUTHORITY_PER_M = 1.0 / 80.0
 STEERING_DEMAND_FULL_AUTHORITY = 0.25
-STEERING_NOISE_DEADBAND = 0.004
 STEERING_SETTLE_EPSILON = 1e-5
 
 
@@ -172,12 +171,10 @@ class SteeringDynamics:
         max_command, max_rate, max_accel = self.limits(
             speed, curvature, command_demand)
         bounded_target = _clamp(raw_target, -max_command, max_command)
-        deadband_active = bool(
-            abs(curvature) < 1.0 / 500.0
-            and abs(bounded_target) <= STEERING_NOISE_DEADBAND
-            and abs(self.command) <= STEERING_NOISE_DEADBAND * 2.0)
-        if deadband_active:
-            bounded_target = 0.0
+        # A real small command must reach the game. The old 0.004 deadband
+        # removed the steady curvature/CTE correction after inverse calibration
+        # and left a speed-dependent permanent lateral error on straight roads.
+        deadband_active = False
 
         error = bounded_target - self.command
         previous_rate = self.rate

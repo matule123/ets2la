@@ -86,6 +86,19 @@ class Telemetry:
                               ("coordinateX", "coordinateY", "coordinateZ",
                                "rotationX")),
         }
+        # Tyre angles are independent calibration diagnostics; yaw is the
+        # vehicle-motion input to the predictor. Neither rewrites LaneMatch.
+        wheel_turns = tf.get("wheelSteeringTurns", ()) or ()
+        steerable = raw.get("wheelSteerable", ()) or ()
+        truck["roadWheelAnglesRad"] = [
+            -math.tau * float(turns)
+            for turns, enabled in zip(wheel_turns, steerable)
+            if enabled and math.isfinite(float(turns))]
+        truck["yawRateRadS"] = -math.tau * float(
+            raw.get("yawRateTurnsPerSecond", 0.0) or 0.0)
+        truck["yawRateValid"] = ("yawRateTurnsPerSecond" in raw
+                                and math.isfinite(truck["yawRateRadS"]))
+        truck["sdkFrameTimeUs"] = raw.get("time", 0)
         pos = (tp.get("coordinateX", 0.0), tp.get("coordinateZ", 0.0))
 
         # --- Trailer placement (Zone 14). Only the first trailer is used —

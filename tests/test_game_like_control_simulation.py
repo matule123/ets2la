@@ -53,16 +53,22 @@ def _simulate(points, speed_ms):
         live_cte = route.cross_track_error(segment, (x, z))
         target = route.steering(
             (x, z), heading, speed_ms,
-            cross_track_error_m=live_cte)
+            cross_track_error_m=live_cte,
+            actuator_response_s=0.0,
+            vehicle_curvature_per_m=(math.tan(autopilot._last_steering
+                * NORMALIZED_STEERING_ANGLE_RAD)/TRUCK_WHEELBASE_M))
         autopilot._last_steering = autopilot._ramp_steering(
             target, dt, speed_ms=speed_ms,
             curvature_per_m=route.last_steering_debug.get(
                 "local_curvature", 0.0))
         heading -= (speed_ms / TRUCK_WHEELBASE_M
-                    * (autopilot._last_steering
+                    * math.tan(autopilot._last_steering
                        * NORMALIZED_STEERING_ANGLE_RAD) * dt)
-        x += -math.sin(heading) * speed_ms * dt
-        z += -math.cos(heading) * speed_ms * dt
+        # Midpoint integration avoids a permanent half-tick inside-lane bias.
+        mid_heading = heading + .5*(speed_ms/TRUCK_WHEELBASE_M
+            * math.tan(autopilot._last_steering*NORMALIZED_STEERING_ANGLE_RAD)*dt)
+        x += -math.sin(mid_heading) * speed_ms * dt
+        z += -math.cos(mid_heading) * speed_ms * dt
         segment = route.tracking_index((x, z), heading)
         errors.append(route.cross_track_error(segment, (x, z)))
         commands.append(autopilot._last_steering)
@@ -162,7 +168,10 @@ class GameLikeControlSimulationTests(unittest.TestCase):
                     frame * dt * 2.0 * math.pi / 0.90)
                 raw = route.steering(
                     (x, z), heading, speed,
-                    cross_track_error_m=measured_cte)
+                    cross_track_error_m=measured_cte,
+                    actuator_response_s=.32,
+                    vehicle_curvature_per_m=math.tan(physical_wheel
+                        * NORMALIZED_STEERING_ANGLE_RAD)/TRUCK_WHEELBASE_M)
                 autopilot._last_steering = autopilot._ramp_steering(
                     raw, dt, speed_ms=speed,
                     curvature_per_m=route.last_steering_debug.get(

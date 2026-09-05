@@ -106,6 +106,10 @@ def ready_navigation_state(**extra):
     snapshot = {
         "revision": 7, "valid": True, "confidence": 0.95,
         "request_id": "test-request", "source_gps_uids": [11, 12],
+        "navigation_intent_id": None, "route_build_id": "test-build",
+        "source_game_session_id": "test-session",
+        "source_map_key": "test-map",
+        "source_dataset_fingerprint": "test-fingerprint",
         "points": [[0.0, 10.0, 0.0], [0.0, 10.0, -50.0]],
         "lane_match": {"revision": 7, "lateral_error_m": 0.0,
                        "heading_error_rad": 0.0},
@@ -116,6 +120,8 @@ def ready_navigation_state(**extra):
         "lane_trajectory_heartbeat": now,
         "game_route_node_uids": [11, 12],
         "nav_recalc_request": "test-request", "telemetry_valid": True,
+        "game_session_id": "test-session", "active_map_key": "test-map",
+        "active_dataset_fingerprint": "test-fingerprint",
         "lane_match": snapshot["lane_match"], "game_route_distance": 500.0,
     }
     values.update(extra)

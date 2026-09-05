@@ -92,6 +92,16 @@ def lane_authority_rejection_reason(state, snapshot, now=None):
                     f"lane trajectory revision is {snapshot_revision}")
         if not snapshot_matches_navigation_intent(state, snapshot):
             return "lane trajectory belongs to a different navigation intent"
+        context_checks = (
+            ("source_game_session_id", "game_session_id", "game session"),
+            ("source_map_key", "active_map_key", "map dataset"),
+            ("source_dataset_fingerprint", "active_dataset_fingerprint",
+             "map dataset fingerprint"),
+        )
+        for snapshot_key, state_key, label in context_checks:
+            source_value = snapshot.get(snapshot_key)
+            if source_value is not None and source_value != state.get(state_key):
+                return f"lane trajectory belongs to a stale {label}"
         heartbeat = float(state.get("lane_trajectory_heartbeat", 0.0) or 0.0)
         if heartbeat <= 0.0 or now - heartbeat > 0.5:
             return "map plugin heartbeat is stale"
@@ -174,6 +184,43 @@ def game_gps_navigation_present(state, snapshot=None):
         return True
     return bool(len(state.get("game_route_node_uids", []) or []) >= 2
                 or len(snapshot.get("source_gps_uids", []) or []) >= 2)
+
+
+def navigation_command(state, snapshot, *, gps_active, now=None):
+    """Read one finished command, with its existing trajectory identity.
+
+    A fresh map heartbeat is not evidence that an older steering calculation
+    used the new pose/revision. Check the packet, not independent scalar keys.
+    Legacy/recorded producers retain their existing scalar contract.
+    """
+    now = time.monotonic() if now is None else float(now)
+    packet = state.get("nav_steering_debug", {}) or {}
+    try:
+        if gps_active and packet.get("controller") == "frenet_bicycle":
+            if (not packet.get("authority_valid", False)
+                    or int(packet["authority_revision"]) != int(snapshot["revision"])):
+                return 0.0, 0.0, "steering command belongs to an invalid/stale revision"
+            if packet.get("navigation_intent_id") != snapshot.get("navigation_intent_id"):
+                return 0.0, 0.0, "steering command belongs to a different navigation intent"
+            identity_fields = (
+                "route_build_id", "source_game_session_id", "source_map_key",
+                "source_dataset_fingerprint")
+            for key in identity_fields:
+                if not snapshot.get(key) or packet.get(key) != snapshot.get(key):
+                    return 0.0, 0.0, f"steering command {key} is stale"
+            for key in ("computed_at", "observation_timestamp"):
+                age = now - float(packet[key])
+                if not math.isfinite(age) or not 0.0 <= age <= 0.5:
+                    return 0.0, 0.0, f"steering command {key} is stale"
+            target, curvature = float(packet["output"]), float(packet["local_curvature"])
+        else:
+            target = float(state.get("nav_steering", 0.0) or 0.0)
+            curvature = float(state.get("path_curve_signed_curvature", 0.0) or 0.0)
+        if not math.isfinite(target) or not math.isfinite(curvature):
+            return 0.0, 0.0, "steering command is non-finite"
+    except (TypeError, ValueError, OverflowError, KeyError, AttributeError):
+        return 0.0, 0.0, "steering command metadata is malformed"
+    return target, curvature, ""
 
 
 def _authority_reason_key(reason):
@@ -371,6 +418,8 @@ class Plugin(BasePlugin):
             snapshot_revision, snapshot_confidence = -1, 0.0
         gps_navigation_present = game_gps_navigation_present(
             self.sdk.shared_state, snapshot)
+        nav_command, nav_command_curvature, command_reason = navigation_command(
+            self.sdk.shared_state, snapshot, gps_active=gps_navigation_present)
         recorded_route_requested = bool(
             self.sdk.shared_state.get("navigation_source") == "recorded_route"
             or self.sdk.shared_state.get("recorded_route_active", False))
@@ -392,6 +441,9 @@ class Plugin(BasePlugin):
                 self.sdk.shared_state, snapshot)
             authority_revision = -1
             authority_source = "none"
+        if (not authority_reason and command_reason
+                and self.sdk.shared_state.get("nav_active", False)):
+            authority_reason = command_reason
         active_requested = bool(self.sdk.shared_state.get(
             "autopilot_active", False))
         # Starting steering on a boundary or while facing a neighbouring arm
@@ -453,6 +505,20 @@ class Plugin(BasePlugin):
         # immediately and return all automatic commands to a safe neutral.
         autopilot_engaged = bool(self.sdk.shared_state.get(
             "autopilot_active", False))
+
+        # Handover also applies on braking/toll early returns, not only cruise.
+        # SCS gameSteer is left-positive; the one actuator is right-positive.
+        try:
+            observed_game_steering = -float(truck.get("gameSteer", 0.0) or 0.0)
+            if not math.isfinite(observed_game_steering):
+                observed_game_steering = 0.0
+            observed_game_steering = float(np.clip(observed_game_steering, -1., 1.))
+        except (TypeError, ValueError, OverflowError):
+            observed_game_steering = 0.0
+        if not autopilot_engaged or not self._was_active:
+            self._reset_steering_dynamics(observed_game_steering)
+        self._was_active = autopilot_engaged
+        self._engage_blend = 1.0 if autopilot_engaged else 0.0
 
         # Arrival is terminal and must run before reverse recovery or the
         # automatic-D handshake. With gear 0/-1 those branches used to return
@@ -603,15 +669,21 @@ class Plugin(BasePlugin):
                 self._last_throttle = 0.0
                 self.sdk.controller.set_brake(0.0)
                 self._last_brake = 0.0
+                # The selector handshake is longitudinal only. It must not
+                # leave the previous CTL_STEERING value latched for up to
+                # 450 ms: execute this tick's already validated packet through
+                # the same sole physical dynamics used by normal driving.
+                settle_nav_active = bool(
+                    navigation_authority_safe
+                    and self.sdk.shared_state.get("nav_active", False))
+                self._last_steering = self._ramp_steering(
+                    nav_command if settle_nav_active else 0.0, dt,
+                    speed_ms=abs(speed),
+                    curvature_per_m=nav_command_curvature)
+                self.sdk.controller.set_steering(self._last_steering)
                 self.sdk.shared_state.set(
                     "navigation_status", "Pripravujem jazdu dopredu")
-                # Keep the HUD controls visible during this intentional wait.
-                self.tags.speed_kmh = round(speed_kmh, 1)
-                self.tags.nav_active = bool(
-                    self.sdk.shared_state.get("nav_active", False)
-                    and navigation_authority_safe)
-                self.tags.brake = 0.0
-                self.tags.throttle = 0.0
+                self._publish_control_tags(speed_kmh, settle_nav_active)
                 return
             self.sdk.shared_state.set(
                 "navigation_status", "Jazda dopredu pripravená")
@@ -638,18 +710,23 @@ class Plugin(BasePlugin):
                 navigation_authority_safe
                 and self.sdk.shared_state.get("nav_active", False))
             if emergency_nav_active:
-                nav_steering = float(self.sdk.shared_state.get(
-                    "nav_steering", 0.0) or 0.0)
-                target = float(np.clip(nav_steering, -1.0, 1.0))
+                target = float(np.clip(nav_command, -1.0, 1.0))
             else:
                 target = 0.0
-            self._last_steering = self._ramp_steering(target, dt)
+            self._last_steering = self._ramp_steering(
+                target, dt, speed_ms=abs(speed), curvature_per_m=nav_command_curvature)
             self.sdk.controller.set_steering(self._last_steering)
             self.sdk.shared_state.set("tts_message", "Emergency stop triggered!")
             self._publish_control_tags(speed_kmh, emergency_nav_active)
             return
 
         if system_state == "PAY_TOLL":
+            toll_nav_active = bool(navigation_authority_safe
+                and self.sdk.shared_state.get("nav_active", False))
+            self._last_steering = self._ramp_steering(
+                nav_command if toll_nav_active else 0.0, dt,
+                speed_ms=abs(speed), curvature_per_m=nav_command_curvature)
+            self.sdk.controller.set_steering(self._last_steering)
             if speed_kmh > 0.5:
                 self.sdk.controller.set_throttle(0.0)
                 self._last_throttle = 0.0
@@ -657,6 +734,7 @@ class Plugin(BasePlugin):
             else:
                 self._set_brake(0.0, dt)
                 self.sdk.controller.pay_toll()
+            self._publish_control_tags(speed_kmh, toll_nav_active)
             return
 
         # --- Gather all brake requests, combine via max() -------------------
@@ -777,21 +855,8 @@ class Plugin(BasePlugin):
         nav_active = bool(self.sdk.shared_state.get("nav_active", False)
                           and navigation_authority_safe)
 
-        # Bumpless handover: on the rising edge synchronize the actuator state
-        # with the measured game wheel. The rate/acceleration model then owns
-        # the whole transition; no second engagement multiplier reshapes it.
+        # Handover was synchronized before every early-return braking branch.
         active = bool(self.sdk.shared_state.get("autopilot_active", False))
-        try:
-            # SCS gameSteer has the opposite sign to the controller input.
-            # Begin at the proven game-wheel value instead of assumed zero.
-            observed_game_steering = float(np.clip(
-                -float(truck.get("gameSteer", 0.0) or 0.0), -1.0, 1.0))
-        except (TypeError, ValueError, OverflowError):
-            observed_game_steering = 0.0
-        if active and not self._was_active:
-            self._reset_steering_dynamics(observed_game_steering)
-        self._was_active = active
-        self._engage_blend = 1.0 if active else 0.0
         if not active:
             self._reset_steering_dynamics(observed_game_steering)
         elif navigation_unreliable:
@@ -802,11 +867,12 @@ class Plugin(BasePlugin):
             # that doing so briefly emitted the opposite sign at an S-bend and
             # then carried excess lock into the recovery. The physical slew
             # limiter below is the one and only output-shaping stage.
-            nav_steering = float(self.sdk.shared_state.get("nav_steering", 0.0) or 0.0)
+            nav_steering = nav_command
             self.sdk.shared_state.set(
                 "nav_steering_filtered", nav_steering)
             target = float(np.clip(nav_steering, -1.0, 1.0))
-            self._last_steering = self._ramp_steering(target, dt)
+            self._last_steering = self._ramp_steering(
+                target, dt, speed_ms=abs(speed), curvature_per_m=nav_command_curvature)
         elif not gps_navigation_present:
             # Vision lane-keeping (no map/route): gentle proportional law on the
             # smoothed lane offset.  lane_offset is +when the lane centre is to
@@ -942,6 +1008,29 @@ class Plugin(BasePlugin):
                 diagnostic_game_steering = float(observed_game_steering)
                 diagnostic_game_tracking = (
                     diagnostic_game_steering - float(steering_val))
+                diagnostic_lock_rad = float(
+                    steering_debug.get("steering_lock_rad", float("nan")))
+                tyre_angles = [float(value) for value in
+                               (truck.get("roadWheelAnglesRad", []) or [])
+                               if math.isfinite(float(value))]
+                diagnostic_tyre_angle = (
+                    sum(tyre_angles) / len(tyre_angles)
+                    if tyre_angles else float("nan"))
+                diagnostic_command_angle = (
+                    float(steering_val) * diagnostic_lock_rad)
+                diagnostic_game_to_command = (
+                    diagnostic_game_steering / float(steering_val)
+                    if abs(float(steering_val)) >= 0.05 else float("nan"))
+                diagnostic_tyre_per_game = (
+                    diagnostic_tyre_angle / diagnostic_game_steering
+                    if abs(diagnostic_game_steering) >= 0.05
+                    else float("nan"))
+                yaw_rate = float(truck.get("yawRateRadS", float("nan")))
+                diagnostic_yaw_curvature = (
+                    yaw_rate / abs(float(speed))
+                    if (truck.get("yawRateValid", False)
+                        and abs(float(speed)) > 1.0
+                        and math.isfinite(yaw_rate)) else float("nan"))
                 diagnostic_dynamics_flags = ",".join(name for name in (
                     "target_saturated", "rate_limited",
                     "acceleration_limited", "dt_limited",
@@ -979,6 +1068,9 @@ class Plugin(BasePlugin):
                 diagnostic_trajectory_phase = "malformed"
                 diagnostic_dt = diagnostic_dt_used = float("nan")
                 diagnostic_game_steering = diagnostic_game_tracking = float("nan")
+                diagnostic_lock_rad = diagnostic_tyre_angle = float("nan")
+                diagnostic_command_angle = diagnostic_game_to_command = float("nan")
+                diagnostic_tyre_per_game = diagnostic_yaw_curvature = float("nan")
                 diagnostic_dynamics_flags = "malformed"
             self.sdk.shared_state.set("steering_dynamics_diagnostic", {
                 **dict(getattr(self, "_steering_dynamics_debug", {}) or {}),
@@ -998,6 +1090,12 @@ class Plugin(BasePlugin):
                 "lookahead_m": diagnostic_guidance_lookahead,
                 "observed_game_steering": diagnostic_game_steering,
                 "game_steer_tracking_error": diagnostic_game_tracking,
+                "configured_lock_rad": diagnostic_lock_rad,
+                "commanded_tyre_angle_rad": diagnostic_command_angle,
+                "measured_tyre_angle_rad": diagnostic_tyre_angle,
+                "game_to_command_ratio": diagnostic_game_to_command,
+                "tyre_rad_per_game_input": diagnostic_tyre_per_game,
+                "yaw_curvature_per_m": diagnostic_yaw_curvature,
                 "navigation_intent_id": self.sdk.shared_state.get(
                     "navigation_intent_id"),
                 "revision": snapshot_revision,
@@ -1030,7 +1128,10 @@ class Plugin(BasePlugin):
                 "safe_rate=%.3f/s game_steer=%.3f game_tracking=%.3f "
                 "heading_fb=%.3f cte_fb=%.3f steer_flags=%s "
                 "intent=%s lane_revision=%s LaneId=%s elevation=%s "
-                "confidence=%.3f reject=%s",
+                "confidence=%.3f reject=%s lock_rad=%.3f "
+                "command_tyre_rad=%.4f game_to_command=%s "
+                "tyre_rad_per_game=%s yaw_k=%s "
+                "tyre_angles_rad=%s yaw_right_rad_s=%s sdk_frame_us=%s",
                 active, nav_active, self._engage_blend,
                 live_lateral, live_heading, float(lane_offset),
                 float(self.sdk.shared_state.get("nav_steering", 0.0) or 0.0),
@@ -1076,8 +1177,16 @@ class Plugin(BasePlugin):
                 self.sdk.shared_state.get("navigation_intent_id"),
                 snapshot_revision,
                 diagnostic_lane_id, diagnostic_elevation_layer,
-                snapshot_confidence,
-                authority_reason)
+                snapshot_confidence, authority_reason, diagnostic_lock_rad,
+                diagnostic_command_angle,
+                ("-" if not math.isfinite(diagnostic_game_to_command)
+                 else f"{diagnostic_game_to_command:.3f}"),
+                ("-" if not math.isfinite(diagnostic_tyre_per_game)
+                 else f"{diagnostic_tyre_per_game:.3f}"),
+                ("-" if not math.isfinite(diagnostic_yaw_curvature)
+                 else f"{diagnostic_yaw_curvature:.5f}"),
+                truck.get("roadWheelAnglesRad", []),
+                truck.get("yawRateRadS"), truck.get("sdkFrameTimeUs"))
 
         self.sdk.controller.set_steering(steering_val)
 

@@ -214,6 +214,8 @@ def _simulate_closed_loop(
             vehicle_envelope=envelope,
             control_authority=authority,
             control_dt_s=dt,
+            vehicle_curvature_per_m=math.tan(game_wheel
+                * NORMALIZED_STEERING_ANGLE_RAD)/TRUCK_WHEELBASE_M,
         )
         trailer_debug = route.last_steering_debug.get(
             "trailer_envelope", {})
@@ -229,10 +231,12 @@ def _simulate_closed_loop(
         # Nonlinear bicycle plant. Positive road-wheel angle decreases the ETS2
         # heading, which is a right turn in this coordinate convention.
         road_wheel_angle = game_wheel * NORMALIZED_STEERING_ANGLE_RAD
-        heading -= (float(speed_ms) / TRUCK_WHEELBASE_M
+        yaw_step = -(float(speed_ms) / TRUCK_WHEELBASE_M
                     * math.tan(road_wheel_angle) * dt)
-        x += -math.sin(heading) * float(speed_ms) * dt
-        z += -math.cos(heading) * float(speed_ms) * dt
+        # Midpoint integration avoids a fictitious half-tick inward drift.
+        x += -math.sin(heading + yaw_step * .5) * float(speed_ms) * dt
+        z += -math.cos(heading + yaw_step * .5) * float(speed_ms) * dt
+        heading += yaw_step
 
         if with_trailer:
             articulation = _wrapped_angle(heading - trailer_heading)
