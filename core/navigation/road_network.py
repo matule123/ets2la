@@ -1932,6 +1932,113 @@ class RoadNetwork:
                 result.append(segment)
         return tuple(result)
 
+    def _prefab_lane_topology_evidence(self, segment, instance=None):
+        """Describe authored PPD connectivity for failure diagnostics only.
+
+        Display ``mapPoints`` polygons are reported as presentation data and
+        are never promoted to a drivable-area boundary.
+        """
+        token = segment.lane_id.prefab_token
+        if token in (None, "graph"):
+            return None
+        pair = (min(segment.start_uid, segment.end_uid),
+                max(segment.start_uid, segment.end_uid))
+        if instance is None:
+            candidates = [candidate for candidate in
+                          self._prefab_pairs.get(pair, ())
+                          if candidate[0] == token]
+            instance = candidates[0] if len(candidates) == 1 else None
+        lane_data = self._prefab_lane_data.get(token) or {}
+        curves = tuple(lane_data.get("curves", ()) or ())
+        nodes = tuple(lane_data.get("nodes", ()) or ())
+        path = tuple(segment.lane_id.connector_path or ())
+        chain = []
+        for curve_index in path:
+            if 0 <= curve_index < len(curves):
+                curve = curves[curve_index]
+                chain.append({
+                    "curve_index": int(curve_index),
+                    "nav_node_index": int(curve.get(
+                        "nav_node_index", -1)),
+                    "next_lines": [int(value) for value in
+                                   curve.get("next_lines", ())],
+                    "prev_lines": [int(value) for value in
+                                   curve.get("prev_lines", ())],
+                })
+        first = path[0] if path else None
+        last = path[-1] if path else None
+        input_nodes = [index for index, node in enumerate(nodes)
+                       if first is not None
+                       and first in node.get("input_lanes", ())]
+        output_nodes = [index for index, node in enumerate(nodes)
+                        if last is not None
+                        and last in node.get("output_lanes", ())]
+        links_proven = bool(path) and len(chain) == len(path)
+        if links_proven:
+            for previous, following in zip(path, path[1:]):
+                if (following not in curves[previous].get("next_lines", ())
+                        or previous not in curves[following].get(
+                            "prev_lines", ())):
+                    links_proven = False
+                    break
+        return {
+            "lane_id": lane_id_payload(segment.lane_id),
+            "gps_pair": [int(segment.start_uid), int(segment.end_uid)],
+            "connector_index": segment.lane_id.connector_index,
+            "connector_path": [int(value) for value in path],
+            "ppd_path": str(lane_data.get("path", "") or ""),
+            "descriptor_node_uids": ([int(value) for value in instance[1]]
+                                     if instance is not None else []),
+            "origin_node_index": (int(instance[2])
+                                  if instance is not None else None),
+            "input_descriptor_node_indices": input_nodes,
+            "output_descriptor_node_indices": output_nodes,
+            "curve_chain": chain,
+            "curve_chain_links_proven": links_proven,
+            "nav_curve_count": len(curves),
+            "display_polygon_count": len(
+                self._prefab_map_polygons.get(token, ())),
+            "drivable_boundary_source": "unavailable",
+        }
+
+    def _adjacent_prefab_data_evidence(self, segment, instance):
+        """Report placed descriptions sharing a node; never infer lane edges."""
+        if instance is None or not segment.centerline:
+            return []
+        source_uids = set(instance[1])
+        point = segment.centerline[-1]
+        cx, cz = self._cell(point.x, point.z)
+        seen = set()
+        evidence = []
+        for dx in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                for candidate in self._prefab_grid.get((cx+dx, cz+dz), ()):
+                    marker = (candidate[0], tuple(candidate[1]))
+                    if marker in seen or candidate == instance:
+                        continue
+                    seen.add(marker)
+                    shared = source_uids.intersection(candidate[1])
+                    if not shared:
+                        continue
+                    token = candidate[0]
+                    lane_data = self._prefab_lane_data.get(token) or {}
+                    evidence.append({
+                        "prefab_token": token,
+                        "descriptor_node_uids": [int(value)
+                                                 for value in candidate[1]],
+                        "origin_node_index": int(candidate[2]),
+                        "shared_node_uids": sorted(int(value)
+                                                   for value in shared),
+                        "ppd_path": str(lane_data.get("path", "") or ""),
+                        "nav_curve_count": len(
+                            lane_data.get("curves", ()) or ()),
+                        "display_polygon_count": len(
+                            self._prefab_map_polygons.get(token, ())),
+                        "drivable_boundary_source": "unavailable",
+                    })
+        return sorted(evidence, key=lambda item: (
+            item["prefab_token"], item["descriptor_node_uids"]))
+
     @staticmethod
     def _centerline_length(points):
         return sum(math.dist(
@@ -3086,6 +3193,41 @@ class RoadNetwork:
                         if (entry_gap > MAX_PROVEN_LANE_BOUNDARY_GAP_M
                                 or not self._lane_boundary_is_continuous(
                                     active, segments[0])):
+                            source_instance = None
+                            source_prefab_evidence = None
+                            required_prefab_evidence = None
+                            adjacent_prefab_evidence = []
+                            try:
+                                source_pair = (
+                                    min(active.start_uid, active.end_uid),
+                                    max(active.start_uid, active.end_uid))
+                                source_instances = [
+                                    candidate for candidate in
+                                    self._prefab_pairs.get(source_pair, ())
+                                    if candidate[0]
+                                        == active.lane_id.prefab_token]
+                                source_instance = (source_instances[0]
+                                                   if len(source_instances) == 1
+                                                   else None)
+                                source_prefab_evidence = (
+                                    self._prefab_lane_topology_evidence(
+                                        active, source_instance))
+                                required_prefab_evidence = (
+                                    self._prefab_lane_topology_evidence(
+                                        segments[0], source_instance
+                                        if (source_instance is not None
+                                            and segments[0].lane_id.prefab_token
+                                                == active.lane_id.prefab_token)
+                                        else None))
+                                adjacent_prefab_evidence = (
+                                    self._adjacent_prefab_data_evidence(
+                                        active, source_instance))
+                            except Exception:
+                                # Observational evidence must never alter lane
+                                # selection, the failure code, or build result.
+                                logging.debug(
+                                    "prefab failure evidence unavailable",
+                                    exc_info=True)
                             target_candidates = []
                             segment_index = self._road_segment_by_uid.get(
                                 active.lane_id.road_uid)
@@ -3135,10 +3277,23 @@ class RoadNetwork:
                                         prefab_token,
                                 }
                             else:
-                                lane_change_reason = (
-                                    "LANE_CHANGE_NO_TARGET_CONNECTOR: no "
-                                    "adjacent road lane reaches the first GPS "
-                                    "connector")
+                                if (source_prefab_evidence is not None
+                                        and required_prefab_evidence is not None):
+                                    lane_change_reason = (
+                                        "LANE_CHANGE_NO_TARGET_CONNECTOR: "
+                                        f"current prefab connector "
+                                        f"{active.lane_id.connector_index} path "
+                                        f"{tuple(active.lane_id.connector_path)} "
+                                        "does not reach GPS-required connector "
+                                        f"{segments[0].lane_id.connector_index} "
+                                        f"path {tuple(segments[0].lane_id.connector_path)}; "
+                                        f"{lateral_gap:.2f} m lateral gap has "
+                                        "no directed lane edge")
+                                else:
+                                    lane_change_reason = (
+                                        "LANE_CHANGE_NO_TARGET_CONNECTOR: no "
+                                        "adjacent road lane reaches the first "
+                                        "GPS connector")
                                 lane_change_details = {
                                     "accepted": False,
                                     "failure_reason": lane_change_reason,
@@ -3149,6 +3304,30 @@ class RoadNetwork:
                                                  int(active.end_uid)],
                                     "prefab_token": segments[0].lane_id.
                                         prefab_token,
+                                    "available_connector":
+                                        source_prefab_evidence,
+                                    "required_connector":
+                                        required_prefab_evidence,
+                                    # Numeric PPD ordinals are not stable map
+                                    # identifiers and remain useful in the
+                                    # privacy-preserving JSON export.
+                                    "available_curve_ordinal":
+                                        active.lane_id.connector_index,
+                                    "available_nav_curve_chain": [int(value)
+                                        for value in
+                                        active.lane_id.connector_path],
+                                    "required_curve_ordinal":
+                                        segments[0].lane_id.connector_index,
+                                    "required_nav_curve_chain": [int(value)
+                                        for value in segments[0].lane_id.
+                                        connector_path],
+                                    "shared_boundary_gap_m": float(entry_gap),
+                                    "shared_boundary_lateral_gap_m": float(
+                                        lateral_gap),
+                                    "adjacent_prefab_data":
+                                        adjacent_prefab_evidence,
+                                    "directed_edge_proven": False,
+                                    "drivable_boundary_source": "unavailable",
                                 }
                             safe_diagnostic_call(
                                 diagnostics, "observe_lane_change",

@@ -1,5 +1,6 @@
 import logging
 import math
+import os
 import time
 import numpy as np
 from sdk.base_plugin import BasePlugin
@@ -9,6 +10,8 @@ from core.navigation.runtime_preflight import (
 from core.navigation.navigation_intent import snapshot_matches_navigation_intent
 from core.navigation.route import curve_speed_limit_ms
 from core.steering_dynamics import SteeringDynamics
+from core.steering_replay import SteeringReplayBuffer
+from core.paths import app_dir
 
 
 # --- Tuning (kept here, mirrored into settings under "autopilot" section) -----
@@ -339,8 +342,12 @@ class Plugin(BasePlugin):
         self._drive_engage_started = 0.0
         self._lane_lock_acquired = False
         self._last_authority_stop_reason = None
+        # Observational only: about 55 seconds at the measured ~65 Hz runtime.
+        # Nothing in the controller reads this buffer.
+        self._steering_replay = SteeringReplayBuffer()
 
     def on_stop(self):
+        self._export_steering_replay("plugin_stop")
         logging.info("Autopilot Plugin stopped.")
         self.enabled = False
 
@@ -389,6 +396,117 @@ class Plugin(BasePlugin):
                 "level": "WARNING",
                 "message": f"Autopilot automatically disabled: {reason}",
             },
+        })
+        # File I/O is deliberately after the atomic safety transition. A slow
+        # or failed diagnostic export must never delay actuator authority loss.
+        self._export_steering_replay("automatic_disable", reason)
+
+    def _steering_replay_identity(self):
+        snapshot = self.sdk.shared_state.get("lane_trajectory", {}) or {}
+        return {
+            "navigation_intent_id": snapshot.get(
+                "navigation_intent_id",
+                self.sdk.shared_state.get("navigation_intent_id")),
+            "route_build_id": snapshot.get("route_build_id"),
+            "revision": snapshot.get("revision"),
+            "source_game_session_id": snapshot.get(
+                "source_game_session_id",
+                self.sdk.shared_state.get("game_session_id")),
+            "source_map_key": snapshot.get(
+                "source_map_key",
+                self.sdk.shared_state.get("active_map_key")),
+            "source_dataset_fingerprint": snapshot.get(
+                "source_dataset_fingerprint",
+                self.sdk.shared_state.get("active_dataset_fingerprint")),
+        }
+
+    def _export_steering_replay(self, event, detail=""):
+        replay = getattr(self, "_steering_replay", None)
+        if replay is None or len(replay) == 0:
+            return None
+        try:
+            directory = os.path.join(app_dir(), "route-diagnostics")
+            path = replay.export(
+                directory, reason=event,
+                identity={**self._steering_replay_identity(),
+                          "detail": str(detail or "")})
+            logging.info(
+                "Dense steering replay exported: samples=%d reason=%s path=%s",
+                len(replay), event, path)
+            return path
+        except Exception as error:
+            # Diagnostics must never change control or prevent shutdown.
+            logging.warning("Dense steering replay export failed: %s", error)
+            return None
+
+    def _record_steering_replay_tick(self, truck, snapshot, steering_val,
+                                     observed_game_steering, speed_kmh,
+                                     authority_reason):
+        replay = getattr(self, "_steering_replay", None)
+        if replay is None:
+            return
+        steering_debug = self.sdk.shared_state.get(
+            "nav_steering_debug", {}) or {}
+        dynamics = dict(getattr(
+            self, "_steering_dynamics_debug", {}) or {})
+        match = (self.sdk.shared_state.get("lane_match")
+                 or snapshot.get("lane_match") or {})
+        trailer = steering_debug.get("trailer_envelope", {}) or {}
+        lane_id = (match.get("active_lane_id")
+                   or snapshot.get("active_lane_id") or {})
+        replay.append({
+            "control_dt_s": getattr(self, "_last_control_dt", None),
+            "sdk_frame_us": truck.get("sdkFrameTimeUs"),
+            "observation_timestamp": steering_debug.get(
+                "observation_timestamp"),
+            "computed_at": steering_debug.get("computed_at"),
+            "autopilot_active": bool(self.sdk.shared_state.get(
+                "autopilot_active", False)),
+            "nav_active": bool(self.sdk.shared_state.get("nav_active", False)),
+            "speed_kmh": speed_kmh,
+            # Preserve the established console/replay field names and also
+            # carry explicit-unit aliases for downstream analysis.
+            "lane_cte": match.get("lateral_error_m"),
+            "lane_cte_m": match.get("lateral_error_m"),
+            "lane_heading": match.get("heading_error_rad"),
+            "lane_heading_error_rad": match.get("heading_error_rad"),
+            "lane_id": lane_id,
+            "elevation_layer": match.get("elevation_layer"),
+            "preview_k": steering_debug.get("preview_curvature"),
+            "preview_k_per_m": steering_debug.get("preview_curvature"),
+            "local_k_per_m": steering_debug.get("local_curvature"),
+            "curve_reference": steering_debug.get("feed_forward"),
+            "heading_feedback": steering_debug.get("heading_feedback"),
+            "cte_feedback": steering_debug.get("cte_feedback"),
+            "guidance_delta": steering_debug.get("feedback"),
+            "guidance_applied": steering_debug.get("feedback_applied"),
+            "steer_raw": dynamics.get("raw_target"),
+            "steer_bounded": dynamics.get("bounded_target"),
+            "steer_out": steering_val,
+            "engine_applied_steering": self.sdk.shared_state.get(
+                "engine_applied_steering"),
+            "game_steer": observed_game_steering,
+            "game_steer_right": observed_game_steering,
+            "tyre_angles_rad": truck.get("roadWheelAnglesRad", []),
+            "yaw_right_rad_s": truck.get("yawRateRadS"),
+            "vehicle_curvature_source": steering_debug.get(
+                "vehicle_curvature_source"),
+            "curvature_observation_weight": steering_debug.get(
+                "curvature_observation_weight"),
+            "predicted_frenet_cte_m": steering_debug.get(
+                "predicted_frenet_cte_m"),
+            "predicted_frenet_heading_error_rad": steering_debug.get(
+                "predicted_frenet_heading_error_rad"),
+            "steering_rate_per_s": dynamics.get("rate_per_s"),
+            "steering_acceleration_per_s2": dynamics.get(
+                "acceleration_per_s2"),
+            "trailer_cte_m": trailer.get("trailer_cte_m"),
+            "trailer_required_offset_m": trailer.get("required_offset_m"),
+            "trailer_applied_offset_m": trailer.get("applied_offset_m"),
+            "trailer_curvature_per_m": trailer.get(
+                "preview_curvature_per_m"),
+            "authority_rejection": str(authority_reason or ""),
+            **self._steering_replay_identity(),
         })
 
     def on_tick(self, delta_time: float):
@@ -1189,6 +1307,9 @@ class Plugin(BasePlugin):
                 truck.get("yawRateRadS"), truck.get("sdkFrameTimeUs"))
 
         self.sdk.controller.set_steering(steering_val)
+        self._record_steering_replay_tick(
+            truck, snapshot, steering_val, observed_game_steering,
+            speed_kmh, authority_reason)
 
         # Confirm engagement only after this plugin has accepted the exact
         # navigation authority and initialized/applied a safe control output.
