@@ -318,25 +318,58 @@ class UltraPilotEngine:
         # Our forward speed (m/s) for relative-velocity math.
         my_speed = float(self.shared_state.get("truck_speed_ms", 0.0) or 0.0)
         best = None  # (ahead, closing_speed)
+        crossing = None  # (time_to_conflict, ahead)
         for v in traffic:
             dx, dz = v["x"] - px, v["z"] - pz
             ahead = dx * (-sin_h) + dz * (-cos_h)
             lateral = dx * cos_h - dz * sin_h
-            if not (2.0 < ahead < 120.0 and abs(lateral) < 2.6):  # in our lane, ahead
+            if not (2.0 < ahead < 120.0):
                 continue
-            # Skip ONCOMING vehicles (facing roughly opposite to us) — only brake
-            # for cars going the same way, so we don't stop for the other lane.
             vyaw = v.get("yaw", heading)
             facing = math.cos(vyaw - heading)   # ~1 same dir, ~-1 oncoming
-            if facing < -0.3:
-                continue
-            # Closing speed = how fast the gap is shrinking (m/s). Lead's speed
-            # projected onto our forward direction.
             lead_speed = float(v.get("speed", 0.0) or 0.0)
-            closing = max(0.0, my_speed - lead_speed)
-            if best is None or ahead < best[0]:
-                best = (ahead, closing)
+            if facing >= math.cos(math.radians(35.0)):
+                if abs(lateral) >= 2.6:
+                    continue
+                closing = max(0.0, my_speed - lead_speed)
+                if best is None or ahead < best[0]:
+                    best = (ahead, closing)
+                continue
+
+            # A crossing vehicle is not a same-lane lead.  Brake only when the
+            # two measured velocity vectors put both bodies in the same safety
+            # envelope at the same future instant.  This is geometry/TTC, not
+            # a state latch or threshold smoother.
+            if facing <= -0.3 or lead_speed <= 0.1:
+                continue
+            truck_vx, truck_vz = -sin_h * my_speed, -cos_h * my_speed
+            vehicle_vx = -math.sin(vyaw) * lead_speed
+            vehicle_vz = -math.cos(vyaw) * lead_speed
+            relative_vx = vehicle_vx - truck_vx
+            relative_vz = vehicle_vz - truck_vz
+            relative_speed2 = relative_vx**2 + relative_vz**2
+            if relative_speed2 <= 1e-6:
+                continue
+            conflict_t = -(dx*relative_vx + dz*relative_vz) / relative_speed2
+            if not (0.0 <= conflict_t <= 6.0):
+                continue
+            closest_x = dx + relative_vx * conflict_t
+            closest_z = dz + relative_vz * conflict_t
+            vehicle_width = max(1.5, float(v.get("width", 2.0) or 2.0))
+            vehicle_length = max(3.0, float(v.get("length", 4.5) or 4.5))
+            collision_radius = 1.3 + 0.5 * math.hypot(
+                vehicle_width, vehicle_length)
+            if math.hypot(closest_x, closest_z) > collision_radius:
+                continue
+            if crossing is None or conflict_t < crossing[0]:
+                crossing = (conflict_t, ahead)
         if best is None:
+            if crossing is not None:
+                conflict_t, ahead = crossing
+                self.shared_state.set("lead_distance", ahead)
+                if conflict_t <= 1.0:
+                    return 1.0
+                return float(((5.0 - min(5.0, conflict_t)) / 4.0) ** 2)
             # Never let a vehicle from an older frame keep red-light queue
             # creep enabled after that vehicle has left our lane/buffer.
             self.shared_state.set("lead_distance", None)

@@ -101,7 +101,7 @@ class SettingsManager:
                 # Provisional input -> road-wheel calibration for the tested
                 # truck/setup. Runtime validates 0.60..0.95 rad and fails
                 # closed outside it; no online adaptation is performed.
-                "steering_lock_rad": 0.78
+                "steering_lock_rad": 0.70
             },
             "hud": {
                 "enabled": True,

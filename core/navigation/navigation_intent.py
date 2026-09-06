@@ -112,6 +112,20 @@ def ordered_suffix_prefix_overlap(old_values, new_values):
     return 0
 
 
+def ordered_common_prefix_overlap(old_values, new_values):
+    """Longest trustworthy common prefix for a contracting SDK horizon."""
+    old = normalize_route_items(old_values)
+    new = normalize_route_items(new_values)
+    count = 0
+    for old_item, new_item in zip(old, new):
+        if old_item.uid != new_item.uid:
+            break
+        count += 1
+    if count and not _distance_evidence_matches(old[:count], new[:count]):
+        return 0
+    return count
+
+
 def destination_identity(dest_city, items, explicit_request=None):
     """Return only a destination identity proven independently of window size."""
     if explicit_request not in (None, ""):
@@ -145,8 +159,20 @@ def classify_navigation_buffer(old_values, new_values, *,
             and tuple(old_context) != tuple(new_context)):
         return (NavigationBufferClass.SESSION_OR_DATASET_CHANGED, 0, 0, 0,
                 "game session, map key or dataset fingerprint changed")
-    if (old_destination is not None and new_destination is not None
-            and old_destination != new_destination):
+    destination_changed = bool(
+        old_destination is not None and new_destination is not None
+        and old_destination != new_destination)
+    terminal_window_identity_changed = bool(
+        destination_changed
+        and isinstance(old_destination, (tuple, list))
+        and isinstance(new_destination, (tuple, list))
+        and old_destination and new_destination
+        and old_destination[0] == "terminal_uid"
+        and new_destination[0] == "terminal_uid")
+    # Explicit UI requests and city identities are independent evidence and
+    # must win immediately.  A terminal UID is only the end of the currently
+    # exposed SDK window; rolling/truncated horizon topology is stronger.
+    if destination_changed and not terminal_window_identity_changed:
         return (NavigationBufferClass.TRUE_REROUTE, 0, 0, 0,
                 "proven waypoint or terminal destination identity changed")
     if not new:
@@ -170,6 +196,18 @@ def classify_navigation_buffer(old_values, new_values, *,
                 len(new)-len(old),
                 "the existing ordered window is unchanged and only its horizon grew")
 
+    # ETS2 may contract the visible horizon or replace only its terminal
+    # sentinel.  A long ordered prefix is proof about the road sequence; the
+    # changing final terminal UID is not proof of a new user destination.
+    common_prefix = ordered_common_prefix_overlap(old, new)
+    if len(new) < len(old) and common_prefix >= 2:
+        terminal_replacement = len(new) - common_prefix
+        if terminal_replacement <= 1:
+            return (NavigationBufferClass.OVERLAPPING_CONTINUATION,
+                    common_prefix, len(old)-common_prefix,
+                    terminal_replacement,
+                    "ordered common prefix proves the same route while the SDK horizon contracted")
+
     overlap = ordered_suffix_prefix_overlap(old, new)
     # Two consecutive ordered edges are the minimum topological proof. UID
     # occurrences are not collapsed into a set, and remaining-distance samples
@@ -181,6 +219,10 @@ def classify_navigation_buffer(old_values, new_values, *,
             return (NavigationBufferClass.OVERLAPPING_CONTINUATION,
                     overlap, trimmed, extended,
                     "ordered suffix/prefix overlap proves a rolling continuation")
+
+    if destination_changed:
+        return (NavigationBufferClass.TRUE_REROUTE, overlap, 0, 0,
+                "terminal identity changed without ordered route continuity")
 
     return (NavigationBufferClass.TRUE_REROUTE, overlap, 0, 0,
             "ordered windows lack a trustworthy forward overlap")

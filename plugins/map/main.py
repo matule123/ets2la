@@ -6,7 +6,7 @@ import json
 import tempfile
 from sdk.base_plugin import BasePlugin
 from core.navigation.route import Route
-from core.lateral_controller import REFERENCE_LOCK_RAD
+from core.lateral_controller import REFERENCE_LOCK_RAD, WHEELBASE_M
 from core.navigation.lane_trajectory import build_lane_trajectory
 from core.navigation.route_diagnostics import (
     RouteBuildDiagnostics, classify_failure, dataset_fingerprint,
@@ -16,7 +16,8 @@ from core.navigation.route_diagnostics import (
 from core.navigation.runtime_preflight import CONFIDENCE_THRESHOLD
 from core.navigation.navigation_intent import (
     CONTINUATION_CLASSES, NavigationBufferClass, NavigationBuildGuard,
-    classify_navigation_buffer, ordered_suffix_prefix_overlap,
+    classify_navigation_buffer, ordered_common_prefix_overlap,
+    ordered_suffix_prefix_overlap,
     snapshot_matches_navigation_intent,
 )
 from core.paths import app_dir
@@ -89,6 +90,7 @@ class Plugin(BasePlugin):
         self._explored_road_uids = set()
         self._exploration_dirty = False
         self._exploration_save_t = 0.0
+        self._exploration_save_running = False
         self._lane_signature = None
         self._rolling_route_refresh_needed = False
         self._lane_path = None
@@ -184,6 +186,8 @@ class Plugin(BasePlugin):
         if (not self._exploration_dirty
                 or not self._exploration_fingerprint):
             return False
+        fingerprint = self._exploration_fingerprint
+        explored_snapshot = frozenset(self._explored_road_uids)
         temporary = None
         try:
             payload = {"version": 1, "datasets": {}}
@@ -200,8 +204,8 @@ class Plugin(BasePlugin):
                 # Replace malformed presentation history; navigation data is
                 # never stored in this file.
                 payload["datasets"] = {}
-            payload["datasets"][self._exploration_fingerprint] = [
-                str(uid) for uid in sorted(self._explored_road_uids)
+            payload["datasets"][fingerprint] = [
+                str(uid) for uid in sorted(explored_snapshot)
             ]
             directory = os.path.dirname(MAP_EXPLORATION_FILE) or "."
             os.makedirs(directory, exist_ok=True)
@@ -213,7 +217,12 @@ class Plugin(BasePlugin):
                 os.fsync(stream.fileno())
             os.replace(temporary, MAP_EXPLORATION_FILE)
             temporary = None
-            self._exploration_dirty = False
+            # Do not lose a road recorded while the background writer was
+            # serialising the previous snapshot.
+            if (self._exploration_fingerprint == fingerprint
+                    and frozenset(self._explored_road_uids)
+                        == explored_snapshot):
+                self._exploration_dirty = False
             return True
         except OSError as error:
             logging.warning("Live-map exploration history was not saved: %s",
@@ -225,6 +234,23 @@ class Plugin(BasePlugin):
                     os.unlink(temporary)
                 except OSError:
                     pass
+
+    def _schedule_map_exploration_save(self):
+        """Persist presentation history without blocking control publication."""
+        if self._exploration_save_running or not self._exploration_dirty:
+            return False
+        import threading
+        self._exploration_save_running = True
+
+        def _worker():
+            try:
+                self._save_map_exploration()
+            finally:
+                self._exploration_save_running = False
+
+        threading.Thread(target=_worker, name="MapExplorationSave",
+                         daemon=True).start()
+        return True
 
     def _record_explored_road(self):
         """Record the exact currently localized ordinary-road LaneId."""
@@ -769,11 +795,25 @@ class Plugin(BasePlugin):
         covered = self._normalise_gps_uids(
             snapshot.get("covered_gps_uids", ()) or ())
         covered_overlap = ordered_suffix_prefix_overlap(covered, uids)
+        prefix_contraction = False
+        if covered_overlap < min(2, len(covered), len(uids)):
+            common_prefix = ordered_common_prefix_overlap(covered, uids)
+            prefix_contraction = bool(
+                classification == NavigationBufferClass.OVERLAPPING_CONTINUATION
+                and len(uids) < len(covered)
+                # Three ordered UIDs prove two directed edges.  A two-node
+                # fragment proves only one edge and is too short to retain an
+                # older geometry snapshot across a changed horizon.
+                and common_prefix >= 3
+                and len(uids) - common_prefix <= 1)
+            if prefix_contraction:
+                covered_overlap = common_prefix
         if covered_overlap < min(2, len(covered), len(uids)):
             # The truck advanced beyond the geometry horizon. Old points no
             # longer prove the current route and must not be retained.
             return None, False
-        remaining_covered = covered[-covered_overlap:]
+        remaining_covered = (covered[:covered_overlap] if prefix_contraction
+                             else covered[-covered_overlap:])
         rebased = dict(snapshot)
         rebased["source_gps_uids"] = [int(uid) for uid in uids]
         rebased["covered_gps_uids"] = [int(uid) for uid in remaining_covered]
@@ -2224,9 +2264,7 @@ class Plugin(BasePlugin):
             self._update_lane_trajectory(pos, heading, observation_altitude)
         self._record_explored_road()
         self._exploration_save_t += delta_time
-        if self._exploration_save_t >= 15.0:
-            self._exploration_save_t = 0.0
-            self._save_map_exploration()
+        exploration_save_due = self._exploration_save_t >= 15.0
 
         # Display-only local road geometry. It is deliberately separate from
         # nav_path and therefore cannot influence autopilot steering.
@@ -2451,10 +2489,21 @@ class Plugin(BasePlugin):
                             "elevation_layer": metadata["elevation_layer"],
                         }
                 vehicle_curvature = None
-                if vehicle_observation.get("yaw_rate_valid") and abs(speed) > 1.0:
-                    yaw_rate = float(vehicle_observation["yaw_rate_rad_s"])
-                    if math.isfinite(yaw_rate):
-                        vehicle_curvature = yaw_rate / abs(speed)
+                vehicle_curvature_source = "unavailable"
+                try:
+                    wheel_angles = [float(value) for value in
+                        (vehicle_observation.get(
+                            "road_wheel_angles_rad", ()) or ())
+                        if math.isfinite(float(value))]
+                except (TypeError, ValueError, OverflowError):
+                    wheel_angles = []
+                if wheel_angles:
+                    # Direct road-wheel telemetry is the actuator state.  Yaw
+                    # also includes tyre slip/body motion and was the noisy,
+                    # delayed signal that destabilised the old predictor.
+                    tyre_angle=sum(wheel_angles)/len(wheel_angles)
+                    vehicle_curvature=math.tan(tyre_angle)/WHEELBASE_M
+                    vehicle_curvature_source="road_wheel_angles_rad"
                 steer = route.steering(
                     pos, heading, speed, lane_offset_m=0.0,
                     cross_track_error_m=live_cte,
@@ -2486,6 +2535,7 @@ class Plugin(BasePlugin):
                     "sdk_frame_us": vehicle_observation.get("sdk_frame_us"),
                     "observation_xz": pos, "observation_heading_rad": heading,
                     "observation_speed_ms": speed,
+                    "vehicle_curvature_source": vehicle_curvature_source,
                     "navigation_intent_id": snapshot.get("navigation_intent_id"),
                     "route_build_id": snapshot.get("route_build_id"),
                     "source_game_session_id": snapshot.get(
@@ -2536,3 +2586,9 @@ class Plugin(BasePlugin):
                     "path_curve_distance_m": None,
                     "path_curve_signed_curvature": 0.0,
                 })
+        # JSON serialization, flush and fsync are presentation persistence.
+        # Schedule them only after this tick has published its fresh control
+        # packet; the worker must never age a valid packet past the 500 ms
+        # fail-closed stale-command limit.
+        if exploration_save_due and self._schedule_map_exploration_save():
+            self._exploration_save_t = 0.0
