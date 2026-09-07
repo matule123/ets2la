@@ -25,7 +25,14 @@ MIN_STEERING_LOCK_RAD = 0.60
 MAX_STEERING_LOCK_RAD = 0.95
 GAME_RESPONSE_S = 0.32
 TRANSPORT_S = 0.10
-ACTUATION_PREVIEW_S = GAME_RESPONSE_S + TRANSPORT_S
+# The controller observes a completed SDK frame rather than the continuous
+# plant at the exact calculation instant.  The 2026-09-06 dense replay has a
+# 66.7 ms median new-frame interval, so a sample is on average one half frame
+# old.  Add a conservative 30 ms observation phase to the identified actuator
+# and transport delay.  This is a causal timing term, not a filter or state.
+SDK_OBSERVATION_PHASE_S = 0.03
+ACTUATION_PREVIEW_S = (
+    GAME_RESPONSE_S + TRANSPORT_S + SDK_OBSERVATION_PHASE_S)
 # Critical-damping spatial length: two wheelbases rounded to the 2 m map
 # sampling scale.  The response distance weakens feedback at speed without
 # pretending that the current yaw rate will remain constant through the whole
@@ -34,14 +41,8 @@ ACTUATION_PREVIEW_S = GAME_RESPONSE_S + TRANSPORT_S
 # nominal model values are stress-tested at longer delay, not measured maxima.
 FEEDBACK_LENGTH_BASE_M = 8.0
 FEEDBACK_RESPONSE_S = 2 * ACTUATION_PREVIEW_S
-# Below this spatial curvature, wheel/yaw observations are not distinguishable
-# from the corrective transients seen on the 2026-09-06 straight (R > 500 m).
-# The continuous squared ratio below has no threshold, latch or temporal state.
-CURVATURE_OBSERVABILITY_FLOOR_PER_M = 1.0 / 500.0
 PREDICTOR_SUBSTEPS = 8
 PREDICTOR_ITERATIONS = 5
-
-
 def solve(curvature, preview_curvature, cte_m, heading_error_rad, speed_ms,
           trailer_offset_m=0.0, vehicle_curvature_per_m=None,
           response_s=ACTUATION_PREVIEW_S, steering_lock_rad=REFERENCE_LOCK_RAD):
@@ -63,17 +64,29 @@ def solve(curvature, preview_curvature, cte_m, heading_error_rad, speed_ms,
             and MIN_STEERING_LOCK_RAD <= steering_lock_rad
                 <= MAX_STEERING_LOCK_RAD):
         return 0.0, {"valid": False, "reason": "invalid actuator calibration"}
-    # Vehicle curvature is a delayed physical response, not a known future
-    # input.  The former predictor held one sample constant for the complete
-    # response horizon and thereby turned ordinary lag into positive feedback.
+    # Road-wheel curvature is retained as actuator diagnostics only.  Feeding
+    # it back into this geometric target created a second, faster actuator
+    # loop in front of SteeringDynamics: while the tyres lagged it increased
+    # the target, then removed that increase as the next SDK wheel sample
+    # arrived.  On the real constant bend this produced the observed
+    # 0.1134 -> 0.1232 -> 0.1105 command impulse despite stable path geometry
+    # and improving Frenet error.  Vehicle motion already enters this one
+    # controller through the current pose/CTE/heading; physical command
+    # execution belongs solely to SteeringDynamics and the game.
+    measured_vehicle_curvature = None
     if vehicle_curvature_per_m is not None:
-        kv=float(vehicle_curvature_per_m)
-        if not math.isfinite(kv):
+        measured_vehicle_curvature=float(vehicle_curvature_per_m)
+        if not math.isfinite(measured_vehicle_curvature):
             return 0.0, {"valid": False, "reason": "non-finite vehicle curvature"}
-    length=(max(FEEDBACK_LENGTH_BASE_M,
-                WHEELBASE_M+abs(v)*response_s)
-            if vehicle_curvature_per_m is not None else
-            FEEDBACK_LENGTH_BASE_M+abs(v)*FEEDBACK_RESPONSE_S)
+    # One deterministic spatial feedback length.  It must not change merely
+    # because road-wheel telemetry is present or momentarily unavailable.
+    # The chassis plus the configured actuator response is the physical
+    # distance travelled before a new wheel angle takes effect; 8 m remains
+    # the conservative lower bound identified by the independent plant.  This
+    # is geometry/speed based and has no temporal memory or dependence on
+    # delayed tyre samples.
+    length=max(FEEDBACK_LENGTH_BASE_M,
+               WHEELBASE_M+abs(v)*response_s)
 
     def control_at(error_m, error_heading):
         cosine=math.cos(error_heading)
@@ -91,22 +104,27 @@ def solve(curvature, preview_curvature, cte_m, heading_error_rad, speed_ms,
     demand,foundation,heading,lateral=control
     predicted_e,predicted_h=e,h
     observation_weight=0.0
-    if vehicle_curvature_per_m is not None and response_s > 0.0:
-        # The path supplies observability: on a confirmed bend physical wheel
-        # curvature is useful actuator-state evidence; on a geometrically
-        # straight road its small alternating residual is old command response.
-        signal=max(abs(k),abs(kp))
-        floor=CURVATURE_OBSERVABILITY_FLOOR_PER_M
-        observation_weight=signal*signal/(signal*signal+floor*floor)
-        measured_state=(foundation
-                        +observation_weight*(kv-foundation))
+    if response_s > 0.0:
+        # Predict the pose error at actuator response using only this tick's
+        # authoritative path and Frenet state.  The tyre measurement is
+        # intentionally absent: it is delayed plant evidence and made this
+        # algebraic target pulse whenever the SDK delivered a new wheel frame.
+        # Start from the *current* local path curvature, not the future preview
+        # foundation.  Assuming that the tyres already had kp made a straight
+        # approach wait until the curve was physically under the cab and then
+        # demand a sharp catch-up.  On a constant-radius arc k == kp, so this
+        # correction creates no periodic command modulation.
+        local_denominator=1+k*e
+        if local_denominator <= .10:
+            return 0.0, {
+                "valid": False,
+                "reason": "invalid predicted Frenet frame",
+            }
+        measured_state=k*math.cos(h)/local_denominator
         dt=response_s/PREDICTOR_SUBSTEPS
         transport=min(TRANSPORT_S,response_s)
         plant_tau=max(GAME_RESPONSE_S,response_s)
         original_e,original_h=e,h
-        # Fixed-point solution of command -> first-order tyre response ->
-        # predicted Frenet error -> command.  Relaxation is internal numerical
-        # convergence within this tick, never a filter across ticks.
         for _iteration in range(PREDICTOR_ITERATIONS):
             predicted_e,predicted_h=original_e,original_h
             valid_prediction=True
@@ -159,8 +177,7 @@ def solve(curvature, preview_curvature, cte_m, heading_error_rad, speed_ms,
         steering_angle_rad=angle, lock_rad=steering_lock_rad,
         frenet_heading_error_rad=h, frenet_cte_m=e,
         measured_vehicle_curvature_per_m=(
-            float(vehicle_curvature_per_m)
-            if vehicle_curvature_per_m is not None else None),
+            measured_vehicle_curvature),
         curvature_observation_weight=observation_weight,
         predicted_frenet_cte_m=predicted_e,
         predicted_frenet_heading_error_rad=predicted_h,

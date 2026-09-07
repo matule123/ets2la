@@ -119,8 +119,12 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
         lane_match = plugin._lane_match
         batch_count = len(sdk.shared_state.batches)
 
+        locator = plugin.road_net._runtime_lane_locator
         sdk.set("game_route_node_uids", [2, 3])
-        plugin._update_lane_trajectory((point.x, point.z), point.heading)
+        with mock.patch.object(
+                locator, "locate", wraps=locator.locate) as locate:
+            plugin._update_lane_trajectory(
+                (point.x, point.z), point.heading)
 
         after = sdk.get("lane_trajectory")
         self.assertTrue(after["valid"])
@@ -133,7 +137,13 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
         self.assertEqual(sdk.get("nav_path"), after["display_points"])
         self.assertEqual(sdk.get("map_path"), after["points"])
         self.assertEqual(sdk.get("nav_trajectory_revision"), revision)
-        self.assertIs(plugin._lane_match, lane_match)
+        # The immutable route and its revision are retained, but live control
+        # authority must be re-observed on this tick.  Object identity was the
+        # old bug: it proved that the early-return skipped LaneLocator.
+        locate.assert_called_once()
+        self.assertIs(locate.call_args.args[3], lane_match)
+        self.assertEqual(plugin._lane_match.lane_id, lane_match.lane_id)
+        self.assertTrue(sdk.get("lane_match")["valid"])
         new_batches = sdk.shared_state.batches[batch_count:]
         self.assertFalse(any(
             isinstance(batch.get("lane_trajectory"), dict)

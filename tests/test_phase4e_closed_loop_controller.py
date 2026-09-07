@@ -23,6 +23,7 @@ from core.navigation.route import (
     curve_speed_limit_ms,
 )
 from core.steering_dynamics import SteeringDynamics
+from core.lateral_controller import solve as solve_lateral
 
 
 DT_S = 0.05
@@ -35,6 +36,7 @@ GAME_COMMAND_DELAY_TICKS = 2
 ROAD_R83_LANE = (624008901, 1, 0, "", -1, ())
 PREFAB_R83_LANE = (
     624008902, 1, 0, "phase4e-r83-prefab", 0, (3, 7))
+ROAD_TO_PREFAB_FLAG_LANE = (624008903, -1, 0, "", -1, ())
 R83_ELEVATION_LAYER = 45
 
 
@@ -316,6 +318,31 @@ def _simulate_closed_loop(
 
 
 class Phase4EClosedLoopControllerTests(unittest.TestCase):
+    def test_real_constant_curve_tyre_updates_cannot_pulse_geometric_target(self):
+        """15:36:56 replay: delayed tyre telemetry is not steering authority."""
+        commands = []
+        diagnostics = []
+        # The 0.1134 -> 0.1232 -> 0.1105 real event had nearly constant
+        # curvature and improving CTE/heading, while the observed road wheel
+        # caught up from about 0.020 to 0.038 rad.  Hold the actual geometric
+        # state fixed here to isolate the old duplicate actuator loop.
+        for tyre_angle_rad in (0.0200, 0.0210, 0.0383):
+            command, debug = solve_lateral(
+                0.013648, 0.014449, -0.6516, 0.03886, 8.0,
+                vehicle_curvature_per_m=(
+                    math.tan(tyre_angle_rad) / TRUCK_WHEELBASE_M),
+                response_s=GAME_STEERING_RESPONSE_S,
+                steering_lock_rad=NORMALIZED_STEERING_ANGLE_RAD)
+            commands.append(command)
+            diagnostics.append(debug)
+        self.assertLessEqual(max(commands) - min(commands), 1e-12)
+        self.assertTrue(all(
+            debug["curvature_observation_weight"] == 0.0
+            for debug in diagnostics))
+        self.assertEqual(len({
+            round(debug["measured_vehicle_curvature_per_m"], 8)
+            for debug in diagnostics}), 3)
+
     def test_unscoped_curve_uses_a_centred_tangent_and_exact_curvature(self):
         """Legacy paths cannot lose half their turn to a forward secant."""
         for direction in (-1.0, 1.0):
@@ -684,6 +711,58 @@ class Phase4EClosedLoopControllerTests(unittest.TestCase):
                             - before["heading_error_rad"]),
                         math.radians(0.5))
         self.assertLess(abs(after["raw"] - before["raw"]), 0.04)
+
+    def test_road_prefab_direction_flags_do_not_hide_upcoming_curve(self):
+        """15:36:14 regression: road -1 -> prefab +1 is not a turn gap.
+
+        The LanePath already proves the directed edge.  Because road and
+        prefab direction flags have different reference frames, the real
+        mod_ger_67 transition used opposite raw flags on one continuous
+        forward trajectory.  Geometry derivatives may cross it only after
+        the immediate 3-D samples also prove forward continuity.
+        """
+        ground_points, boundaries = _constant_curve_path(
+            1.0, 35.0, entry_m=45.0, exit_m=55.0)
+        points = [(x, 45.0, z) for x, z in ground_points]
+        unscoped = Route(points)
+        boundary = min(
+            range(len(points)),
+            key=lambda index: abs(
+                unscoped._cumulative_m[index] - boundaries[0]))
+        authorities = [
+            (ROAD_TO_PREFAB_FLAG_LANE, R83_ELEVATION_LAYER)
+            if index <= boundary else
+            (PREFAB_R83_LANE, R83_ELEVATION_LAYER)
+            for index in range(len(points))
+        ]
+        route = Route(points, point_authorities=authorities)
+        self.assertTrue(route._authority_geometry_compatible(
+            authorities[boundary], authorities[boundary + 1],
+            boundary, boundary + 1))
+
+        probe_index = boundary - 2
+        heading = _heading_between(
+            route.points[probe_index - 1], route.points[probe_index + 1])
+        scoped_command = route.steering(
+            route.points[probe_index], heading, 8.0,
+            cross_track_error_m=0.0,
+            control_authority=_authority_payload(
+                ROAD_TO_PREFAB_FLAG_LANE, revision=11),
+            control_dt_s=DT_S)
+        unscoped_command = unscoped.steering(
+            unscoped.points[probe_index], heading, 8.0,
+            cross_track_error_m=0.0, control_dt_s=DT_S)
+        self.assertGreater(abs(scoped_command), 0.01)
+        self.assertLess(abs(scoped_command - unscoped_command), 0.02)
+
+    def test_opposite_road_flags_without_prefab_proof_stay_separate(self):
+        points = [(0.0, 0.0, 0.0), (0.0, 0.0, 2.0),
+                  (0.0, 0.0, 4.0), (0.0, 0.0, 6.0)]
+        first = ((71, -1, 0, "", -1, ()), 0)
+        second = ((72, 1, 0, "", -1, ()), 0)
+        route = Route(points, point_authorities=[first, first, second, second])
+        self.assertFalse(route._authority_geometry_compatible(
+            first, second, 1, 2))
 
     def test_quantised_elevation_change_uses_real_3d_continuity(self):
         """A continuous grade may cross layer 47->49 without a wheel step."""

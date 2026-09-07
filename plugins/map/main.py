@@ -1113,6 +1113,7 @@ class Plugin(BasePlugin):
         raw_uids = self.sdk.get("game_route_node_uids", []) or []
         uids = self._normalise_gps_uids(raw_uids)
         signature = uids
+        rebased_this_tick = False
         if signature != self._lane_signature:
             current_snapshot = self.sdk.get("lane_trajectory", {}) or {}
             old_window = self._normalise_gps_uids(
@@ -1150,43 +1151,60 @@ class Plugin(BasePlugin):
                     rebased["source_map_key"],
                     rebased["source_dataset_fingerprint"],
                 )
-                return self._lane_path
-            self._lane_signature = signature
-            self._rolling_route_refresh_needed = False
-            self._lane_match = None
-            self._lane_localization_current = False
-            self._reset_lane_loss()
-            self._lane_failure_signature = None
-            self._lane_retry_at = 0.0
-            locator = getattr(self.road_net, "_runtime_lane_locator", None)
-            if locator is not None:
-                locator.previous = None
-            declared_class = self.sdk.get(
-                "navigation_buffer_classification")
-            incompatible_change = bool(
-                observed_class in {
-                    NavigationBufferClass.TRUE_REROUTE,
-                    NavigationBufferClass.SESSION_OR_DATASET_CHANGED,
-                }
-                or declared_class in {
-                    NavigationBufferClass.TRUE_REROUTE.value,
-                    NavigationBufferClass.SESSION_OR_DATASET_CHANGED.value,
-                    NavigationBufferClass.DESTINATION_REMOVED.value,
-                })
-            if current_snapshot.get("valid", False) and not incompatible_change:
-                # A compatible window must never erase a usable trajectory.
-                # A horizon refresh below can replace it only after validation.
-                self._rolling_route_refresh_needed = True
-            elif current_snapshot.get("valid", False):
-                self._publish_invalid_lane_trajectory(
-                    "GPS navigation intent changed", uids,
-                    "Načítavam GPS trasu", log_failure=False)
-            elif current_snapshot.get("navigation_intent_id") != self.sdk.get(
-                    "navigation_intent_id"):
-                self._publish_invalid_lane_trajectory(
-                    "Načítavam GPS trasu", uids, "Načítavam GPS trasu",
-                    log_failure=False)
-            self.sdk.set("navigation_recalculating", bool(len(uids) >= 2))
+                # Do not return here.  A rolling SDK window is compatible
+                # only with the immutable LanePath, not proof that the
+                # *current* truck pose has been localised for this map tick.
+                # Returning before LaneLocator used to leave nav_active false
+                # for one to three control ticks at ordinary road/prefab
+                # boundaries, despite unchanged intent/revision/build.  Carry
+                # the rebased snapshot through the normal live-localisation
+                # and command publication path below; no previous steering
+                # value is held and no authority check is relaxed.
+                rebased_this_tick = True
+            else:
+                # Only an unrebased input change invalidates live
+                # localisation.  A proven rolling prefix is the same route
+                # occurrence, so clearing LaneLocator.previous here would
+                # throw away the very hysteresis needed at a prefab boundary.
+                self._lane_signature = signature
+                self._rolling_route_refresh_needed = False
+                self._lane_match = None
+                self._lane_localization_current = False
+                self._reset_lane_loss()
+                self._lane_failure_signature = None
+                self._lane_retry_at = 0.0
+                locator = getattr(self.road_net, "_runtime_lane_locator", None)
+                if locator is not None:
+                    locator.previous = None
+                declared_class = self.sdk.get(
+                    "navigation_buffer_classification")
+                incompatible_change = bool(
+                    observed_class in {
+                        NavigationBufferClass.TRUE_REROUTE,
+                        NavigationBufferClass.SESSION_OR_DATASET_CHANGED,
+                    }
+                    or declared_class in {
+                        NavigationBufferClass.TRUE_REROUTE.value,
+                        NavigationBufferClass.SESSION_OR_DATASET_CHANGED.value,
+                        NavigationBufferClass.DESTINATION_REMOVED.value,
+                    })
+                if (current_snapshot.get("valid", False)
+                        and not incompatible_change):
+                    # A compatible window must never erase a usable
+                    # trajectory. A horizon refresh below can replace it only
+                    # after validation.
+                    self._rolling_route_refresh_needed = True
+                elif current_snapshot.get("valid", False):
+                    self._publish_invalid_lane_trajectory(
+                        "GPS navigation intent changed", uids,
+                        "Načítavam GPS trasu", log_failure=False)
+                elif (current_snapshot.get("navigation_intent_id")
+                        != self.sdk.get("navigation_intent_id")):
+                    self._publish_invalid_lane_trajectory(
+                        "Načítavam GPS trasu", uids, "Načítavam GPS trasu",
+                        log_failure=False)
+                self.sdk.set(
+                    "navigation_recalculating", bool(len(uids) >= 2))
         if len(uids) < 2:
             return None
         if self.road_net is None or not self.road_net.loaded:
@@ -1230,8 +1248,13 @@ class Plugin(BasePlugin):
                 "Vehicle position changed discontinuously", uids,
                 "GPS route is being recalculated", log_failure=False)
             return None
+        # A rebase may announce that a later horizon refresh is due, but its
+        # just-published immutable prefix is already valid.  Localise and
+        # publish this control tick first; the next tick can perform the
+        # expensive replacement build without creating a transient zero
+        # steering packet at the UID boundary.
         needs_build = bool(
-            self._rolling_route_refresh_needed
+            (self._rolling_route_refresh_needed and not rebased_this_tick)
             or not current.get("valid", False))
         failure_signature = (uids, str(current.get("failure_reason", "")))
         # Re-localise on the authoritative lane each tick. Moving between the

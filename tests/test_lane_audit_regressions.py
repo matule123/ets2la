@@ -922,9 +922,17 @@ class LaneGeometryAuditTests(unittest.TestCase):
         commands = []
         for index in range(4, len(route.points) - 8, 3):
             pos = route.points[index]
-            tangent = route.points[index + 2]
+            # Route now uses a centred local derivative.  Supplying a forward
+            # two-point secant here injected half a sample arc of artificial
+            # heading error and made this sign-transition test depend on the
+            # controller gain/lock calibration.  Use the geometric tangent
+            # the simulated vehicle would have on the lane centreline; the
+            # assertions below still require both steering signs and a prompt
+            # crossing through the real S-curve transition.
+            tangent = route.points[index + 1]
+            tangent_before = route.points[index - 1]
             commands.append(route.steering(
-                pos, self._path_heading(pos, tangent), 12.0,
+                pos, self._path_heading(tangent_before, tangent), 12.0,
                 cross_track_error_m=0.0))
         self.assertTrue(any(value > 0.03 for value in commands))
         self.assertTrue(any(value < -0.03 for value in commands))

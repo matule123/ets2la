@@ -189,7 +189,7 @@ def game_gps_navigation_present(state, snapshot=None):
                 or len(snapshot.get("source_gps_uids", []) or []) >= 2)
 
 
-def navigation_command(state, snapshot, *, gps_active, now=None):
+def navigation_command(state, snapshot, *, gps_active, now=None, packet=None):
     """Read one finished command, with its existing trajectory identity.
 
     A fresh map heartbeat is not evidence that an older steering calculation
@@ -197,7 +197,12 @@ def navigation_command(state, snapshot, *, gps_active, now=None):
     Legacy/recorded producers retain their existing scalar contract.
     """
     now = time.monotonic() if now is None else float(now)
-    packet = state.get("nav_steering_debug", {}) or {}
+    # The caller may provide the exact immutable packet it observed.  This is
+    # important for dense diagnostics: the map plugin can publish a newer
+    # packet between command acceptance and end-of-tick recording, which used
+    # to pair the accepted steer_raw with the *next* packet's geometry.
+    packet = dict(packet if packet is not None
+                  else (state.get("nav_steering_debug", {}) or {}))
     try:
         if gps_active and packet.get("controller") == "frenet_bicycle":
             if (not packet.get("authority_valid", False)
@@ -345,6 +350,7 @@ class Plugin(BasePlugin):
         # Observational only: about 55 seconds at the measured ~65 Hz runtime.
         # Nothing in the controller reads this buffer.
         self._steering_replay = SteeringReplayBuffer()
+        self._accepted_navigation_command = {}
 
     def on_stop(self):
         self._export_steering_replay("plugin_stop")
@@ -447,6 +453,8 @@ class Plugin(BasePlugin):
             return
         steering_debug = self.sdk.shared_state.get(
             "nav_steering_debug", {}) or {}
+        accepted = dict(getattr(
+            self, "_accepted_navigation_command", {}) or {})
         dynamics = dict(getattr(
             self, "_steering_dynamics_debug", {}) or {})
         match = (self.sdk.shared_state.get("lane_match")
@@ -460,6 +468,19 @@ class Plugin(BasePlugin):
             "observation_timestamp": steering_debug.get(
                 "observation_timestamp"),
             "computed_at": steering_debug.get("computed_at"),
+            "accepted_packet_computed_at": accepted.get("computed_at"),
+            "accepted_packet_observation_timestamp": accepted.get(
+                "observation_timestamp"),
+            "accepted_packet_sdk_frame_us": accepted.get("sdk_frame_us"),
+            "accepted_packet_output": accepted.get("output"),
+            "accepted_nav_command": accepted.get("command"),
+            "accepted_nav_curvature_per_m": accepted.get("curvature_per_m"),
+            "accepted_command_rejection": accepted.get("rejection"),
+            "accepted_packet_controller": accepted.get("controller"),
+            "accepted_packet_revision": accepted.get("authority_revision"),
+            "accepted_packet_navigation_intent_id": accepted.get(
+                "navigation_intent_id"),
+            "accepted_packet_route_build_id": accepted.get("route_build_id"),
             "autopilot_active": bool(self.sdk.shared_state.get(
                 "autopilot_active", False)),
             "nav_active": bool(self.sdk.shared_state.get("nav_active", False)),
@@ -475,6 +496,18 @@ class Plugin(BasePlugin):
             "preview_k": steering_debug.get("preview_curvature"),
             "preview_k_per_m": steering_debug.get("preview_curvature"),
             "local_k_per_m": steering_debug.get("local_curvature"),
+            "tracking_progress_m": steering_debug.get("tracking_progress_m"),
+            "tracking_segment_index": steering_debug.get(
+                "tracking_segment_index"),
+            "tracking_segment_fraction": steering_debug.get(
+                "tracking_segment_fraction"),
+            "tracking_projection_xz": steering_debug.get(
+                "tracking_projection_xz"),
+            "local_tangent_heading_rad": steering_debug.get(
+                "local_tangent_heading_rad"),
+            "observation_xz": steering_debug.get("observation_xz"),
+            "observation_heading_rad": steering_debug.get(
+                "observation_heading_rad"),
             "curve_reference": steering_debug.get("feed_forward"),
             "heading_feedback": steering_debug.get("heading_feedback"),
             "cte_feedback": steering_debug.get("cte_feedback"),
@@ -536,8 +569,17 @@ class Plugin(BasePlugin):
             snapshot_revision, snapshot_confidence = -1, 0.0
         gps_navigation_present = game_gps_navigation_present(
             self.sdk.shared_state, snapshot)
+        accepted_packet = dict(self.sdk.shared_state.get(
+            "nav_steering_debug", {}) or {})
         nav_command, nav_command_curvature, command_reason = navigation_command(
-            self.sdk.shared_state, snapshot, gps_active=gps_navigation_present)
+            self.sdk.shared_state, snapshot, gps_active=gps_navigation_present,
+            packet=accepted_packet)
+        self._accepted_navigation_command = {
+            **accepted_packet,
+            "command": float(nav_command),
+            "curvature_per_m": float(nav_command_curvature),
+            "rejection": str(command_reason or ""),
+        }
         recorded_route_requested = bool(
             self.sdk.shared_state.get("navigation_source") == "recorded_route"
             or self.sdk.shared_state.get("recorded_route_active", False))

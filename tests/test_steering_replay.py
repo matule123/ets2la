@@ -97,6 +97,13 @@ class SteeringReplayBufferTests(unittest.TestCase):
                 "curvature_observation_weight": 0.8,
                 "predicted_frenet_cte_m": 0.08,
                 "predicted_frenet_heading_error_rad": -0.02,
+                "tracking_progress_m": 81.5,
+                "tracking_segment_index": 41,
+                "tracking_segment_fraction": 0.25,
+                "tracking_projection_xz": [10.0, 20.0],
+                "local_tangent_heading_rad": 0.4,
+                "observation_xz": [10.1, 20.2],
+                "observation_heading_rad": 0.42,
                 "trailer_envelope": {
                     "trailer_cte_m": 0.5,
                     "required_offset_m": 0.2,
@@ -112,6 +119,19 @@ class SteeringReplayBufferTests(unittest.TestCase):
             "raw_target": -0.12, "bounded_target": -0.12,
             "rate_per_s": -0.2, "acceleration_per_s2": 0.4,
         }
+        plugin._accepted_navigation_command = {
+            "computed_at": 39.98,
+            "observation_timestamp": 39.97,
+            "sdk_frame_us": 123455,
+            "output": -0.12,
+            "command": -0.12,
+            "curvature_per_m": -0.010,
+            "rejection": "",
+            "controller": "frenet_bicycle",
+            "authority_revision": 9,
+            "navigation_intent_id": "intent-9",
+            "route_build_id": "build-9",
+        }
         plugin._steering_replay = SteeringReplayBuffer(8)
         truck = {"sdkFrameTimeUs": 123456, "roadWheelAnglesRad": [-0.14],
                  "yawRateRadS": -0.2}
@@ -126,10 +146,17 @@ class SteeringReplayBufferTests(unittest.TestCase):
                 "vehicle_curvature_source", "curvature_observation_weight",
                 "predicted_frenet_cte_m",
                 "predicted_frenet_heading_error_rad", "route_build_id",
-                "revision", "lane_id"):
+                "revision", "lane_id", "accepted_nav_command",
+                "accepted_packet_output", "accepted_packet_sdk_frame_us",
+                "accepted_packet_revision", "tracking_progress_m",
+                "tracking_segment_index", "tracking_segment_fraction",
+                "tracking_projection_xz", "local_tangent_heading_rad",
+                "observation_xz", "observation_heading_rad"):
             self.assertIn(key, row)
         self.assertEqual(row["sdk_frame_us"], 123456)
         self.assertEqual(row["route_build_id"], "build-9")
+        self.assertEqual(row["accepted_nav_command"], -0.12)
+        self.assertEqual(row["accepted_packet_sdk_frame_us"], 123455)
 
     def test_export_failure_cannot_block_automatic_disable(self):
         state = State({"autopilot_active": True,

@@ -101,6 +101,12 @@ AUTHORITY_PROJECTION_MAX_DISTANCE_M = 2.4
 # cannot satisfy these bounds.
 AUTHORITY_DERIVATIVE_MAX_SAMPLE_GAP_M = 3.25
 AUTHORITY_DERIVATIVE_MAX_VERTICAL_STEP_M = 0.75
+# Road lanes encode direction against the road item while prefab connectors
+# encode it against the connector definition.  Their raw +/- flags can differ
+# on one correctly directed road->prefab edge.  In that heterogeneous case we
+# require the incoming, boundary and outgoing X/Z tangents to agree within
+# 70 degrees before a derivative may cross the already validated edge.
+AUTHORITY_DERIVATIVE_MAX_HEADING_JUMP_RAD = math.radians(70.0)
 # A lane-centred tractor does not imply a lane-contained semi-trailer.  The
 # trailer axle follows a smaller radius.  These dimensions are deliberately
 # conservative and the resulting tractor offset is always capped by the
@@ -491,11 +497,20 @@ class Route:
         except (TypeError, IndexError):
             return False
         if (first_lane is None or second_lane is None
-                or first_direction != second_direction
                 or first_elevation is None or second_elevation is None):
             return False
+        same_direction_flag = first_direction == second_direction
+        try:
+            first_is_prefab = bool(first_lane[3])
+            second_is_prefab = bool(second_lane[3])
+        except (TypeError, IndexError):
+            return False
+        heterogeneous_boundary = first_is_prefab != second_is_prefab
+        if not same_direction_flag and not heterogeneous_boundary:
+            return False
         if first_elevation == second_elevation:
-            return True
+            if same_direction_flag:
+                return True
         if (first_index is None or second_index is None
                 or int(second_index) != int(first_index) + 1
                 or not (0 <= int(first_index) < len(self.world_points))
@@ -511,11 +526,45 @@ class Route:
             dz = float(second_point[2]) - float(first_point[2])
         except (TypeError, ValueError, OverflowError):
             return False
-        return bool(
+        spatially_continuous = bool(
             all(math.isfinite(value) for value in (dx, dy, dz))
             and math.sqrt(dx * dx + dy * dy + dz * dz)
                 <= AUTHORITY_DERIVATIVE_MAX_SAMPLE_GAP_M
             and abs(dy) <= AUTHORITY_DERIVATIVE_MAX_VERTICAL_STEP_M)
+        if not spatially_continuous:
+            return False
+        if same_direction_flag:
+            return True
+
+        # A differing road/prefab flag is not accepted on label semantics
+        # alone.  Prove that the ordered trajectory actually crosses the
+        # boundary in one forward direction.  This check is derivative-only:
+        # it cannot create connectivity, change LaneId, or expand projection
+        # authority.
+        first_index = int(first_index)
+        second_index = int(second_index)
+        if first_index < 1 or second_index + 1 >= len(self.world_points):
+            return False
+        previous = self.world_points[first_index - 1]
+        following = self.world_points[second_index + 1]
+        vectors = (
+            (float(self.world_points[first_index][0]) - float(previous[0]),
+             float(self.world_points[first_index][2]) - float(previous[2])),
+            (dx, dz),
+            (float(following[0]) - float(self.world_points[second_index][0]),
+             float(following[2]) - float(self.world_points[second_index][2])),
+        )
+        minimum_dot = math.cos(AUTHORITY_DERIVATIVE_MAX_HEADING_JUMP_RAD)
+        for left, right in zip(vectors, vectors[1:]):
+            left_length = math.hypot(*left)
+            right_length = math.hypot(*right)
+            if left_length < 0.5 or right_length < 0.5:
+                return False
+            alignment = ((left[0] * right[0] + left[1] * right[1])
+                         / (left_length * right_length))
+            if not math.isfinite(alignment) or alignment < minimum_dot:
+                return False
+        return True
 
     def _authority_geometry_bounds(self, authority, progress: float,
                                    reach_m: float):
@@ -1307,5 +1356,10 @@ class Route:
             "authority_valid": True, "authority_lane_id": authority_lane,
             "authority_revision": authority_revision,
             "authority_projection_distance_m": projection_distance_m,
+            "tracking_progress_m": progress,
+            "tracking_segment_index": idx,
+            "tracking_segment_fraction": _fraction,
+            "tracking_projection_xz": projection,
+            "local_tangent_heading_rad": path_heading,
         }
         return steer
