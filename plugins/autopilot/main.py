@@ -422,7 +422,7 @@ class Plugin(BasePlugin):
         })
         # File I/O is deliberately after the atomic safety transition. A slow
         # or failed diagnostic export must never delay actuator authority loss.
-        self._export_steering_replay("automatic_disable", reason)
+        self._export_and_rotate_steering_replay("automatic_disable", reason)
 
     def _steering_replay_identity(self):
         snapshot = self.sdk.shared_state.get("lane_trajectory", {}) or {}
@@ -461,6 +461,20 @@ class Plugin(BasePlugin):
             # Diagnostics must never change control or prevent shutdown.
             logging.warning("Dense steering replay export failed: %s", error)
             return None
+
+    def _export_and_rotate_steering_replay(self, event, detail=""):
+        """Close one driving episode without mixing it with the next one."""
+        replay = getattr(self, "_steering_replay", None)
+        try:
+            capacity = int(replay.capacity) if replay is not None else None
+            if capacity is not None and not 2 <= capacity <= 20000:
+                capacity = 3600
+        except (TypeError, ValueError, OverflowError):
+            capacity = 3600 if replay is not None else None
+        path = self._export_steering_replay(event, detail)
+        if capacity is not None:
+            self._steering_replay = SteeringReplayBuffer(capacity)
+        return path
 
     def _record_steering_replay_tick(self, truck, snapshot, steering_val,
                                      observed_game_steering, speed_kmh,
@@ -748,7 +762,16 @@ class Plugin(BasePlugin):
             observed_game_steering = float(np.clip(observed_game_steering, -1., 1.))
         except (TypeError, ValueError, OverflowError):
             observed_game_steering = 0.0
-        if not autopilot_engaged or not self._was_active:
+        was_active = bool(self._was_active)
+        if was_active and not autopilot_engaged:
+            # Ignore synthetic/aborted sub-second engagements. A real manual
+            # drive at the normal control cadence comfortably exceeds this;
+            # suppressing tiny files also keeps a bounced hotkey from
+            # polluting route-diagnostics.
+            replay = getattr(self, "_steering_replay", None)
+            if replay is not None and len(replay) >= 20:
+                self._export_and_rotate_steering_replay("manual_disable")
+        if not autopilot_engaged or not was_active:
             self._reset_steering_dynamics(observed_game_steering)
         self._was_active = autopilot_engaged
         self._engage_blend = 1.0 if autopilot_engaged else 0.0
@@ -1195,9 +1218,12 @@ class Plugin(BasePlugin):
                     trailer_debug.get("applied_offset_m", 0.0) or 0.0)
                 diagnostic_trailer_candidate = float(
                     trailer_debug.get("candidate_offset_m", 0.0) or 0.0)
-                diagnostic_trailer_clearance = float(
-                    trailer_debug.get(
-                        "estimated_trailer_clearance_m", float("nan")))
+                trailer_clearance_value = trailer_debug.get(
+                    "estimated_trailer_clearance_m")
+                diagnostic_trailer_clearance = (
+                    float(trailer_clearance_value)
+                    if trailer_clearance_value is not None
+                    else float("nan"))
                 diagnostic_trailer_mode = str(
                     trailer_debug.get("reference_mode", "cab_centered")
                     or "cab_centered")
@@ -1205,9 +1231,12 @@ class Plugin(BasePlugin):
                     trailer_debug.get("reference_authorized", False))
                 diagnostic_trailer_maneuver = bool(
                     trailer_debug.get("requires_swept_envelope", False))
-                diagnostic_trailer_axle_distance = float(
-                    trailer_debug.get(
-                        "effective_axle_distance_m", float("nan")))
+                trailer_axle_distance_value = trailer_debug.get(
+                    "effective_axle_distance_m")
+                diagnostic_trailer_axle_distance = (
+                    float(trailer_axle_distance_value)
+                    if trailer_axle_distance_value is not None
+                    else float("nan"))
                 diagnostic_trailer_geometry_source = str(
                     trailer_debug.get(
                         "trailer_geometry_source", "unavailable")

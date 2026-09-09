@@ -41,16 +41,20 @@ ACTUATION_PREVIEW_S = (
 # nominal model values are stress-tested at longer delay, not measured maxima.
 FEEDBACK_LENGTH_BASE_M = 8.0
 FEEDBACK_RESPONSE_S = 2 * ACTUATION_PREVIEW_S
-PREDICTOR_SUBSTEPS = 8
-PREDICTOR_ITERATIONS = 5
+FRENET_DAMPING_RATIO = 1.10
+FRENET_LATERAL_GAIN = 0.85
+# Slightly overdamped Frenet feedback.  A damping ratio above one prevents a
+# large initial CTE and same-side heading error from crossing the centreline
+# with residual yaw; it changes the geometric pole placement, not actuator
+# smoothing.
 def solve(curvature, preview_curvature, cte_m, heading_error_rad, speed_ms,
           vehicle_curvature_per_m=None,
           response_s=ACTUATION_PREVIEW_S, steering_lock_rad=REFERENCE_LOCK_RAD):
     """One curvature demand, followed by exactly one inverse bicycle mapping.
 
     e_dot=v*sin(h), h_dot=v*k*cos(h)/(1+k*e)-v*k_vehicle.
-    Without prediction, with preview==k and constant speed the commanded
-    curvature gives e_ddot + 2*v/ell*e_dot + (v/ell)^2*e = 0 exactly.
+    With preview==k and constant speed the small-error feedback is
+    e_ddot + 2*zeta*v/ell*e_dot + gain*(v/ell)^2*e = 0.
     Preview changes only the feed-forward along confirmed geometry, never the
     tangent or the point to which CTE is measured.
     """
@@ -93,72 +97,23 @@ def solve(curvature, preview_curvature, cte_m, heading_error_rad, speed_ms,
         if cosine <= .10 or denominator <= .10:
             return None
         foundation=kp*cosine/denominator
-        heading=2*math.tan(error_heading)/length
-        lateral=error_m/(length*length*cosine)
+        heading=(2*FRENET_DAMPING_RATIO
+                 * math.tan(error_heading)/length)
+        lateral=(FRENET_LATERAL_GAIN * error_m
+                 / (length*length*cosine))
         return foundation+heading+lateral,foundation,heading,lateral
 
     control=control_at(e,h)
     if control is None:
         return 0.0, {"valid": False, "reason": "invalid Frenet frame"}
     demand,foundation,heading,lateral=control
+    # CTE and heading already are the current observed Frenet state.  The old
+    # algebraic fixed-point predictor treated its own candidate as an applied
+    # tyre curvature and changed a measured -1.55 m CTE into a fictitious
+    # +1.42 m.  Transport is represented by curvature preview; actuator motion
+    # is represented once by SteeringDynamics and the game.
     predicted_e,predicted_h=e,h
     observation_weight=0.0
-    if response_s > 0.0:
-        # Predict the pose error at actuator response using only this tick's
-        # authoritative path and Frenet state.  The tyre measurement is
-        # intentionally absent: it is delayed plant evidence and made this
-        # algebraic target pulse whenever the SDK delivered a new wheel frame.
-        # Start from the *current* local path curvature, not the future preview
-        # foundation.  Assuming that the tyres already had kp made a straight
-        # approach wait until the curve was physically under the cab and then
-        # demand a sharp catch-up.  On a constant-radius arc k == kp, so this
-        # correction creates no periodic command modulation.
-        local_denominator=1+k*e
-        if local_denominator <= .10:
-            return 0.0, {
-                "valid": False,
-                "reason": "invalid predicted Frenet frame",
-            }
-        measured_state=k*math.cos(h)/local_denominator
-        dt=response_s/PREDICTOR_SUBSTEPS
-        transport=min(TRANSPORT_S,response_s)
-        plant_tau=max(GAME_RESPONSE_S,response_s)
-        original_e,original_h=e,h
-        for _iteration in range(PREDICTOR_ITERATIONS):
-            predicted_e,predicted_h=original_e,original_h
-            valid_prediction=True
-            for index in range(PREDICTOR_SUBSTEPS):
-                elapsed=(index+.5)*dt
-                path_k=k+(kp-k)*(index+.5)/PREDICTOR_SUBSTEPS
-                if elapsed <= transport:
-                    vehicle_k=measured_state
-                else:
-                    vehicle_k=(demand+(measured_state-demand)*math.exp(
-                        -(elapsed-transport)/plant_tau))
-                denominator=1+path_k*predicted_e
-                if denominator <= .10:
-                    valid_prediction=False
-                    break
-                heading_rate=v*(path_k*math.cos(predicted_h)/denominator
-                                -vehicle_k)
-                midpoint_heading=predicted_h+heading_rate*dt*.5
-                predicted_e+=v*math.sin(midpoint_heading)*dt
-                predicted_h+=heading_rate*dt
-            if not valid_prediction:
-                return 0.0, {
-                    "valid": False,
-                    "reason": "invalid predicted Frenet frame",
-                }
-            predicted_control=control_at(predicted_e,predicted_h)
-            if predicted_control is None:
-                return 0.0, {
-                    "valid": False,
-                    "reason": "invalid predicted Frenet frame",
-                }
-            predicted_demand=predicted_control[0]
-            demand=.5*demand+.5*predicted_demand
-        final_control=control_at(predicted_e,predicted_h)
-        demand,foundation,heading,lateral=final_control
     angle=math.atan(WHEELBASE_M*demand)
     base_angle=math.atan(WHEELBASE_M*foundation)
     lateral_angle=math.atan(WHEELBASE_M*(foundation+lateral))-base_angle

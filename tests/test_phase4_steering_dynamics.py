@@ -11,6 +11,7 @@ import math
 import statistics
 import time
 import unittest
+from unittest import mock
 
 from core.navigation.route import (
     NORMALIZED_STEERING_ANGLE_RAD,
@@ -552,9 +553,14 @@ class Phase4SteeringDynamicsTests(unittest.TestCase):
         self.assertAlmostEqual(
             plugin._steering_dynamics_debug["dt_used_s"], 0.01)
 
+        for _ in range(19):
+            plugin._steering_replay.append({"autopilot_active": True})
         state.set("autopilot_active", False)
         plugin.sdk.telemetry.truck["gameSteer"] = -0.18
-        plugin.on_tick(0.01)
+        with mock.patch.object(
+                plugin, "_export_and_rotate_steering_replay") as export:
+            plugin.on_tick(0.01)
+        export.assert_called_once_with("manual_disable")
         self.assertEqual(plugin.sdk.controller.steering, 0.0)
         self.assertAlmostEqual(plugin._steering_dynamics.command, 0.18)
 
@@ -612,8 +618,14 @@ class Phase4SteeringDynamicsTests(unittest.TestCase):
                 "lane_cte_m", "lane_heading_deg", "curvature_per_m",
                 "preview_curvature_per_m", "trailer_curvature_per_m",
                 "trailer_reference_fraction", "trailer_curvature_source",
+                "trailer_reference_mode", "trailer_estimated_clearance_m",
+                "trailer_effective_axle_distance_m",
                 "lookahead_m", "navigation_intent_id", "revision"):
             self.assertIn(key, first)
+        self.assertEqual(first["trailer_reference_mode"], "cab_centered")
+        self.assertTrue(math.isfinite(first["feed_forward"]))
+        self.assertTrue(math.isnan(first["trailer_estimated_clearance_m"]))
+        self.assertTrue(math.isnan(first["trailer_effective_axle_distance_m"]))
         for _ in range(10):
             plugin.on_tick(0.05)
         self.assertIs(state.get("steering_dynamics_diagnostic"), first)

@@ -9,7 +9,9 @@ import unittest
 from unittest import mock
 from types import SimpleNamespace
 
-from core.lateral_controller import solve, offset_frame
+from core.lateral_controller import (
+    FRENET_DAMPING_RATIO, FRENET_LATERAL_GAIN, offset_frame, solve,
+)
 from core.navigation.lane_model import LaneId, LaneLocator, LanePoint, LaneSegment
 from core.navigation.route import Route
 from core.sdk.scs_sdk import SCSTelemetry
@@ -201,7 +203,10 @@ class SteeringSystemAuditTests(unittest.TestCase):
                         h_dot = v*k*math.cos(h)/(1+k*e)-v*actual
                         e_ddot = v*math.cos(h)*h_dot
                         ell = debug['feedback_length_m']
-                        self.assertAlmostEqual(e_ddot + 2*v/ell*e_dot + (v/ell)**2*e,
+                        self.assertAlmostEqual(
+                            e_ddot
+                            + 2*FRENET_DAMPING_RATIO*v/ell*e_dot
+                            + FRENET_LATERAL_GAIN*(v/ell)**2*e,
                                                0., places=10)
                         if e == h == 0:
                             self.assertAlmostEqual(actual, k, places=12)

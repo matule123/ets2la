@@ -324,6 +324,18 @@ def _simulate_closed_loop(
 
 
 class Phase4EClosedLoopControllerTests(unittest.TestCase):
+    def test_real_20260909_curve_cte_is_not_reversed_by_prediction(self):
+        """A measured -1.55 m error must not become a fictitious +1.42 m."""
+        command, debug = solve_lateral(
+            -0.0385, -0.0390, -1.55, math.radians(-4.0), 6.0,
+            response_s=0.45, steering_lock_rad=0.70)
+        self.assertAlmostEqual(debug["predicted_frenet_cte_m"], -1.55)
+        self.assertAlmostEqual(
+            debug["predicted_frenet_heading_error_rad"], math.radians(-4.0))
+        self.assertLess(debug["cte_feedback"], 0.0)
+        self.assertLess(debug["heading_feedback"], 0.0)
+        self.assertLess(command, debug["feed_forward"])
+
     def test_real_constant_curve_tyre_updates_cannot_pulse_geometric_target(self):
         """15:36:56 replay: delayed tyre telemetry is not steering authority."""
         commands = []

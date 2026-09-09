@@ -25,6 +25,23 @@ class State:
 
 
 class SteeringReplayBufferTests(unittest.TestCase):
+    def test_manual_disable_exports_and_rotates_the_completed_drive(self):
+        plugin = AutopilotPlugin.__new__(AutopilotPlugin)
+        plugin._steering_replay = SteeringReplayBuffer(8)
+        plugin._steering_replay.append({"autopilot_active": True})
+        original = plugin._steering_replay
+        with mock.patch.object(
+                plugin, "_export_steering_replay",
+                return_value="drive.json") as export:
+            path = plugin._export_and_rotate_steering_replay(
+                "manual_disable")
+        self.assertEqual(path, "drive.json")
+        export.assert_called_once_with("manual_disable", "")
+        self.assertEqual(len(original), 1)
+        self.assertIsNot(plugin._steering_replay, original)
+        self.assertEqual(plugin._steering_replay.capacity, 8)
+        self.assertEqual(len(plugin._steering_replay), 0)
+
     def test_ring_is_bounded_and_export_is_atomic_json(self):
         ticks = iter((1.0, 2.0, 3.0, 4.0))
         wall = iter((101.0, 102.0, 103.0, 104.0))
