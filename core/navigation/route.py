@@ -211,6 +211,7 @@ class Route:
         if len(self._point_authorities) != len(self.points):
             self._point_authorities = []
         self._authority_segments = {}
+        self._authority_projection_segments = {}
         self._authority_runs = {}
         if self._point_authorities:
             for index in range(len(self.points) - 1):
@@ -218,6 +219,8 @@ class Route:
                 second = self._point_authorities[index + 1]
                 if first == second:
                     self._authority_segments.setdefault(first, []).append(index)
+                    self._authority_projection_segments.setdefault(
+                        first, []).append(index)
             run_start = 0
             for index in range(1, len(self._point_authorities) + 1):
                 if (index == len(self._point_authorities)
@@ -228,6 +231,27 @@ class Route:
                         self._authority_runs.setdefault(authority, []).append(
                             (run_start, index - 1))
                     run_start = index
+            # A validated trajectory changes point ownership at the directed
+            # segment joining two adjacent LaneIds.  Omitting that segment
+            # left a longitudinal hole: LaneLocator could already confirm the
+            # destination identity while Route projection was clamped to its
+            # first *same-identity* segment one sample farther ahead.  Give the
+            # immutable transition edge to both endpoint identities, but only
+            # when the existing 3-D/direction proof accepts it.  This does not
+            # add a chord or connectivity; the segment already exists in the
+            # revision-bound LanePath in exactly this order.
+            for index in range(len(self.points) - 1):
+                first = self._point_authorities[index]
+                second = self._point_authorities[index + 1]
+                if (first != second and self._authority_geometry_compatible(
+                        first, second, index, index + 1)):
+                    for authority in (first, second):
+                        segments = self._authority_projection_segments.setdefault(
+                            authority, [])
+                        if index not in segments:
+                            segments.append(index)
+            for segments in self._authority_projection_segments.values():
+                segments.sort()
         self.last_steering_debug = {
             "feed_forward": 0.0, "feedback": 0.0,
             "local_curvature": 0.0, "raw": 0.0, "output": 0.0,
@@ -440,7 +464,7 @@ class Route:
         """Project only onto points owned by one proven lane/deck identity."""
         if not self._point_authorities or authority is None:
             return None
-        indices = self._authority_segments.get(authority, ())
+        indices = self._authority_projection_segments.get(authority, ())
         if not indices:
             return None
         if self._tracking_state is not None:
@@ -508,9 +532,11 @@ class Route:
         heterogeneous_boundary = first_is_prefab != second_is_prefab
         if not same_direction_flag and not heterogeneous_boundary:
             return False
-        if first_elevation == second_elevation:
-            if same_direction_flag:
-                return True
+        # Equal quantised elevation and equal direction are necessary labels,
+        # not geometric proof.  Returning here used to accept any X/Y/Z gap
+        # between different LaneIds on the same nominal layer.  Every identity
+        # transition must also pass the immediate ordered-sample check below;
+        # otherwise derivative/projection code could manufacture a chord.
         if (first_index is None or second_index is None
                 or int(second_index) != int(first_index) + 1
                 or not (0 <= int(first_index) < len(self.world_points))
@@ -518,12 +544,22 @@ class Route:
             return False
         first_point = self.world_points[int(first_index)]
         second_point = self.world_points[int(second_index)]
-        if len(first_point) < 3 or len(second_point) < 3:
-            return False
         try:
-            dx = float(second_point[0]) - float(first_point[0])
-            dy = float(second_point[1]) - float(first_point[1])
-            dz = float(second_point[2]) - float(first_point[2])
+            if len(first_point) >= 3 and len(second_point) >= 3:
+                dx = float(second_point[0]) - float(first_point[0])
+                dy = float(second_point[1]) - float(first_point[1])
+                dz = float(second_point[2]) - float(first_point[2])
+            elif len(first_point) >= 2 and len(second_point) >= 2:
+                # Legacy/recorded and deterministic test routes are X/Z.  They
+                # still provide exact ground-plane gap proof; only an actual
+                # 3-D LanePath may prove a vertical-layer transition.
+                dx = float(second_point[0]) - float(first_point[0])
+                dy = 0.0
+                dz = float(second_point[1]) - float(first_point[1])
+                if first_elevation != second_elevation:
+                    return False
+            else:
+                return False
         except (TypeError, ValueError, OverflowError):
             return False
         spatially_continuous = bool(
@@ -545,14 +581,14 @@ class Route:
         second_index = int(second_index)
         if first_index < 1 or second_index + 1 >= len(self.world_points):
             return False
-        previous = self.world_points[first_index - 1]
-        following = self.world_points[second_index + 1]
+        previous = self.points[first_index - 1]
+        following = self.points[second_index + 1]
         vectors = (
-            (float(self.world_points[first_index][0]) - float(previous[0]),
-             float(self.world_points[first_index][2]) - float(previous[2])),
+            (float(self.points[first_index][0]) - float(previous[0]),
+             float(self.points[first_index][1]) - float(previous[1])),
             (dx, dz),
-            (float(following[0]) - float(self.world_points[second_index][0]),
-             float(following[2]) - float(self.world_points[second_index][2])),
+            (float(following[0]) - float(self.points[second_index][0]),
+             float(following[1]) - float(self.points[second_index][1])),
         )
         minimum_dot = math.cos(AUTHORITY_DERIVATIVE_MAX_HEADING_JUMP_RAD)
         for left, right in zip(vectors, vectors[1:]):
@@ -612,7 +648,12 @@ class Route:
             last = adjacent_run[1]
             maximum = min(desired_maximum, self._cumulative_m[last])
             current = adjacent
-        return minimum, maximum
+        # Callers ask for a local derivative window, not the complete current
+        # LaneId run.  Returning an entire long run makes a spatial regression
+        # depend on hundreds of metres of unrelated geometry.  The loops above
+        # merely prove how far the requested window may cross adjacent runs.
+        return (max(desired_minimum, minimum),
+                min(desired_maximum, maximum))
 
     def _authority_bounds(self, authority, progress: float):
         """Return the contiguous progress interval for one lane/deck identity."""
@@ -1113,6 +1154,9 @@ class Route:
             "authority_revision": None,
         }
         if len(self.points) < 2:
+            self.last_steering_debug.update(
+                authority_valid=False,
+                control_failure="route has fewer than two points")
             return 0.0
 
         try:
@@ -1173,6 +1217,9 @@ class Route:
                     > AUTHORITY_PROJECTION_MAX_DISTANCE_M):
                 self.last_steering_debug.update({
                     "authority_valid": False,
+                    "control_failure": (
+                        "live LaneId has no reachable projection on the "
+                        "validated trajectory"),
                     "authority_lane_id": authority_lane,
                     "authority_revision": authority_revision,
                     "authority_projection_distance_m": float(
@@ -1216,6 +1263,9 @@ class Route:
             path_dz = tangent_target[1] - tangent_before[1]
         path_length = math.hypot(path_dx, path_dz)
         if path_length < 0.5:
+            self.last_steering_debug.update(
+                authority_valid=False,
+                control_failure="validated local lane tangent is unavailable")
             return 0.0
         path_heading = math.atan2(-path_dx, -path_dz)
         heading_error = ((heading - path_heading + math.pi)
@@ -1223,6 +1273,9 @@ class Route:
         fx, fz = -math.sin(heading), -math.cos(heading)
         alignment = (fx * path_dx + fz * path_dz) / path_length
         if alignment <= 0.10 or abs(heading_error) > math.radians(82.0):
+            self.last_steering_debug.update(
+                authority_valid=False,
+                control_failure="vehicle heading is incompatible with local lane tangent")
             return 0.0
 
         # Cross-track error, measured to the lane-offset line so it pulls us

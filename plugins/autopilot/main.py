@@ -206,7 +206,18 @@ def navigation_command(state, snapshot, *, gps_active, now=None, packet=None):
     packet = dict(packet if packet is not None
                   else (state.get("nav_steering_debug", {}) or {}))
     try:
-        if gps_active and packet.get("controller") == "frenet_bicycle":
+        packet_contract_present = bool(
+            packet.get("calculation_packet_schema_version") is not None
+            or packet.get("controller") == "frenet_bicycle")
+        if gps_active and packet_contract_present:
+            # Active game GPS has exactly one command authority: the complete
+            # revision-bound Frenet packet.  A Route early return used to omit
+            # ``controller`` and silently fall through to the legacy scalar
+            # state, allowing an unbound zero/newer value to reach the wheel.
+            # Missing metadata is a fail-closed calculation failure, never
+            # permission to switch controller contracts for one tick.
+            if packet.get("controller") != "frenet_bicycle":
+                return 0.0, 0.0, "GPS steering packet is incomplete"
             if (not packet.get("authority_valid", False)
                     or int(packet["authority_revision"]) != int(snapshot["revision"])):
                 return 0.0, 0.0, "steering command belongs to an invalid/stale revision"
@@ -224,6 +235,10 @@ def navigation_command(state, snapshot, *, gps_active, now=None, packet=None):
                     return 0.0, 0.0, f"steering command {key} is stale"
             target, curvature = float(packet["output"]), float(packet["local_curvature"])
         else:
+            # Compatibility for legacy/recorded producers and old diagnostic
+            # fixtures that predate the calculation-packet schema. Production
+            # game-GPS packets always carry that schema after Stage 1, so an
+            # incomplete modern packet can never enter this branch.
             target = float(state.get("nav_steering", 0.0) or 0.0)
             curvature = float(state.get("path_curve_signed_curvature", 0.0) or 0.0)
         if not math.isfinite(target) or not math.isfinite(curvature):
