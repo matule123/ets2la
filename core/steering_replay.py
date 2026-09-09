@@ -19,8 +19,18 @@ import time
 import uuid
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+CALCULATION_PACKET_SCHEMA_VERSION = 1
 DEFAULT_CAPACITY = 3600
+
+_TRAJECTORY_IDENTITY_FIELDS = (
+    "navigation_intent_id",
+    "route_build_id",
+    "revision",
+    "source_game_session_id",
+    "source_map_key",
+    "source_dataset_fingerprint",
+)
 
 
 def _json_value(value):
@@ -38,6 +48,93 @@ def _json_value(value):
     except (TypeError, ValueError, OverflowError):
         return str(value)
     return number if math.isfinite(number) else None
+
+
+def diagnostic_copy(value):
+    """Return a detached JSON-safe diagnostic value.
+
+    Shared state and the lightweight test doubles used by the plugins may
+    return mutable nested dictionaries.  A shallow ``dict(...)`` copy can
+    therefore pair a command with lane/geometry values changed by a later map
+    tick.  This copy is deliberately observational and is never passed back to
+    the control path.
+    """
+    return _json_value(value)
+
+
+def bind_steering_calculation(debug, lane_match, trajectory, *, sequence):
+    """Freeze every input/output identity belonging to one Route calculation.
+
+    The full LanePath is intentionally not duplicated at control frequency.
+    Its revision-bound identity is sufficient to locate the immutable
+    trajectory export, while the local projection/tangent/curvature already
+    present in ``debug`` records the geometry actually used by the controller.
+    """
+    packet = diagnostic_copy(debug or {})
+    identity = {
+        key: (trajectory or {}).get(key) for key in _TRAJECTORY_IDENTITY_FIELDS
+    }
+    packet.update({
+        "calculation_packet_schema_version": CALCULATION_PACKET_SCHEMA_VERSION,
+        "calculation_sequence": int(sequence),
+        "lane_match_snapshot": diagnostic_copy(lane_match or {}),
+        "trajectory_identity": diagnostic_copy(identity),
+    })
+    return packet
+
+
+def steering_packet_binding(packet, application_trajectory):
+    """Validate replay causality without accepting or rejecting control.
+
+    Returns ``(valid, reasons)``.  It is diagnostic only: runtime authority is
+    still decided by ``navigation_command`` and the existing fail-closed
+    checks.  Keeping this separate prevents telemetry instrumentation from
+    becoming a second steering authority.
+    """
+    packet = packet or {}
+    reasons = []
+    if packet.get("calculation_packet_schema_version") != (
+            CALCULATION_PACKET_SCHEMA_VERSION):
+        reasons.append("missing_or_unknown_calculation_packet_schema")
+    try:
+        if int(packet.get("calculation_sequence", 0)) <= 0:
+            reasons.append("missing_calculation_sequence")
+    except (TypeError, ValueError, OverflowError):
+        reasons.append("invalid_calculation_sequence")
+
+    required = (
+        "computed_at", "observation_timestamp", "sdk_frame_us",
+        "controller", "raw", "output", "local_curvature",
+        "preview_curvature", "tracking_progress_m",
+        "tracking_segment_index", "tracking_segment_fraction",
+        "tracking_projection_xz", "local_tangent_heading_rad",
+        "observation_xz", "observation_heading_rad",
+    )
+    for key in required:
+        if packet.get(key) is None:
+            reasons.append(f"missing_{key}")
+
+    match = packet.get("lane_match_snapshot")
+    if not isinstance(match, dict) or not match:
+        reasons.append("missing_lane_match_snapshot")
+    identity = packet.get("trajectory_identity")
+    if not isinstance(identity, dict):
+        reasons.append("missing_trajectory_identity")
+        identity = {}
+    for key in _TRAJECTORY_IDENTITY_FIELDS:
+        packet_value = identity.get(key)
+        application_value = (application_trajectory or {}).get(key)
+        if packet_value is None:
+            reasons.append(f"missing_identity_{key}")
+        elif application_value is not None and packet_value != application_value:
+            reasons.append(f"application_mismatch_{key}")
+    if isinstance(match, dict) and identity.get("revision") is not None:
+        try:
+            if int(match.get("revision")) != int(identity["revision"]):
+                reasons.append("lane_match_revision_mismatch")
+        except (TypeError, ValueError, OverflowError):
+            reasons.append("invalid_lane_match_revision")
+    return not reasons, tuple(reasons)
 
 
 class SteeringReplayBuffer:
@@ -72,7 +169,8 @@ class SteeringReplayBuffer:
         self._samples.append(_json_value(row))
 
     def snapshot(self):
-        return tuple(dict(row) for row in self._samples)
+        # Do not let an analyser mutate nested evidence retained by the ring.
+        return tuple(diagnostic_copy(row) for row in self._samples)
 
     def export(self, directory, *, reason, identity=None):
         """Write the current immutable snapshot using an atomic replacement."""

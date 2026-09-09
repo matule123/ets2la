@@ -10,7 +10,9 @@ from core.navigation.runtime_preflight import (
 from core.navigation.navigation_intent import snapshot_matches_navigation_intent
 from core.navigation.route import curve_speed_limit_ms
 from core.steering_dynamics import SteeringDynamics
-from core.steering_replay import SteeringReplayBuffer
+from core.steering_replay import (
+    SteeringReplayBuffer, diagnostic_copy, steering_packet_binding,
+)
 from core.paths import app_dir
 
 
@@ -451,23 +453,48 @@ class Plugin(BasePlugin):
         replay = getattr(self, "_steering_replay", None)
         if replay is None:
             return
-        steering_debug = self.sdk.shared_state.get(
-            "nav_steering_debug", {}) or {}
-        accepted = dict(getattr(
-            self, "_accepted_navigation_command", {}) or {})
-        dynamics = dict(getattr(
-            self, "_steering_dynamics_debug", {}) or {})
-        match = (self.sdk.shared_state.get("lane_match")
-                 or snapshot.get("lane_match") or {})
-        trailer = steering_debug.get("trailer_envelope", {}) or {}
-        lane_id = (match.get("active_lane_id")
-                   or snapshot.get("active_lane_id") or {})
+        # Geometry and controller terms must come from the exact packet that
+        # was accepted at the start of this tick. Reading nav_steering_debug or
+        # lane_match again here can observe the map plugin's next calculation
+        # and create a physically impossible mixed-frame replay row.
+        accepted = getattr(self, "_accepted_navigation_command", {}) or {}
+        dynamics = getattr(self, "_steering_dynamics_debug", {}) or {}
+        match = accepted.get("lane_match_snapshot", {}) or {}
+        trailer = accepted.get("trailer_envelope", {}) or {}
+        lane_id = match.get("active_lane_id") or {}
+        calculation_identity = accepted.get("trajectory_identity", {}) or {}
+        application_identity = self._steering_replay_identity()
+        binding_valid, binding_reasons = steering_packet_binding(
+            accepted, snapshot)
+        now = time.monotonic()
+        try:
+            packet_age_s = now - float(accepted["computed_at"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            packet_age_s = None
+        try:
+            frame_lag_us = (int(truck.get("sdkFrameTimeUs"))
+                            - int(accepted.get("sdk_frame_us")))
+        except (TypeError, ValueError, OverflowError):
+            frame_lag_us = None
         replay.append({
             "control_dt_s": getattr(self, "_last_control_dt", None),
+            "calculation_packet_schema_version": accepted.get(
+                "calculation_packet_schema_version"),
+            "calculation_sequence": accepted.get("calculation_sequence"),
+            "packet_binding_valid": bool(binding_valid),
+            "packet_binding_reasons": list(binding_reasons),
+            "packet_age_s": packet_age_s,
+            "frame_lag_us": frame_lag_us,
+            # ``sdk_frame_us`` remains the application frame for compatibility.
+            # The calculation frame is explicit and must not be confused with
+            # actuator/game feedback observed a few milliseconds later.
             "sdk_frame_us": truck.get("sdkFrameTimeUs"),
-            "observation_timestamp": steering_debug.get(
+            "application_sdk_frame_us": truck.get("sdkFrameTimeUs"),
+            "calculation_sdk_frame_us": accepted.get("sdk_frame_us"),
+            "application_monotonic_s": now,
+            "observation_timestamp": accepted.get(
                 "observation_timestamp"),
-            "computed_at": steering_debug.get("computed_at"),
+            "computed_at": accepted.get("computed_at"),
             "accepted_packet_computed_at": accepted.get("computed_at"),
             "accepted_packet_observation_timestamp": accepted.get(
                 "observation_timestamp"),
@@ -493,26 +520,28 @@ class Plugin(BasePlugin):
             "lane_heading_error_rad": match.get("heading_error_rad"),
             "lane_id": lane_id,
             "elevation_layer": match.get("elevation_layer"),
-            "preview_k": steering_debug.get("preview_curvature"),
-            "preview_k_per_m": steering_debug.get("preview_curvature"),
-            "local_k_per_m": steering_debug.get("local_curvature"),
-            "tracking_progress_m": steering_debug.get("tracking_progress_m"),
-            "tracking_segment_index": steering_debug.get(
+            "preview_k": accepted.get("preview_curvature"),
+            "preview_k_per_m": accepted.get("preview_curvature"),
+            "local_k_per_m": accepted.get("local_curvature"),
+            "tracking_progress_m": accepted.get("tracking_progress_m"),
+            "tracking_segment_index": accepted.get(
                 "tracking_segment_index"),
-            "tracking_segment_fraction": steering_debug.get(
+            "tracking_segment_fraction": accepted.get(
                 "tracking_segment_fraction"),
-            "tracking_projection_xz": steering_debug.get(
+            "tracking_projection_xz": accepted.get(
                 "tracking_projection_xz"),
-            "local_tangent_heading_rad": steering_debug.get(
+            "local_tangent_heading_rad": accepted.get(
                 "local_tangent_heading_rad"),
-            "observation_xz": steering_debug.get("observation_xz"),
-            "observation_heading_rad": steering_debug.get(
+            "observation_xz": accepted.get("observation_xz"),
+            "observation_heading_rad": accepted.get(
                 "observation_heading_rad"),
-            "curve_reference": steering_debug.get("feed_forward"),
-            "heading_feedback": steering_debug.get("heading_feedback"),
-            "cte_feedback": steering_debug.get("cte_feedback"),
-            "guidance_delta": steering_debug.get("feedback"),
-            "guidance_applied": steering_debug.get("feedback_applied"),
+            "curve_reference": accepted.get("feed_forward"),
+            "heading_feedback": accepted.get("heading_feedback"),
+            "cte_feedback": accepted.get("cte_feedback"),
+            "guidance_delta": accepted.get("feedback"),
+            "guidance_applied": accepted.get("feedback_applied"),
+            "controller_steer_raw": accepted.get("raw"),
+            "controller_steer_output": accepted.get("output"),
             "steer_raw": dynamics.get("raw_target"),
             "steer_bounded": dynamics.get("bounded_target"),
             "steer_out": steering_val,
@@ -522,13 +551,13 @@ class Plugin(BasePlugin):
             "game_steer_right": observed_game_steering,
             "tyre_angles_rad": truck.get("roadWheelAnglesRad", []),
             "yaw_right_rad_s": truck.get("yawRateRadS"),
-            "vehicle_curvature_source": steering_debug.get(
+            "vehicle_curvature_source": accepted.get(
                 "vehicle_curvature_source"),
-            "curvature_observation_weight": steering_debug.get(
+            "curvature_observation_weight": accepted.get(
                 "curvature_observation_weight"),
-            "predicted_frenet_cte_m": steering_debug.get(
+            "predicted_frenet_cte_m": accepted.get(
                 "predicted_frenet_cte_m"),
-            "predicted_frenet_heading_error_rad": steering_debug.get(
+            "predicted_frenet_heading_error_rad": accepted.get(
                 "predicted_frenet_heading_error_rad"),
             "steering_rate_per_s": dynamics.get("rate_per_s"),
             "steering_acceleration_per_s2": dynamics.get(
@@ -539,7 +568,20 @@ class Plugin(BasePlugin):
             "trailer_curvature_per_m": trailer.get(
                 "preview_curvature_per_m"),
             "authority_rejection": str(authority_reason or ""),
-            **self._steering_replay_identity(),
+            "navigation_intent_id": calculation_identity.get(
+                "navigation_intent_id", accepted.get(
+                    "navigation_intent_id")),
+            "route_build_id": calculation_identity.get(
+                "route_build_id", accepted.get("route_build_id")),
+            "revision": calculation_identity.get(
+                "revision", accepted.get("authority_revision")),
+            "source_game_session_id": calculation_identity.get(
+                "source_game_session_id"),
+            "source_map_key": calculation_identity.get("source_map_key"),
+            "source_dataset_fingerprint": calculation_identity.get(
+                "source_dataset_fingerprint"),
+            "calculation_trajectory_identity": calculation_identity,
+            "application_trajectory_identity": application_identity,
         })
 
     def on_tick(self, delta_time: float):
@@ -574,12 +616,12 @@ class Plugin(BasePlugin):
         nav_command, nav_command_curvature, command_reason = navigation_command(
             self.sdk.shared_state, snapshot, gps_active=gps_navigation_present,
             packet=accepted_packet)
-        self._accepted_navigation_command = {
+        self._accepted_navigation_command = diagnostic_copy({
             **accepted_packet,
             "command": float(nav_command),
             "curvature_per_m": float(nav_command_curvature),
             "rejection": str(command_reason or ""),
-        }
+        })
         recorded_route_requested = bool(
             self.sdk.shared_state.get("navigation_source") == "recorded_route"
             or self.sdk.shared_state.get("recorded_route_active", False))

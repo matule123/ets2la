@@ -14,6 +14,7 @@ from core.navigation.route_diagnostics import (
     lane_change_payload, safe_diagnostic_call,
 )
 from core.navigation.runtime_preflight import CONFIDENCE_THRESHOLD
+from core.steering_replay import bind_steering_calculation
 from core.navigation.navigation_intent import (
     CONTINUATION_CLASSES, NavigationBufferClass, NavigationBuildGuard,
     classify_navigation_buffer, ordered_common_prefix_overlap,
@@ -104,6 +105,9 @@ class Plugin(BasePlugin):
             "lane_trajectory_revision", 0) or 0)
         self._navigation_log_seq = int(self.sdk.get(
             "navigation_log_seq", 0) or 0)
+        # Diagnostic-only sequence. It binds Route inputs, local geometry and
+        # output before another map tick can replace shared state.
+        self._steering_packet_sequence = 0
         self._lane_failure_signature = None
         self._last_logged_lane_failure = None
         self._lane_retry_at = 0.0
@@ -2567,6 +2571,11 @@ class Plugin(BasePlugin):
                     "source_dataset_fingerprint": snapshot.get(
                         "source_dataset_fingerprint"),
                 })
+                self._steering_packet_sequence = int(getattr(
+                    self, "_steering_packet_sequence", 0)) + 1
+                steering_debug = bind_steering_calculation(
+                    steering_debug, live_match, snapshot,
+                    sequence=self._steering_packet_sequence)
                 if not steering_debug.get("authority_valid", True):
                     steer = 0.0
                     self.sdk.shared_state.update_batch({
