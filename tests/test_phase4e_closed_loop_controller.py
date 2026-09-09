@@ -278,6 +278,12 @@ def _simulate_closed_loop(
             "revision": revision,
             "trailer_offset_m": float(
                 trailer_debug.get("applied_offset_m", 0.0)),
+            "trailer_candidate_offset_m": float(
+                trailer_debug.get("candidate_offset_m", 0.0)),
+            "trailer_reference_authorized": bool(
+                trailer_debug.get("reference_authorized", False)),
+            "trailer_requires_swept_envelope": bool(
+                trailer_debug.get("requires_swept_envelope", False)),
             "trailer_cte_m": float(
                 trailer_debug.get("trailer_cte_m", 0.0)),
         })
@@ -409,6 +415,9 @@ class Phase4EClosedLoopControllerTests(unittest.TestCase):
         metrics = _simulate_closed_loop(
             points, 8.0, with_trailer=True,
             noisy_lane_match=True, delayed_ticks=True)
+        cab_only = _simulate_closed_loop(
+            points, 8.0, with_trailer=False,
+            noisy_lane_match=True, delayed_ticks=True)
         bends = (
             (boundaries[0] + 10.0, boundaries[1] - 8.0, -1.0),
             (boundaries[1] + 10.0, boundaries[2] - 8.0, -1.0),
@@ -425,14 +434,19 @@ class Phase4EClosedLoopControllerTests(unittest.TestCase):
                 for sample in samples))
             self.assertLessEqual(max(
                 abs(sample["cte_m"]) for sample in samples), 0.95)
-            self.assertLessEqual(max(
-                abs(sample["trailer_cte_m"]) for sample in samples), 1.05)
+            self.assertTrue(all(
+                sample["trailer_offset_m"] == 0.0
+                and not sample["trailer_reference_authorized"]
+                for sample in samples))
         self.assertLessEqual(metrics["max_heading_error_deg"], 7.0)
         self.assertLessEqual(metrics["max_step"], 0.061)
         self.assertLess(abs(metrics["final_cte_m"]), 0.08)
         self.assertTrue(metrics["progress_monotonic"])
+        self.assertEqual(
+            [sample["raw"] for sample in metrics["samples"]],
+            [sample["raw"] for sample in cab_only["samples"]])
 
-    def test_loaded_trailer_r18_r35_r83_balances_both_axles(self):
+    def test_loaded_trailer_is_diagnostic_until_corridor_is_proven(self):
         scenarios = (
             (18.0, 5.5, 270.0),
             (35.0, 8.5, 140.0),
@@ -444,26 +458,36 @@ class Phase4EClosedLoopControllerTests(unittest.TestCase):
                     direction, radius_m, sweep_deg=sweep_deg, exit_m=75.0)
                 metrics = _simulate_closed_loop(
                     points, speed_ms, with_trailer=True)
+                cab_only = _simulate_closed_loop(
+                    points, speed_ms, with_trailer=False)
                 turn = [sample for sample in metrics["samples"]
                         if boundaries[0] + 10.0
                         < sample["progress_m"] < boundaries[1] - 6.0]
                 with self.subTest(direction=direction, radius=radius_m):
                     self.assertTrue(turn)
-                    # 4.7 m lane minus half of the 2.55 m body leaves 1.075 m
-                    # axle-centre authority on either side. Both tractor and
-                    # trailer stay inside it without holding the tractor at
-                    # the former 60% outward bias.
+                    # The ordinary lateral controller owns one target: the
+                    # LanePath centre. Trailer off-tracking is reported, never
+                    # converted into unproved lateral authority.
                     self.assertLess(max(
                         abs(sample["cte_m"]) for sample in turn), 1.075)
-                    self.assertLess(max(
-                        abs(sample["trailer_cte_m"])
-                        for sample in turn), 1.075)
                     self.assertEqual(_sign_changes(
                         [sample["output"] for sample in turn]), 0)
                     self.assertTrue(all(
-                        sample["trailer_offset_m"]
-                        * sample["curvature_per_m"] <= 0.0
+                        sample["trailer_offset_m"] == 0.0
+                        and not sample["trailer_reference_authorized"]
                         for sample in turn))
+                    self.assertEqual(
+                        [sample["raw"] for sample in metrics["samples"]],
+                        [sample["raw"] for sample in cab_only["samples"]])
+                    trailer_peak = max(abs(sample["trailer_cte_m"])
+                                       for sample in turn)
+                    if radius_m == 18.0:
+                        self.assertGreater(trailer_peak, 1.075)
+                        self.assertTrue(any(
+                            sample["trailer_requires_swept_envelope"]
+                            for sample in turn))
+                    else:
+                        self.assertLess(trailer_peak, 1.075)
 
     def test_real_225932_relay_and_212431_negative_zero_gate_are_removed(self):
         # 22:59:33: the old opposite-authority relay applied +0.576 to a
@@ -939,7 +963,7 @@ class Phase4EClosedLoopControllerTests(unittest.TestCase):
         self.assertEqual(command, 0.0)
         self.assertFalse(route.last_steering_debug["authority_valid"])
 
-    def test_spatial_trailer_offset_is_stable_across_lane_id_boundary(self):
+    def test_trailer_candidate_is_stable_across_lane_id_boundary(self):
         points, authorities, boundary = _point_authority_r83_fixture()
         offsets = []
         predictions = []
@@ -975,14 +999,16 @@ class Phase4EClosedLoopControllerTests(unittest.TestCase):
             debug = route.last_steering_debug["trailer_envelope"]
             self.assertTrue(debug["accepted"])
             self.assertTrue(debug["curve_side_proven"])
-            offsets.append(debug["applied_offset_m"])
+            self.assertEqual(debug["applied_offset_m"], 0.0)
+            self.assertFalse(debug["reference_authorized"])
+            offsets.append(debug["candidate_offset_m"])
             predictions.append(debug["predicted_offtrack_m"])
 
         self.assertGreater(abs(offsets[0]), 0.05)
         self.assertLess(max(offsets) - min(offsets), 1e-9)
         self.assertLess(max(predictions) - min(predictions), 1e-9)
 
-    def test_trailer_target_is_spatial_balanced_and_not_a_fast_cte_sensor(self):
+    def test_trailer_candidate_is_diagnostic_and_not_a_fast_cte_sensor(self):
         points, boundaries = _constant_curve_path(1.0, 35.0)
         route = Route(points)
         progress = boundaries[0] + 30.0
@@ -1019,13 +1045,89 @@ class Phase4EClosedLoopControllerTests(unittest.TestCase):
             self.assertTrue(debug["curve_side_proven"])
             self.assertEqual(debug["balanced_reference_fraction"],
                              TRAILER_BALANCED_REFERENCE_FRACTION)
-            offsets.append(debug["applied_offset_m"])
+            self.assertEqual(debug["applied_offset_m"], 0.0)
+            self.assertFalse(debug["reference_authorized"])
+            offsets.append(debug["candidate_offset_m"])
             predicted.append(debug["predicted_offtrack_m"])
         self.assertLess(max(offsets) - min(offsets), 1e-12)
         self.assertLess(max(predicted) - min(predicted), 1e-12)
         self.assertAlmostEqual(
             offsets[0], predicted[0] * TRAILER_BALANCED_REFERENCE_FRACTION,
             places=9)
+
+    def test_sdk_axle_distance_changes_diagnostic_not_cab_command(self):
+        points, boundaries = _constant_curve_path(1.0, 35.0)
+        route = Route(points)
+        progress = boundaries[0] + 30.0
+        tractor = route._point_at_progress(progress)
+        heading = _heading_between(
+            route._point_at_progress(progress - 2.0),
+            route._point_at_progress(progress + 2.0))
+        trailer = route._point_at_progress(progress - 8.0)
+        trailer_heading = _heading_between(
+            route._point_at_progress(progress - 10.0), trailer)
+        commands = []
+        predictions = []
+        for axle_distance in (6.0, 8.0, 12.0):
+            command = route.steering(
+                tractor, heading, 8.0, cross_track_error_m=0.0,
+                vehicle_envelope={
+                    "attached": True,
+                    "position": trailer,
+                    "heading": trailer_heading,
+                    "lane_width_m": 4.7,
+                    "tractor_altitude_m": 45.0,
+                    "trailer_altitude_m": 45.0,
+                    "effective_axle_distance_m": axle_distance,
+                },
+                control_dt_s=DT_S,
+            )
+            debug = route.last_steering_debug["trailer_envelope"]
+            self.assertTrue(debug["accepted"])
+            self.assertEqual(debug["trailer_geometry_source"],
+                             "sdk_hook_to_axle_group")
+            self.assertEqual(debug["effective_axle_distance_m"],
+                             axle_distance)
+            self.assertEqual(debug["applied_offset_m"], 0.0)
+            commands.append(command)
+            predictions.append(abs(debug["predicted_offtrack_m"]))
+        self.assertEqual(commands, [commands[0]] * len(commands))
+        self.assertEqual(predictions, sorted(predictions))
+        self.assertEqual(len(set(round(value, 9)
+                                 for value in predictions)), 3)
+
+    def test_invalid_sdk_axle_distance_is_fail_neutral(self):
+        points, boundaries = _constant_curve_path(-1.0, 35.0)
+        route = Route(points)
+        progress = boundaries[0] + 30.0
+        tractor = route._point_at_progress(progress)
+        heading = _heading_between(
+            route._point_at_progress(progress - 2.0),
+            route._point_at_progress(progress + 2.0))
+        trailer = route._point_at_progress(progress - 8.0)
+        trailer_heading = _heading_between(
+            route._point_at_progress(progress - 10.0), trailer)
+        command = route.steering(
+            tractor, heading, 8.0, cross_track_error_m=0.0,
+            vehicle_envelope={
+                "attached": True,
+                "position": trailer,
+                "heading": trailer_heading,
+                "lane_width_m": 4.7,
+                "tractor_altitude_m": 45.0,
+                "trailer_altitude_m": 45.0,
+                "effective_axle_distance_m": 30.0,
+            },
+            control_dt_s=DT_S,
+        )
+        debug = route.last_steering_debug["trailer_envelope"]
+        self.assertFalse(debug["accepted"])
+        self.assertIn("outside the physical range", debug["reason"])
+        self.assertEqual(debug["applied_offset_m"], 0.0)
+        cab_only = Route(points).steering(
+            tractor, heading, 8.0, cross_track_error_m=0.0,
+            control_dt_s=DT_S)
+        self.assertAlmostEqual(command, cab_only, places=12)
 
 
 if __name__ == "__main__":

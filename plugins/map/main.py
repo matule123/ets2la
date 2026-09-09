@@ -2514,6 +2514,11 @@ class Plugin(BasePlugin):
                             "tractor_altitude_m": tractor_position[1],
                             "trailer_altitude_m": trailer_position[1],
                             "elevation_layer": metadata["elevation_layer"],
+                            "effective_axle_distance_m": (
+                                vehicle_snapshot.get(
+                                    "trailer_effective_axle_distance_m")),
+                            "wheel_track_m": vehicle_snapshot.get(
+                                "trailer_wheel_track_m"),
                         }
                 vehicle_curvature = None
                 vehicle_curvature_source = "unavailable"

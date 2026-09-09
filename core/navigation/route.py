@@ -21,7 +21,7 @@ from typing import List, Optional, Sequence, Tuple
 from core.lateral_controller import (
     ACTUATION_PREVIEW_S, MAX_STEERING_LOCK_RAD, MIN_STEERING_LOCK_RAD,
     REFERENCE_LOCK_RAD, WHEELBASE_M,
-    offset_frame, solve as solve_lateral,
+    solve as solve_lateral,
 )
 
 Point = Tuple[float, float]
@@ -108,23 +108,23 @@ AUTHORITY_DERIVATIVE_MAX_VERTICAL_STEP_M = 0.75
 # 70 degrees before a derivative may cross the already validated edge.
 AUTHORITY_DERIVATIVE_MAX_HEADING_JUMP_RAD = math.radians(70.0)
 # A lane-centred tractor does not imply a lane-contained semi-trailer.  The
-# trailer axle follows a smaller radius.  These dimensions are deliberately
-# conservative and the resulting tractor offset is always capped by the
-# confirmed lane width; no map point or LaneId is moved.
+# trailer axle follows a smaller radius.  Until the swept-envelope planner can
+# prove the complete manoeuvrable surface, these values are diagnostics only:
+# ordinary lane following keeps the cab reference exactly on LanePath.
 TRAILER_EFFECTIVE_AXLE_DISTANCE_M = 8.0
+TRAILER_EFFECTIVE_AXLE_DISTANCE_MIN_M = 2.0
+TRAILER_EFFECTIVE_AXLE_DISTANCE_MAX_M = 20.0
+TRAILER_WHEEL_TRACK_MIN_M = 0.5
+TRAILER_WHEEL_TRACK_MAX_M = 4.0
 TRACTOR_BODY_WIDTH_M = 2.55
 VEHICLE_ENVELOPE_MARGIN_M = 0.15
 TRAILER_POSE_MIN_DISTANCE_M = 1.5
 TRAILER_POSE_MAX_DISTANCE_M = 24.0
 TRAILER_PROGRESS_BEHIND_MAX_M = 32.0
 TRAILER_VERTICAL_TOLERANCE_M = 4.0
-# On a constant-radius bend the trailer axle cuts inward by
-# sqrt(R^2 + Ltr^2) - R.  Half is the analytic min-max centre: tractor and
-# trailer axle then use equal portions of the confirmed lane envelope.  One
-# percent of the same spatial prediction covers polyline/chassis discretising
-# error in the R18 articulated replay; unlike the former 60% reserve it does
-# not deliberately hold the tractor far outside the lane centre through the
-# whole bend. Live trailer CTE never changes this fraction or its side.
+# Historical candidate used by diagnostics and future manoeuvre planning. It
+# is deliberately not applied by ordinary steering: a centreline plus width
+# is not proof that an outward swept corridor is driveable.
 TRAILER_BALANCED_REFERENCE_FRACTION = 0.51
 # A longer window is retained for anticipatory curve braking; steering uses
 # the shorter local window above so it cannot cut across a bend.
@@ -905,16 +905,15 @@ class Route:
                                  preview_curvature_per_m: float = 0.0,
                                  active_authority=None,
                                  ) -> Tuple[float, dict]:
-        """Return a proven outward tractor offset for an attached trailer.
+        """Assess trailer off-tracking without moving the cab reference.
 
         The immutable lane remains the reference.  We independently project
         the live trailer pose onto a small, directed window *behind* the
-        tractor only to prove physical coupling and the correct deck.  Offset
-        side and magnitude come solely from the Ackermann swept path of the
-        upcoming vehicle-length of immutable geometry.  Invalid, opposite,
-        other-deck or ambiguous poses are fail-neutral and do not create an
-        offset; measured trailer CTE is diagnostic and has no steering
-        authority.
+        tractor only to prove physical coupling and the correct deck.  The
+        Ackermann estimate reports how much space a later swept-envelope
+        manoeuvre may need.  It is never steering authority: without proven
+        road boundaries and a collision-free swept polygon, ordinary lane
+        following targets the cab centre on LanePath and returns zero here.
         """
         debug = {
             "accepted": False, "reason": "trailer is not attached",
@@ -923,6 +922,17 @@ class Route:
             "available_offset_m": 0.0, "applied_offset_m": 0.0,
             "trailer_progress_m": 0.0,
             "curve_side_proven": False,
+            "reference_mode": "cab_centered",
+            "reference_authorized": False,
+            "candidate_offset_m": 0.0,
+            "estimated_trailer_clearance_m": None,
+            "requires_swept_envelope": False,
+            "effective_axle_distance_m": float(
+                TRAILER_EFFECTIVE_AXLE_DISTANCE_M),
+            "trailer_geometry_source": "provisional_default",
+            "trailer_wheel_track_m": None,
+            "trailer_wheel_track_valid": False,
+            "trailer_body_width_m": None,
             "preview_curvature_per_m": float(
                 preview_curvature_per_m),
             "curvature_source": "local_frenet_path",
@@ -937,14 +947,39 @@ class Route:
             lane_width = float(envelope["lane_width_m"])
             tractor_altitude = float(envelope["tractor_altitude_m"])
             trailer_altitude = float(envelope["trailer_altitude_m"])
+            raw_axle_distance = envelope.get("effective_axle_distance_m")
+            raw_wheel_track = envelope.get("wheel_track_m")
+            axle_distance = float(
+                TRAILER_EFFECTIVE_AXLE_DISTANCE_M
+                if raw_axle_distance is None else raw_axle_distance)
+            wheel_track = (None if raw_wheel_track is None
+                           else float(raw_wheel_track))
             values = (*trailer_pos, trailer_heading, lane_width,
                       tractor_altitude, trailer_altitude, float(tractor_cte),
-                      float(preview_curvature_per_m))
+                      float(preview_curvature_per_m), axle_distance)
+            if wheel_track is not None and not math.isfinite(wheel_track):
+                raise ValueError("non-finite trailer wheel track")
             if not all(math.isfinite(value) for value in values):
                 raise ValueError("non-finite trailer envelope metadata")
         except (KeyError, TypeError, ValueError, IndexError, OverflowError):
             debug["reason"] = "trailer envelope metadata is malformed"
             return 0.0, debug
+        if not (TRAILER_EFFECTIVE_AXLE_DISTANCE_MIN_M <= axle_distance
+                <= TRAILER_EFFECTIVE_AXLE_DISTANCE_MAX_M):
+            debug["reason"] = "trailer axle geometry is outside the physical range"
+            return 0.0, debug
+        geometry_source = (
+            "sdk_hook_to_axle_group" if raw_axle_distance is not None
+            else "provisional_default")
+        debug.update({
+            "effective_axle_distance_m": float(axle_distance),
+            "trailer_geometry_source": geometry_source,
+            "trailer_wheel_track_m": wheel_track,
+            "trailer_wheel_track_valid": bool(
+                wheel_track is not None
+                and TRAILER_WHEEL_TRACK_MIN_M <= wheel_track
+                <= TRAILER_WHEEL_TRACK_MAX_M),
+        })
         if not 2.4 <= lane_width <= 12.0:
             debug["reason"] = "confirmed lane width is unavailable"
             return 0.0, debug
@@ -964,12 +999,30 @@ class Route:
         segment_count = len(self.points) - 1
         minimum = max(0.0, progress - TRAILER_PROGRESS_BEHIND_MAX_M)
         maximum = min(self._cumulative_m[-1], progress + 2.0)
+        if self._point_authorities and active_authority is not None:
+            # Trailer validation may follow the immediately preceding LaneId
+            # while the cab has already crossed the boundary.  Use only the
+            # same directed, 3-D-proven geometry chain as Route derivatives;
+            # a nearby roundabout arm, bridge or repeated future LaneId is not
+            # a valid physical-coupling proof.
+            bounds = self._authority_geometry_bounds(
+                active_authority, progress,
+                TRAILER_PROGRESS_BEHIND_MAX_M)
+            if bounds is None:
+                debug["reason"] = (
+                    "trailer has no geometry bound to the active LaneId")
+                return 0.0, debug
+            minimum = max(minimum, bounds[0])
+            maximum = min(maximum, bounds[1])
         first = max(0, bisect.bisect_right(
             self._cumulative_m, minimum) - 2)
         last = min(segment_count, bisect.bisect_left(
             self._cumulative_m, maximum) + 1)
+        indices = [index for index in range(first, last)
+                   if self._cumulative_m[index] <= maximum
+                   and self._cumulative_m[index + 1] >= minimum]
         candidate = self._best_projection(
-            range(first, last), trailer_pos, trailer_heading)
+            indices, trailer_pos, trailer_heading)
         if candidate is None:
             debug["reason"] = "trailer has no directed projection on the active lane"
             return 0.0, debug
@@ -996,39 +1049,48 @@ class Route:
         if curve_side_proven:
             radius = 1.0 / abs(swept_curvature)
             magnitude = (math.sqrt(
-                radius * radius + TRAILER_EFFECTIVE_AXLE_DISTANCE_M ** 2)
+                radius * radius + axle_distance ** 2)
                          - radius)
             predicted = -math.copysign(magnitude, swept_curvature)
 
         # Immutable curvature owns both side and magnitude.  The live trailer
         # projection above validates physical coupling and remains diagnostic,
-        # but it is never a fast steering input.  The calibrated fraction is
-        # the steady min-max reference plus its spatial entry reserve described
-        # above; the confirmed lane envelope still caps the tractor target.
+        # but it is never a fast steering input.  ``required`` is retained as
+        # a candidate for the future swept-envelope planner, not as permission
+        # to move the cab on an assumed driveable surface.
         required = predicted * TRAILER_BALANCED_REFERENCE_FRACTION
         measurement_conflict = bool(
             abs(measured) > 0.10 and predicted * measured < 0.0)
         available = max(
             0.0, (lane_width - TRACTOR_BODY_WIDTH_M) * 0.5
             - VEHICLE_ENVELOPE_MARGIN_M)
-        applied = _clamp(required, -available, available)
+        candidate_offset = _clamp(required, -available, available)
+        estimated_clearance = (lane_width * 0.5
+                               - TRACTOR_BODY_WIDTH_M * 0.5
+                               - VEHICLE_ENVELOPE_MARGIN_M
+                               - abs(predicted))
+        requires_swept_envelope = bool(estimated_clearance < 0.0)
         debug.update({
             "accepted": True,
             "reason": (
-                "accepted; measured side conflicts but is diagnostic only"
-                if measurement_conflict else
-                ("accepted" if abs(required) <= available + 1e-6
-                 else "accepted but constrained by confirmed lane width")),
+                "diagnostic only; swept-envelope manoeuvre required"
+                if requires_swept_envelope else
+                ("diagnostic only; measured side conflicts"
+                 if measurement_conflict else
+                 "diagnostic only; ordinary cab reference remains centred")),
             "trailer_cte_m": float(trailer_cte),
             "measured_offtrack_m": float(measured),
             "predicted_offtrack_m": float(predicted),
             "required_offset_m": float(required),
             "available_offset_m": float(available),
-            "applied_offset_m": float(applied),
+            "candidate_offset_m": float(candidate_offset),
+            "applied_offset_m": 0.0,
+            "estimated_trailer_clearance_m": float(estimated_clearance),
+            "requires_swept_envelope": bool(requires_swept_envelope),
             "trailer_progress_m": float(trailer_progress),
             "curve_side_proven": bool(curve_side_proven),
         })
-        return float(applied), debug
+        return 0.0, debug
 
     def distance_to_end(self, pos: Point, heading: float = None) -> float:
         """Path-length distance from ``pos`` (snapped to nearest waypoint) to the end."""
@@ -1310,44 +1372,13 @@ class Route:
             target_progress = min(target_progress, preview_bounds[1])
         preview_curvature = self._steering_curvature_at_progress(
             target_progress, authority=route_authority)
-        trailer_offset, trailer_debug = self._trailer_envelope_offset(
+        _trailer_offset, trailer_debug = self._trailer_envelope_offset(
             progress, pos, heading, v, cte - lane_offset_m, vehicle_envelope,
             preview_curvature_per_m=local_curvature,
             active_authority=route_authority)
-        target_heading = 0.0
-        control_curvature = local_curvature
-        control_preview_curvature = preview_curvature
-        if trailer_debug.get("accepted", False):
-            # All three differential terms belong to the SAME immutable
-            # spatial trailer reference. Never feed measured trailer CTE into
-            # the cab steering or leave a stored offset after a curve/revision.
-            available = trailer_debug["available_offset_m"]
-
-            def target_frame(at_progress):
-                span = TRUCK_WHEELBASE_M
-                ks = [self._steering_curvature_at_progress(
-                    at_progress + delta, authority=route_authority)
-                    for delta in (-span, 0.0, span)]
-                targets = []
-                for k in ks:
-                    magnitude = (0.0 if abs(k) < 1e-12 else
-                        TRAILER_EFFECTIVE_AXLE_DISTANCE_M ** 2 * abs(k)
-                        / (math.sqrt(1.0 + (
-                            TRAILER_EFFECTIVE_AXLE_DISTANCE_M * k) ** 2) + 1.0))
-                    targets.append(_clamp(math.copysign(
-                        magnitude * TRAILER_BALANCED_REFERENCE_FRACTION, k),
-                        -available, available))
-                return offset_frame(
-                    ks[1], (ks[2]-ks[0])/(2*span), targets[1],
-                    (targets[2]-targets[0])/(2*span),
-                    (targets[2]-2*targets[1]+targets[0])/(span*span))
-
-            target_heading, control_curvature = target_frame(progress)
-            _, control_preview_curvature = target_frame(target_progress)
         steer, control = solve_lateral(
-            control_curvature, control_preview_curvature,
-            (cte + trailer_offset) * math.cos(target_heading),
-            heading_error - target_heading, v,
+            local_curvature, preview_curvature,
+            cte, heading_error, v,
             vehicle_curvature_per_m=vehicle_curvature_per_m,
             response_s=actuator_response_s, steering_lock_rad=steering_lock_rad)
         if not control["valid"]:
@@ -1363,15 +1394,15 @@ class Route:
         heading_feedback = control["heading_feedback"]
         cte_feedback = control["cte_feedback"]
         feedback = heading_feedback + cte_feedback
-        control_cte = cte + trailer_offset
+        control_cte = cte
         trailer_debug["curvature_source"] = "local_frenet_path"
         self.last_steering_debug = {
             **control,
             "controller": "frenet_bicycle",
             "curve_sign_projection_active": False,
-            "trailer_target_heading_rad": target_heading,
-            "trailer_target_m": -trailer_offset,
-            "target_curvature_per_m": control_curvature,
+            "trailer_target_heading_rad": 0.0,
+            "trailer_target_m": 0.0,
+            "target_curvature_per_m": local_curvature,
             "feed_forward": feed_forward, "feedback": feedback,
             "feedback_applied": feedback,
             "heading_feedback": heading_feedback,

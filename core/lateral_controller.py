@@ -44,21 +44,20 @@ FEEDBACK_RESPONSE_S = 2 * ACTUATION_PREVIEW_S
 PREDICTOR_SUBSTEPS = 8
 PREDICTOR_ITERATIONS = 5
 def solve(curvature, preview_curvature, cte_m, heading_error_rad, speed_ms,
-          trailer_offset_m=0.0, vehicle_curvature_per_m=None,
+          vehicle_curvature_per_m=None,
           response_s=ACTUATION_PREVIEW_S, steering_lock_rad=REFERENCE_LOCK_RAD):
     """One curvature demand, followed by exactly one inverse bicycle mapping.
 
     e_dot=v*sin(h), h_dot=v*k*cos(h)/(1+k*e)-v*k_vehicle.
-    Without prediction, with preview==k, constant speed and no trailer offset the commanded
+    Without prediction, with preview==k and constant speed the commanded
     curvature gives e_ddot + 2*v/ell*e_dot + (v/ell)^2*e = 0 exactly.
     Preview changes only the feed-forward along confirmed geometry, never the
     tangent or the point to which CTE is measured.
     """
-    values=(curvature, preview_curvature, cte_m, heading_error_rad,
-            speed_ms, trailer_offset_m)
+    values=(curvature, preview_curvature, cte_m, heading_error_rad, speed_ms)
     if not all(math.isfinite(float(v)) for v in values):
         return 0.0, {"valid": False, "reason": "non-finite lateral input"}
-    k,kp,e,h,v,offset=map(float,values)
+    k,kp,e,h,v=map(float,values)
     if not (math.isfinite(response_s) and 0.0 <= response_s <= 1.0
             and math.isfinite(steering_lock_rad)
             and MIN_STEERING_LOCK_RAD <= steering_lock_rad
@@ -95,7 +94,7 @@ def solve(curvature, preview_curvature, cte_m, heading_error_rad, speed_ms,
             return None
         foundation=kp*cosine/denominator
         heading=2*math.tan(error_heading)/length
-        lateral=(error_m+offset)/(length*length*cosine)
+        lateral=error_m/(length*length*cosine)
         return foundation+heading+lateral,foundation,heading,lateral
 
     control=control_at(e,h)
@@ -181,7 +180,7 @@ def solve(curvature, preview_curvature, cte_m, heading_error_rad, speed_ms,
         curvature_observation_weight=observation_weight,
         predicted_frenet_cte_m=predicted_e,
         predicted_frenet_heading_error_rad=predicted_h,
-        trailer_target_m=-offset)
+        trailer_target_m=0.0)
 
 
 def offset_frame(curvature, curvature_derivative, target_m,

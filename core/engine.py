@@ -1168,6 +1168,9 @@ class UltraPilotEngine:
                             trailer.get("y", 0.0) or 0.0),
                         "trailer_heading": trailer.get("rotation", 0.0),
                         "trailer_articulation": articulation,
+                        "trailer_effective_axle_distance_m": trailer.get(
+                            "effectiveAxleDistanceM"),
+                        "trailer_wheel_track_m": trailer.get("wheelTrackM"),
                     }
                 else:
                     trailer_payload = {
@@ -1176,6 +1179,8 @@ class UltraPilotEngine:
                         "trailer_altitude": None,
                         "trailer_heading": None,
                         "trailer_articulation": 0.0,
+                        "trailer_effective_axle_distance_m": None,
+                        "trailer_wheel_track_m": None,
                     }
                 vehicle_envelope_snapshot = {
                     "timestamp": float(telemetry_timestamp),
@@ -1203,6 +1208,11 @@ class UltraPilotEngine:
                         if trailer.get("attached") else None),
                     "trailer_articulation": float(
                         trailer_payload["trailer_articulation"]),
+                    "trailer_effective_axle_distance_m": (
+                        trailer_payload[
+                            "trailer_effective_axle_distance_m"]),
+                    "trailer_wheel_track_m": trailer_payload[
+                        "trailer_wheel_track_m"],
                 }
                 camera_snapshot = dict(camera_snapshot)
                 camera_snapshot.update({
@@ -1296,6 +1306,8 @@ class UltraPilotEngine:
                     "trailer_altitude": None,
                     "trailer_heading": None,
                     "trailer_articulation": 0.0,
+                    "trailer_effective_axle_distance_m": None,
+                    "trailer_wheel_track_m": None,
                     "vehicle_envelope_snapshot": {
                         "timestamp": float(telemetry_timestamp),
                         "tractor_position": None,
@@ -1304,6 +1316,8 @@ class UltraPilotEngine:
                         "trailer_position": None,
                         "trailer_heading": None,
                         "trailer_articulation": 0.0,
+                        "trailer_effective_axle_distance_m": None,
+                        "trailer_wheel_track_m": None,
                     },
                     **telemetry_loss,
                 })

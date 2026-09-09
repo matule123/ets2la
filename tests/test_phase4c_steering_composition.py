@@ -173,6 +173,7 @@ class Phase4CSteeringCompositionTests(unittest.TestCase):
         base_trailer = route.points[26]
         trailer_heading = self._heading(base_trailer, route.points[28])
         applied = []
+        candidates = []
         measured = []
         predicted = []
         for index in range(30):
@@ -196,6 +197,7 @@ class Phase4CSteeringCompositionTests(unittest.TestCase):
             debug = route.last_steering_debug["trailer_envelope"]
             self.assertTrue(debug["curve_side_proven"])
             applied.append(debug["applied_offset_m"])
+            candidates.append(debug["candidate_offset_m"])
             measured.append(debug["measured_offtrack_m"])
             predicted.append(debug["predicted_offtrack_m"])
             self.assertAlmostEqual(
@@ -203,12 +205,16 @@ class Phase4CSteeringCompositionTests(unittest.TestCase):
                 debug["predicted_offtrack_m"]
                 * TRAILER_BALANCED_REFERENCE_FRACTION,
                 places=9)
-        nonzero_signs = {1 if value > 0.0 else -1 for value in applied
+            self.assertFalse(debug["reference_authorized"])
+            self.assertEqual(debug["reference_mode"], "cab_centered")
+        nonzero_signs = {1 if value > 0.0 else -1 for value in candidates
                          if abs(value) > 1e-6}
         self.assertEqual(len(nonzero_signs), 1)
         self.assertGreater(max(measured) - min(measured), 1.0)
         self.assertLess(max(predicted) - min(predicted), 1e-9)
+        self.assertLess(max(candidates) - min(candidates), 1e-9)
         self.assertLess(max(applied) - min(applied), 1e-9)
+        self.assertEqual(applied, [0.0] * len(applied))
 
     def test_composition_has_no_noise_driven_authority_state(self):
         route = Route([(0.0, 0.0), (0.0, -20.0)])

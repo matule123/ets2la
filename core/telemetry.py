@@ -111,6 +111,33 @@ class Telemetry:
             if raw_tr and raw_tr.get("attached"):
                 raw_tr_heading = float(raw_tr.get("rotationX", 0.0) or 0.0)
                 tr_heading = (raw_tr_heading * math.tau + math.pi) % math.tau - math.pi
+                raw_wheel_count = int(raw_tr.get("wheelCount", 0) or 0)
+                wheel_count = (raw_wheel_count
+                               if 0 <= raw_wheel_count <= 16 else 0)
+                wheel_x = list(raw_tr.get("wheelPositionX", ()) or ())[:wheel_count]
+                wheel_y = list(raw_tr.get("wheelPositionY", ()) or ())[:wheel_count]
+                wheel_z = list(raw_tr.get("wheelPositionZ", ()) or ())[:wheel_count]
+                hook = (
+                    float(raw_tr.get("hookPositionX", 0.0) or 0.0),
+                    float(raw_tr.get("hookPositionY", 0.0) or 0.0),
+                    float(raw_tr.get("hookPositionZ", 0.0) or 0.0),
+                )
+                effective_axle_distance = None
+                wheel_track = None
+                if (wheel_count > 0
+                        and len(wheel_x) == len(wheel_y) == len(wheel_z)
+                        and all(math.isfinite(float(value)) for value in
+                                (*hook, *wheel_x, *wheel_y, *wheel_z))):
+                    axle_centre = (
+                        sum(map(float, wheel_x)) / wheel_count,
+                        sum(map(float, wheel_y)) / wheel_count,
+                        sum(map(float, wheel_z)) / wheel_count,
+                    )
+                    effective_axle_distance = math.hypot(
+                        axle_centre[0] - hook[0],
+                        axle_centre[2] - hook[2])
+                    wheel_track = max(map(float, wheel_x)) - min(
+                        map(float, wheel_x))
                 trailer = {
                     "attached": True,
                     "speed": speed_ms,                 # approximated by the truck's
@@ -119,6 +146,12 @@ class Telemetry:
                     "z": raw_tr.get("worldZ", 0.0),
                     "rotation": tr_heading,            # radians (heading)
                     "rotationX": raw_tr.get("rotationX", 0.0),
+                    # Static local SDK geometry. Consumers validate its
+                    # physical range before using it; malformed geometry is
+                    # never silently promoted to steering authority.
+                    "wheelCount": wheel_count,
+                    "effectiveAxleDistanceM": effective_axle_distance,
+                    "wheelTrackM": wheel_track,
                 }
         except Exception as e:
             logging.debug(f"Trailer telemetry unavailable: {e}")

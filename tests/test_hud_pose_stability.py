@@ -15,6 +15,7 @@ from core.hud import (UltraPilotHUD, _continuous_lane_chunks,
                       _traffic_light_truck_position,
                       _variable_lane_boundary_points)
 from core.sdk.scs_sdk import SCSTelemetry
+from core.telemetry import Telemetry
 from tests.test_lane_route_builder import SyntheticMap
 
 
@@ -513,6 +514,15 @@ class HudPoseStabilityTests(unittest.TestCase):
         base = sdk.TRAILER_BLOCK_START
         sdk.mm[base + 80] = 1
         sdk.mm[base + 81] = 0  # padding must not be read as attached
+        struct.pack_into("i", sdk.mm, base + 148, 4)
+        for offset, values in (
+                (664, (0.0, 1.0, 1.0)),
+                (676, (-1.0, 1.0, -1.0, 1.0)),
+                (740, (0.0, 0.0, 0.0, 0.0)),
+                (804, (8.0, 8.0, 9.0, 9.0))):
+            for index, value in enumerate(values):
+                struct.pack_into("f", sdk.mm, base + offset + index * 4,
+                                 value)
         for offset, value in ((872, 10.0), (880, 20.0), (888, 30.0),
                               (896, 0.25), (904, 0.0), (912, 0.0)):
             sdk.mm[base + offset:base + offset + 8] = struct.pack("d", value)
@@ -520,6 +530,16 @@ class HudPoseStabilityTests(unittest.TestCase):
         self.assertTrue(trailer["attached"])
         self.assertEqual((trailer["worldX"], trailer["worldY"],
                           trailer["worldZ"]), (10.0, 20.0, 30.0))
+        self.assertEqual(trailer["wheelCount"], 4)
+        self.assertEqual(trailer["hookPositionZ"], 1.0)
+        self.assertEqual(trailer["wheelPositionZ"][:4],
+                         [8.0, 8.0, 9.0, 9.0])
+
+        telemetry = Telemetry.__new__(Telemetry)
+        telemetry.sdk_reader = sdk
+        normalized = telemetry._normalize_sdk({})["trailer"]
+        self.assertAlmostEqual(normalized["effectiveAxleDistanceM"], 7.5)
+        self.assertAlmostEqual(normalized["wheelTrackM"], 2.0)
 
 
 if __name__ == "__main__":

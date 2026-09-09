@@ -329,8 +329,8 @@ class LaneGeometryAuditTests(unittest.TestCase):
                     self.assertFalse(debug["curve_sign_projection_active"])
                     self.assertLessEqual(abs(command), 1.0)
 
-    def test_attached_trailer_uses_proven_lane_width_to_swing_outward(self):
-        """The 05:30--06:10 video hairpin must account for the semi axle."""
+    def test_attached_trailer_reports_space_without_moving_cab_reference(self):
+        """A centreline and lane width do not prove a swing-wide corridor."""
         for direction in (-1.0, 1.0):
             route = Route(self._arc(direction, 18.0, 140.0))
             tractor = route.points[30]
@@ -352,7 +352,7 @@ class LaneGeometryAuditTests(unittest.TestCase):
                 "trailer_altitude_m": 0.0,
                 "elevation_layer": 0,
             }
-            corrected = route.steering(
+            with_trailer = route.steering(
                 tractor, tractor_heading, 5.5,
                 cross_track_error_m=0.0,
                 vehicle_envelope=envelope)
@@ -361,9 +361,14 @@ class LaneGeometryAuditTests(unittest.TestCase):
             with self.subTest(direction=direction):
                 self.assertTrue(trailer_debug["accepted"])
                 self.assertLess(
-                    trailer_debug["applied_offset_m"]
+                    trailer_debug["candidate_offset_m"]
                     * debug["local_curvature"], 0.0)
-                self.assertLess(abs(corrected), abs(base))
+                self.assertEqual(trailer_debug["applied_offset_m"], 0.0)
+                self.assertEqual(trailer_debug["reference_mode"],
+                                 "cab_centered")
+                self.assertFalse(trailer_debug["reference_authorized"])
+                self.assertTrue(trailer_debug["requires_swept_envelope"])
+                self.assertAlmostEqual(with_trailer, base, places=12)
                 self.assertEqual(tuple(route.world_points), original_geometry)
 
             # A trailer pose on another deck is not permission to move the
@@ -377,8 +382,8 @@ class LaneGeometryAuditTests(unittest.TestCase):
             self.assertFalse(
                 route.last_steering_debug["trailer_envelope"]["accepted"])
 
-    def test_articulated_r18_replay_keeps_both_axles_near_lane_centre(self):
-        """Spatial trailer proof fixes off-tracking without steering history."""
+    def test_articulated_r18_is_not_declared_safe_without_swept_envelope(self):
+        """Ordinary control cannot hide an unsafe R18 trailer envelope."""
         def approach_and_hairpin(direction):
             points = [(0.0, float(z)) for z in range(0, 41, 2)]
             for index in range(1, 61):
@@ -442,17 +447,19 @@ class LaneGeometryAuditTests(unittest.TestCase):
                     max(abs(item[1]) for item in samples))
 
         for direction in (-1.0, 1.0):
-            old_trailer_peak, _old_tractor_peak = replay(direction, False)
+            old_trailer_peak, old_tractor_peak = replay(direction, False)
             trailer_peak, tractor_peak = replay(direction, True)
             with self.subTest(direction=direction):
                 self.assertGreater(old_trailer_peak, 1.80)
-                # Validate the complete vehicle envelope against the proven
-                # 4.7 m lane instead of an arbitrary 1.00 m axle threshold.
-                self.assertLess(
+                # Trailer telemetry is diagnostic only, so adding it cannot
+                # silently move the cab target and turn an unproved corridor
+                # into a passing test. Stage 6 must prove the swept polygon.
+                self.assertAlmostEqual(trailer_peak, old_trailer_peak,
+                                       places=12)
+                self.assertAlmostEqual(tractor_peak, old_tractor_peak,
+                                       places=12)
+                self.assertGreater(
                     trailer_peak + TRACTOR_BODY_WIDTH_M * 0.5, 4.7 * 0.5)
-                self.assertLess(
-                    tractor_peak + TRACTOR_BODY_WIDTH_M * 0.5, 4.7 * 0.5)
-                self.assertLess(trailer_peak, old_trailer_peak - 0.75)
 
     def test_real_222100_r54_entry_keeps_imminent_r18_curve_authority(self):
         """A proven R54-to-R18 entry is followed as one real geometry."""

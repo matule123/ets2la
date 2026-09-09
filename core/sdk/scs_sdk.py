@@ -74,10 +74,13 @@ class SCSTelemetry:
     # --- Trailer (Zone 14) -------------------------------------------------
     # The scs-sdk-plugin stores up to 10 trailer structs back-to-back starting
     # at absolute offset 6000 (Zone 14). Each trailer struct is 1560 bytes; we
-    # only need a handful of fields from the first attached trailer. The byte
+    # only need a bounded subset of fields from the first attached trailer. The byte
     # offsets below are derived from scs-telemetry-common.hpp / the reference
     # ETS2LA reader (Modules/TruckSimAPI/api.py:readTrailer):
-    #   * attached  — bool at block-relative +81   (Zone 1 wheel flags + 1)
+    #   * attached  — bool at block-relative +80   (64 constant + 16 ground flags)
+    #   * wheelCount — int at block-relative +148
+    #   * hookPositionX/Y/Z — float at +664/+668/+672
+    #   * wheelPositionX/Y/Z — 16 floats at +676/+740/+804
     #   * worldX/Y/Z — double at block-relative +872 (Zone 5 placement)
     #   * rotationX/Y/Z — double at +896/+904/+912  (heading/pitch/roll)
     # rotationX is a 0..1 fraction of a full turn (same convention as the
@@ -104,6 +107,11 @@ class SCSTelemetry:
             return {}
         try:
             attached = self.read_bool(base + self.TRAILER_ATTACHED_OFFSET)[0]
+            wheel_count = self.read_int(base + 148)[0]
+            hook_x, hook_y, hook_z = self.read_float(base + 664, count=3)[0]
+            wheel_x = self.read_float(base + 676, count=16)[0]
+            wheel_y = self.read_float(base + 740, count=16)[0]
+            wheel_z = self.read_float(base + 804, count=16)[0]
             world_x = self.read_double(base + 872)[0]
             world_y = self.read_double(base + 880)[0]
             world_z = self.read_double(base + 888)[0]
@@ -115,6 +123,13 @@ class SCSTelemetry:
             return {}
         return {
             "attached": bool(attached),
+            "wheelCount": int(wheel_count),
+            "hookPositionX": float(hook_x),
+            "hookPositionY": float(hook_y),
+            "hookPositionZ": float(hook_z),
+            "wheelPositionX": [float(value) for value in wheel_x],
+            "wheelPositionY": [float(value) for value in wheel_y],
+            "wheelPositionZ": [float(value) for value in wheel_z],
             "worldX": float(world_x),
             "worldY": float(world_y),
             "worldZ": float(world_z),

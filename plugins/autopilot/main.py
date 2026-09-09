@@ -580,6 +580,22 @@ class Plugin(BasePlugin):
             "trailer_cte_m": trailer.get("trailer_cte_m"),
             "trailer_required_offset_m": trailer.get("required_offset_m"),
             "trailer_applied_offset_m": trailer.get("applied_offset_m"),
+            "trailer_candidate_offset_m": trailer.get(
+                "candidate_offset_m"),
+            "trailer_estimated_clearance_m": trailer.get(
+                "estimated_trailer_clearance_m"),
+            "trailer_reference_mode": trailer.get("reference_mode"),
+            "trailer_reference_authorized": trailer.get(
+                "reference_authorized"),
+            "trailer_requires_swept_envelope": trailer.get(
+                "requires_swept_envelope"),
+            "trailer_effective_axle_distance_m": trailer.get(
+                "effective_axle_distance_m"),
+            "trailer_geometry_source": trailer.get(
+                "trailer_geometry_source"),
+            "trailer_wheel_track_m": trailer.get("trailer_wheel_track_m"),
+            "trailer_wheel_track_valid": trailer.get(
+                "trailer_wheel_track_valid"),
             "trailer_curvature_per_m": trailer.get(
                 "preview_curvature_per_m"),
             "authority_rejection": str(authority_reason or ""),
@@ -1177,6 +1193,25 @@ class Plugin(BasePlugin):
                     trailer_debug.get("required_offset_m", 0.0) or 0.0)
                 diagnostic_trailer_offset = float(
                     trailer_debug.get("applied_offset_m", 0.0) or 0.0)
+                diagnostic_trailer_candidate = float(
+                    trailer_debug.get("candidate_offset_m", 0.0) or 0.0)
+                diagnostic_trailer_clearance = float(
+                    trailer_debug.get(
+                        "estimated_trailer_clearance_m", float("nan")))
+                diagnostic_trailer_mode = str(
+                    trailer_debug.get("reference_mode", "cab_centered")
+                    or "cab_centered")
+                diagnostic_trailer_authorized = bool(
+                    trailer_debug.get("reference_authorized", False))
+                diagnostic_trailer_maneuver = bool(
+                    trailer_debug.get("requires_swept_envelope", False))
+                diagnostic_trailer_axle_distance = float(
+                    trailer_debug.get(
+                        "effective_axle_distance_m", float("nan")))
+                diagnostic_trailer_geometry_source = str(
+                    trailer_debug.get(
+                        "trailer_geometry_source", "unavailable")
+                    or "unavailable")
                 diagnostic_trailer_reason = str(
                     trailer_debug.get("reason", "") or "")
                 diagnostic_trailer_side_proven = bool(
@@ -1271,6 +1306,13 @@ class Plugin(BasePlugin):
                 diagnostic_trailer_cte = float("nan")
                 diagnostic_trailer_required = float("nan")
                 diagnostic_trailer_offset = float("nan")
+                diagnostic_trailer_candidate = float("nan")
+                diagnostic_trailer_clearance = float("nan")
+                diagnostic_trailer_mode = "malformed"
+                diagnostic_trailer_authorized = False
+                diagnostic_trailer_maneuver = False
+                diagnostic_trailer_axle_distance = float("nan")
+                diagnostic_trailer_geometry_source = "malformed"
                 diagnostic_trailer_reason = "malformed"
                 diagnostic_trailer_side_proven = False
                 diagnostic_trailer_curvature = float("nan")
@@ -1304,6 +1346,15 @@ class Plugin(BasePlugin):
                 "trailer_curvature_per_m": diagnostic_trailer_curvature,
                 "trailer_reference_fraction": diagnostic_trailer_fraction,
                 "trailer_curvature_source": diagnostic_trailer_curve_source,
+                "trailer_reference_mode": diagnostic_trailer_mode,
+                "trailer_reference_authorized": diagnostic_trailer_authorized,
+                "trailer_candidate_offset_m": diagnostic_trailer_candidate,
+                "trailer_estimated_clearance_m": diagnostic_trailer_clearance,
+                "trailer_requires_swept_envelope": diagnostic_trailer_maneuver,
+                "trailer_effective_axle_distance_m": (
+                    diagnostic_trailer_axle_distance),
+                "trailer_geometry_source": (
+                    diagnostic_trailer_geometry_source),
                 "lookahead_m": diagnostic_guidance_lookahead,
                 "observed_game_steering": diagnostic_game_steering,
                 "game_steer_tracking_error": diagnostic_game_tracking,
@@ -1334,7 +1385,10 @@ class Plugin(BasePlugin):
                 "brake=%.3f brake_req=%.3f curve_brake=%.3f "
                 "collision_brake=%.3f traffic_brake=%.3f light_brake=%.3f "
                 "aux_brake=%.3f vision_brake=%.3f "
-                "trailer_cte=%.3f trailer_required=%.3f trailer_offset=%.3f "
+                "trailer_cte=%.3f trailer_required=%.3f trailer_candidate=%.3f "
+                "trailer_offset=%.3f trailer_clearance=%s trailer_mode=%s "
+                "trailer_authorized=%s trailer_maneuver=%s "
+                "trailer_axle_distance=%s trailer_geometry=%s "
                 "trailer_k=%.5f trailer_fraction=%.2f "
                 "trailer_side_proven=%s trailer_curve_source=%s "
                 "trailer_reason=%s "
@@ -1373,7 +1427,15 @@ class Plugin(BasePlugin):
                 collision_brake, traffic_brake, light_brake,
                 aux_brake, vision_brake,
                 diagnostic_trailer_cte, diagnostic_trailer_required,
-                diagnostic_trailer_offset,
+                diagnostic_trailer_candidate, diagnostic_trailer_offset,
+                ("-" if not math.isfinite(diagnostic_trailer_clearance)
+                 else f"{diagnostic_trailer_clearance:.3f}"),
+                diagnostic_trailer_mode,
+                diagnostic_trailer_authorized,
+                diagnostic_trailer_maneuver,
+                ("-" if not math.isfinite(diagnostic_trailer_axle_distance)
+                 else f"{diagnostic_trailer_axle_distance:.3f}"),
+                diagnostic_trailer_geometry_source,
                 diagnostic_trailer_curvature,
                 diagnostic_trailer_fraction,
                 diagnostic_trailer_side_proven,
