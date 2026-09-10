@@ -98,10 +98,16 @@ class SettingsManager:
                 "kp": 0.3,
                 "ki": 0.01,
                 "kd": 0.1,
-                # Provisional input -> road-wheel calibration for the tested
-                # truck/setup. Runtime validates 0.60..0.95 rad and fails
-                # closed outside it; no online adaptation is performed.
-                "steering_lock_rad": 0.70
+                # Explicit static calibration for the tested truck/input
+                # setup. Existing scalar steering_lock_rad settings are read
+                # only as a migration input. No online adaptation is used.
+                "steering_actuator_calibration": {
+                    "schema_version": 1,
+                    "tyre_angle_per_input_rad": 0.70,
+                    "command_delay_s": 0.067,
+                    "observation_delay_s": 0.067,
+                    "source": "dense_replay_20260910_provisional"
+                }
             },
             "hud": {
                 "enabled": True,

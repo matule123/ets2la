@@ -102,7 +102,8 @@ def run(data, speed=12., *, lock_rad=.78, wheelbase=3.8, lag=.32, transport=.10,
         initial_cte=0., noisy=False, jitter=False, trailer=False, load=0.,
         speed_profile=None, max_time=180., route_factory=Route,
         dynamics_factory=SteeringDynamics, controller_lock_rad=.78,
-        observation_ahead_m=0., controller_ahead_m=None):
+        observation_ahead_m=0., controller_ahead_m=None,
+        controller_preview_s=None):
     route=route_factory(data['points'])
     dynamics=dynamics_factory()
     x,z=data['points'][0]
@@ -178,6 +179,10 @@ def run(data, speed=12., *, lock_rad=.78, wheelbase=3.8, lag=.32, transport=.10,
             extra['reference_geometry']=dict(valid=True, source='independent_plant',
                 wheelbase_m=wheelbase, reference_ahead_m=(observation_ahead_m
                     if controller_ahead_m is None else controller_ahead_m))
+        if (controller_preview_s is not None
+                and 'curvature_preview_s' in inspect.signature(
+                    route.steering).parameters):
+            extra['curvature_preview_s']=float(controller_preview_s)
         raw=route.steering((ox,oz),observed_h,v,cross_track_error_m=measured,
                            vehicle_envelope=envelope,control_authority=authority,control_dt_s=dt,**extra)
         debug=route.last_steering_debug

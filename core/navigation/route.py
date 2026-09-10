@@ -19,7 +19,7 @@ import os
 from typing import List, Optional, Sequence, Tuple
 
 from core.lateral_controller import (
-    ACTUATION_PREVIEW_S, MAX_STEERING_LOCK_RAD, MIN_STEERING_LOCK_RAD,
+    FEEDBACK_RESPONSE_S, MAX_STEERING_LOCK_RAD, MIN_STEERING_LOCK_RAD,
     REFERENCE_LOCK_RAD, WHEELBASE_M,
     solve as solve_lateral,
 )
@@ -1183,9 +1183,11 @@ class Route:
                  control_authority: Optional[dict] = None,
                  control_dt_s: Optional[float] = None,
                  vehicle_curvature_per_m: Optional[float] = None,
-                 actuator_response_s: float = ACTUATION_PREVIEW_S,
+                 actuator_response_s: float = FEEDBACK_RESPONSE_S,
                  steering_lock_rad: float = REFERENCE_LOCK_RAD,
-                 reference_geometry: Optional[dict] = None) -> float:
+                 reference_geometry: Optional[dict] = None,
+                 curvature_preview_s: Optional[float] = None,
+                 actuator_calibration_failure: str = "") -> float:
         """Steering command in ``[-1, 1]`` (positive = right) to follow the route.
 
         GPS callers pass lane_offset_m=0: LanePath already is the confirmed
@@ -1222,9 +1224,21 @@ class Route:
                 control_failure="route has fewer than two points")
             return 0.0
 
+        if actuator_calibration_failure:
+            self.last_steering_debug.update(
+                authority_valid=False,
+                control_failure=("invalid actuator calibration: "
+                                 + str(actuator_calibration_failure)),
+                actuator_calibration_failure=str(
+                    actuator_calibration_failure))
+            return 0.0
+
         try:
+            preview_horizon_s = (actuator_response_s
+                                 if curvature_preview_s is None else
+                                 float(curvature_preview_s))
             inputs = (pos[0], pos[1], heading, speed_ms, lane_offset_m,
-                      actuator_response_s)
+                      actuator_response_s, preview_horizon_s)
             if cross_track_error_m is not None:
                 inputs += (cross_track_error_m,)
             if not all(math.isfinite(float(value)) for value in inputs):
@@ -1232,6 +1246,14 @@ class Route:
         except (TypeError, ValueError, IndexError, OverflowError):
             self.last_steering_debug.update(
                 authority_valid=False, control_failure="invalid pose/control input")
+            return 0.0
+        if not (0.0 <= preview_horizon_s <= 1.0
+                and 0.0 <= float(actuator_response_s) <= 1.0):
+            self.last_steering_debug.update(
+                authority_valid=False,
+                control_failure="invalid actuator calibration",
+                curvature_preview_s=preview_horizon_s,
+                feedback_response_s=actuator_response_s)
             return 0.0
         try:
             steering_lock_rad = float(steering_lock_rad)
@@ -1377,7 +1399,11 @@ class Route:
         v = abs(float(speed_ms))
         local_curvature = self._steering_curvature_at_progress(
             progress, authority=route_authority)
-        preview_distance = v * actuator_response_s
+        # Physical observation/command latency determines how far ahead the
+        # immutable path curvature is sampled. Feedback pole placement remains
+        # a separate design value in actuator_response_s; coupling both values
+        # previously turned calibration changes into controller-gain changes.
+        preview_distance = v * preview_horizon_s
         preview_bounds = self._authority_geometry_bounds(
             route_authority, progress, preview_distance + 12.0)
         target_progress = min(self._cumulative_m[-1],
@@ -1452,6 +1478,8 @@ class Route:
             "steering_limit": 1.0,
             "steering_lock_rad": steering_lock_rad,
             "steering_lock_valid": True,
+            "curvature_preview_s": preview_horizon_s,
+            "feedback_response_s": actuator_response_s,
             "saturated": abs(raw_steer) > 1.0,
             "trailer_envelope": trailer_debug,
             "authority_valid": True, "authority_lane_id": authority_lane,

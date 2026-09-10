@@ -231,6 +231,27 @@ def navigation_command(state, snapshot, *, gps_active, now=None, packet=None):
             for key in identity_fields:
                 if not snapshot.get(key) or packet.get(key) != snapshot.get(key):
                     return 0.0, 0.0, f"steering command {key} is stale"
+            # A settings change must not let an older command, calculated with
+            # a different tyre conversion or preview horizon, reach the game.
+            # Production Map always publishes both values atomically. Legacy
+            # test/recorded producers without a calibration state retain their
+            # existing contract.
+            current_calibration = state.get(
+                "steering_actuator_calibration", None)
+            if current_calibration is not None:
+                packet_calibration = packet.get("actuator_calibration")
+                if (not isinstance(current_calibration, dict)
+                        or not current_calibration.get("valid", False)):
+                    return 0.0, 0.0, "steering actuator calibration is invalid"
+                if not isinstance(packet_calibration, dict):
+                    return 0.0, 0.0, "steering command actuator calibration is missing"
+                calibration_keys = (
+                    "schema_version", "tyre_angle_per_input_rad",
+                    "command_delay_s", "observation_delay_s", "source")
+                if any(packet_calibration.get(key)
+                       != current_calibration.get(key)
+                       for key in calibration_keys):
+                    return 0.0, 0.0, "steering command actuator calibration is stale"
             for key in ("computed_at", "observation_timestamp"):
                 age = now - float(packet[key])
                 if not math.isfinite(age) or not 0.0 <= age <= 0.5:
@@ -495,6 +516,8 @@ class Plugin(BasePlugin):
         lane_id = match.get("active_lane_id") or {}
         calculation_identity = accepted.get("trajectory_identity", {}) or {}
         application_identity = self._steering_replay_identity()
+        actuator_calibration = self.sdk.shared_state.get(
+            "steering_actuator_calibration", {}) or {}
         binding_valid, binding_reasons = steering_packet_binding(
             accepted, snapshot)
         now = time.monotonic()
@@ -578,6 +601,16 @@ class Plugin(BasePlugin):
             "steer_out": steering_val,
             "engine_applied_steering": self.sdk.shared_state.get(
                 "engine_applied_steering"),
+            "actuator_calibration": diagnostic_copy(
+                actuator_calibration),
+            "application_actuator_calibration": diagnostic_copy(
+                actuator_calibration),
+            "calculation_actuator_calibration": diagnostic_copy(
+                accepted.get("actuator_calibration", {})),
+            "curvature_preview_s": accepted.get(
+                "curvature_preview_s"),
+            "feedback_response_s": accepted.get(
+                "feedback_response_s"),
             "game_steer": observed_game_steering,
             "game_steer_right": observed_game_steering,
             "tyre_angles_rad": truck.get("roadWheelAnglesRad", []),
@@ -1294,8 +1327,11 @@ class Plugin(BasePlugin):
                 diagnostic_dt_used = float(
                     dynamics_debug.get("dt_used_s", 0.0) or 0.0)
                 diagnostic_game_steering = float(observed_game_steering)
+                diagnostic_engine_command = float(
+                    self.sdk.shared_state.get(
+                        "engine_applied_steering", steering_val) or 0.0)
                 diagnostic_game_tracking = (
-                    diagnostic_game_steering - float(steering_val))
+                    diagnostic_game_steering - diagnostic_engine_command)
                 diagnostic_lock_rad = float(
                     steering_debug.get("steering_lock_rad", float("nan")))
                 tyre_angles = [float(value) for value in
@@ -1305,10 +1341,11 @@ class Plugin(BasePlugin):
                     sum(tyre_angles) / len(tyre_angles)
                     if tyre_angles else float("nan"))
                 diagnostic_command_angle = (
-                    float(steering_val) * diagnostic_lock_rad)
+                    diagnostic_engine_command * diagnostic_lock_rad)
                 diagnostic_game_to_command = (
-                    diagnostic_game_steering / float(steering_val)
-                    if abs(float(steering_val)) >= 0.05 else float("nan"))
+                    diagnostic_game_steering / diagnostic_engine_command
+                    if abs(diagnostic_engine_command) >= 0.05
+                    else float("nan"))
                 diagnostic_tyre_per_game = (
                     diagnostic_tyre_angle / diagnostic_game_steering
                     if abs(diagnostic_game_steering) >= 0.05
@@ -1363,12 +1400,16 @@ class Plugin(BasePlugin):
                 diagnostic_trajectory_phase = "malformed"
                 diagnostic_dt = diagnostic_dt_used = float("nan")
                 diagnostic_game_steering = diagnostic_game_tracking = float("nan")
+                diagnostic_engine_command = float("nan")
                 diagnostic_lock_rad = diagnostic_tyre_angle = float("nan")
                 diagnostic_command_angle = diagnostic_game_to_command = float("nan")
                 diagnostic_tyre_per_game = diagnostic_yaw_curvature = float("nan")
                 diagnostic_dynamics_flags = "malformed"
             self.sdk.shared_state.set("steering_dynamics_diagnostic", {
                 **dict(getattr(self, "_steering_dynamics_debug", {}) or {}),
+                "actuator_calibration": diagnostic_copy(
+                    self.sdk.shared_state.get(
+                        "steering_actuator_calibration", {}) or {}),
                 "feed_forward": diagnostic_feed_forward,
                 "feedback": diagnostic_feedback,
                 "feedback_applied": diagnostic_feedback_applied,

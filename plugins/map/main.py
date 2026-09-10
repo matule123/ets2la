@@ -6,7 +6,7 @@ import json
 import tempfile
 from sdk.base_plugin import BasePlugin
 from core.navigation.route import Route
-from core.lateral_controller import REFERENCE_LOCK_RAD, WHEELBASE_M
+from core.steering_calibration import steering_calibration_from_settings
 from core.navigation.lane_trajectory import build_lane_trajectory
 from core.navigation.route_diagnostics import (
     RouteBuildDiagnostics, classify_failure, dataset_fingerprint,
@@ -2223,8 +2223,17 @@ class Plugin(BasePlugin):
         settings = self.sdk.get("settings", {}) or {}
         autopilot_settings = (settings.get("autopilot", {})
                               if isinstance(settings, dict) else {}) or {}
-        steering_lock_rad = autopilot_settings.get(
-            "steering_lock_rad", REFERENCE_LOCK_RAD)
+        actuator_calibration = steering_calibration_from_settings(
+            autopilot_settings)
+        calibration_payload = actuator_calibration.as_dict()
+        self.sdk.shared_state.set(
+            "steering_actuator_calibration", calibration_payload)
+        steering_lock_rad = (
+            actuator_calibration.tyre_angle_per_input_rad
+            if actuator_calibration.valid else float("nan"))
+        curvature_preview_s = (
+            actuator_calibration.preview_horizon_s
+            if actuator_calibration.valid else float("nan"))
         observation_altitude = None
         # One IPC value is one telemetry observation. Separate scalar reads
         # can straddle an Engine update and pair position n with heading n+1.
@@ -2383,7 +2392,10 @@ class Plugin(BasePlugin):
             steer = self.active_route.steering(
                 pos, heading, speed, lane_offset_m=self._lane_offset(),
                 steering_lock_rad=steering_lock_rad,
-                reference_geometry=reference_geometry)
+                reference_geometry=reference_geometry,
+                curvature_preview_s=curvature_preview_s,
+                actuator_calibration_failure=(
+                    actuator_calibration.failure_reason))
             if not self.active_route.last_steering_debug.get(
                     "authority_valid", True):
                 self.sdk.shared_state.update_batch({
@@ -2554,7 +2566,10 @@ class Plugin(BasePlugin):
                     control_dt_s=delta_time,
                     vehicle_curvature_per_m=vehicle_curvature,
                     steering_lock_rad=steering_lock_rad,
-                    reference_geometry=reference_geometry)
+                    reference_geometry=reference_geometry,
+                    curvature_preview_s=curvature_preview_s,
+                    actuator_calibration_failure=(
+                        actuator_calibration.failure_reason))
                 curve_profile = route.curve_profile_ahead(pos, heading)
                 # Safety: if the truck is far from the snapped path (wrong map
                 # dataset, or we're off-road on a ferry / car park), the CTE is
@@ -2574,6 +2589,7 @@ class Plugin(BasePlugin):
                     "observation_xz": pos, "observation_heading_rad": heading,
                     "observation_speed_ms": speed,
                     "vehicle_curvature_source": vehicle_curvature_source,
+                    "actuator_calibration": calibration_payload,
                     "navigation_intent_id": snapshot.get("navigation_intent_id"),
                     "route_build_id": snapshot.get("route_build_id"),
                     "source_game_session_id": snapshot.get(

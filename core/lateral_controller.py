@@ -7,40 +7,27 @@ tests with an independent plant. No moving average, integrator or turn latch.
 """
 import math
 
+from core.steering_calibration import (
+    DEFAULT_TYRE_ANGLE_PER_INPUT_RAD as REFERENCE_LOCK_RAD,
+    MIN_TYRE_ANGLE_PER_INPUT_RAD as MIN_STEERING_LOCK_RAD,
+    MAX_TYRE_ANGLE_PER_INPUT_RAD as MAX_STEERING_LOCK_RAD,
+)
 
 WHEELBASE_M = 3.8
-# Equivalent lock identified from the latest same-LaneId quasi-steady
-# 2026-09-06 samples: 0.698..0.704 rad for the current truck/input setup. This is NOT
-# an SDK universal constant. Physical wheel telemetry is logged independently
-# so another chassis/input configuration can be identified rather than hidden
-# by a permanent feedback offset. The former 0.28 was a turning-radius design
-# choice, incorrectly treated as the game's actual input-to-tyre conversion.
-# This is a conservative *provisional* default for the one truck/input setup
-# represented by the 2026-09-06 log.  Runtime callers must pass the value from
-# settings explicitly; keeping the default here is useful for pure geometry
-# tools and backwards-compatible unit tests, not a claim that every ETS2
-# chassis has the same input-to-tyre conversion.
-REFERENCE_LOCK_RAD = 0.70
-MIN_STEERING_LOCK_RAD = 0.60
-MAX_STEERING_LOCK_RAD = 0.95
-GAME_RESPONSE_S = 0.32
-TRANSPORT_S = 0.10
-# The controller observes a completed SDK frame rather than the continuous
-# plant at the exact calculation instant.  The 2026-09-06 dense replay has a
-# 66.7 ms median new-frame interval, so a sample is on average one half frame
-# old.  Add a conservative 30 ms observation phase to the identified actuator
-# and transport delay.  This is a causal timing term, not a filter or state.
-SDK_OBSERVATION_PHASE_S = 0.03
-ACTUATION_PREVIEW_S = (
-    GAME_RESPONSE_S + TRANSPORT_S + SDK_OBSERVATION_PHASE_S)
+
+# Feedback pole placement is a controller design term, not measured actuator
+# latency. Before Phase 4B the same 0.45 s value was also used as the path
+# preview horizon. Real frame-bound data disproves that coupling: command to
+# road-wheel transport is about one SDK frame while this longer spatial length
+# remains necessary for high-speed closed-loop damping.
+FEEDBACK_RESPONSE_S = 0.45
 # Critical-damping spatial length: two wheelbases rounded to the 2 m map
 # sampling scale.  The response distance weakens feedback at speed without
 # pretending that the current yaw rate will remain constant through the whole
 # actuator delay.
-# The old ~1 Hz log cannot identify sub-frame transport/lag separately; these
-# nominal model values are stress-tested at longer delay, not measured maxima.
+# This is deliberately a controller design value. Dense actuator measurements
+# identify preview timing separately in core.steering_calibration.
 FEEDBACK_LENGTH_BASE_M = 8.0
-FEEDBACK_RESPONSE_S = 2 * ACTUATION_PREVIEW_S
 FRENET_DAMPING_RATIO = 1.10
 FRENET_LATERAL_GAIN = 0.85
 # Slightly overdamped Frenet feedback.  A damping ratio above one prevents a
@@ -49,7 +36,7 @@ FRENET_LATERAL_GAIN = 0.85
 # smoothing.
 def solve(curvature, preview_curvature, cte_m, heading_error_rad, speed_ms,
           vehicle_curvature_per_m=None,
-          response_s=ACTUATION_PREVIEW_S, steering_lock_rad=REFERENCE_LOCK_RAD,
+          response_s=FEEDBACK_RESPONSE_S, steering_lock_rad=REFERENCE_LOCK_RAD,
           reference_ahead_m=0.0, wheelbase_m=WHEELBASE_M):
     """One curvature demand, followed by exactly one inverse bicycle mapping.
 
