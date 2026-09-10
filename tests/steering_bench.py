@@ -101,12 +101,17 @@ def metrics(rows, end_curve):
 def run(data, speed=12., *, lock_rad=.78, wheelbase=3.8, lag=.32, transport=.10,
         initial_cte=0., noisy=False, jitter=False, trailer=False, load=0.,
         speed_profile=None, max_time=180., route_factory=Route,
-        dynamics_factory=SteeringDynamics, controller_lock_rad=.78):
+        dynamics_factory=SteeringDynamics, controller_lock_rad=.78,
+        observation_ahead_m=0., controller_ahead_m=None):
     route=route_factory(data['points'])
     dynamics=dynamics_factory()
     x,z=data['points'][0]
     x+=initial_cte
     h=math.pi
+    # Independent plant geometry: SDK placement need not be the no-slip rear
+    # axle. Defaults preserve the historical benchmark byte-for-byte.
+    x+=observation_ahead_m*math.sin(h)
+    z+=observation_ahead_m*math.cos(h)
     game=0.
     tr_h=h
     queue=deque()
@@ -120,19 +125,21 @@ def run(data, speed=12., *, lock_rad=.78, wheelbase=3.8, lag=.32, transport=.10,
         if jitter and i>0 and i%53==0:
             dt=.11
         v=float(speed if speed_profile is None else speed_profile(t))
+        ox=x-observation_ahead_m*math.sin(h)
+        oz=z-observation_ahead_m*math.cos(h)
         # Oracle is independent of Route's progress cache: search local true
         # path segments, preserving the same forward occurrence on loops.
         candidates=[]
         for j in range(max(0,last_index-10),min(len(data['points'])-1,last_index+90)):
             a,b=data['points'][j:j+2];dx,dz=b[0]-a[0],b[1]-a[1]
-            f=max(0.,min(1.,((x-a[0])*dx+(z-a[1])*dz)/(dx*dx+dz*dz)))
+            f=max(0.,min(1.,((ox-a[0])*dx+(oz-a[1])*dz)/(dx*dx+dz*dz)))
             px,pz=a[0]+dx*f,a[1]+dz*f
-            candidates.append(((x-px)**2+(z-pz)**2,j,f,dx,dz))
+            candidates.append(((ox-px)**2+(oz-pz)**2,j,f,dx,dz))
         _,j,f,dx,dz=min(candidates)
         last_index=j
         s=data['distance'][j]+f*(data['distance'][j+1]-data['distance'][j])
         length=math.hypot(dx,dz)
-        cte=((x-data['points'][j][0])*dz-(z-data['points'][j][1])*dx)/length
+        cte=((ox-data['points'][j][0])*dz-(oz-data['points'][j][1])*dx)/length
         path_h=math.atan2(-dx,-dz)
         k=data['curvature'][j]
         # Inspect the complete preview + derivative footprint, independently
@@ -167,7 +174,11 @@ def run(data, speed=12., *, lock_rad=.78, wheelbase=3.8, lag=.32, transport=.10,
             extra['vehicle_curvature_per_m']=math.tan(lock_rad*game)/wheelbase
         if 'steering_lock_rad' in inspect.signature(route.steering).parameters:
             extra['steering_lock_rad']=controller_lock_rad
-        raw=route.steering((x,z),observed_h,v,cross_track_error_m=measured,
+        if 'reference_geometry' in inspect.signature(route.steering).parameters:
+            extra['reference_geometry']=dict(valid=True, source='independent_plant',
+                wheelbase_m=wheelbase, reference_ahead_m=(observation_ahead_m
+                    if controller_ahead_m is None else controller_ahead_m))
+        raw=route.steering((ox,oz),observed_h,v,cross_track_error_m=measured,
                            vehicle_envelope=envelope,control_authority=authority,control_dt_s=dt,**extra)
         debug=route.last_steering_debug
         out=dynamics.update(raw,dt,speed_ms=v,curvature_per_m=debug.get('local_curvature',0.))

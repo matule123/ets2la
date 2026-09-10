@@ -210,6 +210,8 @@ def navigation_command(state, snapshot, *, gps_active, now=None, packet=None):
             packet.get("calculation_packet_schema_version") is not None
             or packet.get("controller") == "frenet_bicycle")
         if gps_active and packet_contract_present:
+            if packet.get("authority_valid") is False and packet.get("control_failure"):
+                return 0.0, 0.0, "steering calculation rejected: " + str(packet["control_failure"])
             # Active game GPS has exactly one command authority: the complete
             # revision-bound Frenet packet.  A Route early return used to omit
             # ``controller`` and silently fall through to the legacy scalar
@@ -588,6 +590,11 @@ class Plugin(BasePlugin):
                 "predicted_frenet_cte_m"),
             "predicted_frenet_heading_error_rad": accepted.get(
                 "predicted_frenet_heading_error_rad"),
+            "reference_geometry": accepted.get("reference_geometry"),
+            "reference_ahead_m": accepted.get("reference_ahead_m"),
+            "wheelbase_m": accepted.get("wheelbase_m"),
+            "body_reference_heading_rad": accepted.get("body_reference_heading_rad"),
+            "body_tracking_error_rad": accepted.get("body_tracking_error_rad"),
             "steering_rate_per_s": dynamics.get("rate_per_s"),
             "steering_acceleration_per_s2": dynamics.get(
                 "acceleration_per_s2"),

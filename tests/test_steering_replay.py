@@ -275,6 +275,8 @@ class SteeringReplayBufferTests(unittest.TestCase):
             "tractor_position": [point.x, point.y, point.z],
             "tractor_heading": point.heading, "tractor_speed_ms": 8.0,
             "road_wheel_angles_rad": [0.0],
+            "tractor_reference_geometry": dict(valid=True, source='synthetic_4x2',
+                reference_ahead_m=2.1, wheelbase_m=3.8),
         })
         plugin._load_road_net = lambda: None
         plugin._publish_road_type = lambda *_args: None
@@ -284,6 +286,7 @@ class SteeringReplayBufferTests(unittest.TestCase):
         plugin.on_tick(0.05)
 
         packet = sdk.get("nav_steering_debug")
+        self.assertTrue(packet["authority_valid"])
         self.assertEqual(packet["calculation_packet_schema_version"], 1)
         self.assertGreater(packet["calculation_sequence"], 0)
         self.assertEqual(packet["sdk_frame_us"], 123000)

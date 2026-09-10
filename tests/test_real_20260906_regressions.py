@@ -159,6 +159,8 @@ class ControlPublicationOrderingTests(unittest.TestCase):
             "timestamp": time.monotonic(), "sdk_frame_us": 1,
             "tractor_position": [point.x, point.y, point.z],
             "tractor_heading": point.heading, "tractor_speed_ms": 0.0,
+            "tractor_reference_geometry": dict(valid=True, source='synthetic_4x2',
+                reference_ahead_m=2.1, wheelbase_m=3.8),
             "yaw_rate_valid": False,
         })
         plugin._load_road_net = lambda: None

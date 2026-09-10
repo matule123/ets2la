@@ -2229,6 +2229,7 @@ class Plugin(BasePlugin):
         # One IPC value is one telemetry observation. Separate scalar reads
         # can straddle an Engine update and pair position n with heading n+1.
         vehicle_observation = self.sdk.get("vehicle_envelope_snapshot", {}) or {}
+        reference_geometry = vehicle_observation.get("tractor_reference_geometry") or {}
         if "tractor_speed_ms" in vehicle_observation:
             observed_position = vehicle_observation.get("tractor_position")
             if isinstance(observed_position, (list, tuple)) and len(observed_position) == 3:
@@ -2381,7 +2382,8 @@ class Plugin(BasePlugin):
 
             steer = self.active_route.steering(
                 pos, heading, speed, lane_offset_m=self._lane_offset(),
-                steering_lock_rad=steering_lock_rad)
+                steering_lock_rad=steering_lock_rad,
+                reference_geometry=reference_geometry)
             if not self.active_route.last_steering_debug.get(
                     "authority_valid", True):
                 self.sdk.shared_state.update_batch({
@@ -2534,8 +2536,11 @@ class Plugin(BasePlugin):
                     # also includes tyre slip/body motion and was the noisy,
                     # delayed signal that destabilised the old predictor.
                     tyre_angle=sum(wheel_angles)/len(wheel_angles)
-                    vehicle_curvature=math.tan(tyre_angle)/WHEELBASE_M
-                    vehicle_curvature_source="road_wheel_angles_rad"
+                    from core.vehicle_geometry import validate_reference_geometry
+                    if not validate_reference_geometry(reference_geometry):
+                        vehicle_curvature=math.tan(tyre_angle)/float(
+                            reference_geometry['wheelbase_m'])
+                        vehicle_curvature_source="road_wheel_angles_rad"
                 steer = route.steering(
                     pos, heading, speed, lane_offset_m=0.0,
                     cross_track_error_m=live_cte,
@@ -2548,7 +2553,8 @@ class Plugin(BasePlugin):
                     },
                     control_dt_s=delta_time,
                     vehicle_curvature_per_m=vehicle_curvature,
-                    steering_lock_rad=steering_lock_rad)
+                    steering_lock_rad=steering_lock_rad,
+                    reference_geometry=reference_geometry)
                 curve_profile = route.curve_profile_ahead(pos, heading)
                 # Safety: if the truck is far from the snapped path (wrong map
                 # dataset, or we're off-road on a ferry / car park), the CTE is

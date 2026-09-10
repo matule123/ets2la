@@ -191,6 +191,9 @@ class SCSTelemetry:
 
             # --- Zone 3: truck ints (gear) ---
             data["truckInt"] = {"gear": self.read_int(504)[0]}
+            # Zone 2 configuration: count at 80, then local wheel vectors in
+            # Zone 6. Local +Z is rearwards, relative to truckPlacement.
+            data["truckWheelCount"] = self.read_int(80)[0]
 
             # --- Zone 4: truck floats (absolute byte offsets) ---
             tf = {}
@@ -212,6 +215,7 @@ class SCSTelemetry:
             tf["wheelSteeringTurns"] = self.read_float(1200, 16)[0]
             data["truckFloat"] = tf
             data["wheelSteerable"] = self.read_bool(1500, 16)[0]
+            data["wheelPositionX"] = self.read_float(1676, 16)[0]
             data["wheelPositionZ"] = self.read_float(1804, 16)[0]
             # local angular velocity vector: rotations/s, Y is yaw.
             data["yawRateTurnsPerSecond"] = self.read_float(1884)[0]

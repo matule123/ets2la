@@ -82,6 +82,9 @@ def build_map_plugin(y=3.0):
         "game_route_node_uids": [1, 2, 3],
         "truck_altitude": y,
         "lane_trajectory_revision": 0,
+        "vehicle_envelope_snapshot": {"tractor_reference_geometry":
+            dict(valid=True, source='synthetic_4x2', wheelbase_m=3.8,
+                 reference_ahead_m=2.1)},
     })
     plugin = MapPlugin(sdk)
     plugin.on_start()
@@ -786,6 +789,9 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
 
     def test_recorded_route_runs_only_after_explicit_load_without_gps(self):
         sdk = MapSDK({
+            "vehicle_envelope_snapshot": {"tractor_reference_geometry":
+                dict(valid=True, source='synthetic_4x2', wheelbase_m=3.8,
+                     reference_ahead_m=2.1)},
             "nav_cmd": "load", "nav_arg": "legacy",
             "truck_world_pos": (0.0, 0.0), "truck_heading": math.pi,
             "truck_speed_ms": 5.0, "truck_altitude": 0.0,
@@ -834,6 +840,9 @@ class LaneAuthorityIntegrationTests(unittest.TestCase):
 
     def test_recorded_route_does_not_resume_after_gps_is_removed(self):
         sdk = MapSDK({
+            "vehicle_envelope_snapshot": {"tractor_reference_geometry":
+                dict(valid=True, source='synthetic_4x2', wheelbase_m=3.8,
+                     reference_ahead_m=2.1)},
             "truck_world_pos": (0.0, 0.0), "truck_heading": math.pi,
             "truck_speed_ms": 5.0, "truck_altitude": 0.0,
             "telemetry_valid": True,

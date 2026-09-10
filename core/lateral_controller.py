@@ -49,19 +49,29 @@ FRENET_LATERAL_GAIN = 0.85
 # smoothing.
 def solve(curvature, preview_curvature, cte_m, heading_error_rad, speed_ms,
           vehicle_curvature_per_m=None,
-          response_s=ACTUATION_PREVIEW_S, steering_lock_rad=REFERENCE_LOCK_RAD):
+          response_s=ACTUATION_PREVIEW_S, steering_lock_rad=REFERENCE_LOCK_RAD,
+          reference_ahead_m=0.0, wheelbase_m=WHEELBASE_M):
     """One curvature demand, followed by exactly one inverse bicycle mapping.
 
+    For the legacy rear-axle reference (a=0):
     e_dot=v*sin(h), h_dot=v*k*cos(h)/(1+k*e)-v*k_vehicle.
-    With preview==k and constant speed the small-error feedback is
+    With preview==k and constant speed its small-error feedback is
     e_ddot + 2*zeta*v/ell*e_dot + gain*(v/ell)^2*e = 0.
     Preview changes only the feed-forward along confirmed geometry, never the
     tangent or the point to which CTE is measured.
+    For a>0 use the chassis-origin kinematics and circle equilibrium below;
+    this is a local tracking law, not an articulated swept-envelope planner.
     """
     values=(curvature, preview_curvature, cte_m, heading_error_rad, speed_ms)
     if not all(math.isfinite(float(v)) for v in values):
         return 0.0, {"valid": False, "reason": "non-finite lateral input"}
     k,kp,e,h,v=map(float,values)
+    from core.vehicle_geometry import validate_reference_geometry
+    reason=validate_reference_geometry(dict(valid=True,
+        reference_ahead_m=reference_ahead_m, wheelbase_m=wheelbase_m))
+    if reason:
+        return 0.0, {"valid": False, "reason": reason}
+    a, wheelbase=float(reference_ahead_m),float(wheelbase_m)
     if not (math.isfinite(response_s) and 0.0 <= response_s <= 1.0
             and math.isfinite(steering_lock_rad)
             and MIN_STEERING_LOCK_RAD <= steering_lock_rad
@@ -89,21 +99,41 @@ def solve(curvature, preview_curvature, cte_m, heading_error_rad, speed_ms,
     # is geometry/speed based and has no temporal memory or dependence on
     # delayed tyre samples.
     length=max(FEEDBACK_LENGTH_BASE_M,
-               WHEELBASE_M+abs(v)*response_s)
+               wheelbase+abs(v)*response_s)
+
+    # The observed SDK chassis origin is a metres AHEAD of the rear axle.
+    # Its exact kinematics are:
+    # e_dot = v*(sin(h)-a*k_vehicle*cos(h))
+    # s_dot = v*(cos(h)+a*k_vehicle*sin(h))/(1+k*e).
+    # On a centred circle body heading therefore differs from the path's
+    # tangent by asin(a*k); h==0 is NOT the correct equilibrium. Feeding this
+    # necessary body angle into rear-axle heading feedback creates a sustained
+    # ~2 m inward CTE. Derive the body reference from local path geometry, not
+    # delayed tyre/yaw observations (which previously created an actuator loop).
+    denominator=1+k*e
+    if denominator <= .10 or abs(a*k/denominator) >= 1.0:
+        return 0.0, {"valid": False, "reason": "unreachable chassis reference circle"}
+    body_reference=math.asin(a*k/denominator)
+    control_heading=(h-body_reference+math.pi)%math.tau-math.pi
 
     def control_at(error_m, error_heading):
         cosine=math.cos(error_heading)
         denominator=1+k*error_m
         if cosine <= .10 or denominator <= .10:
             return None
-        foundation=kp*cosine/denominator
+        rear_radius_squared=denominator**2-(a*kp)**2
+        if rear_radius_squared <= .01:
+            return None
+        # Cab circle R -> rear axle circle sqrt(R^2-a^2). With a=0
+        # this is exactly the historical rear-axle controller.
+        foundation=kp*cosine/math.sqrt(rear_radius_squared)
         heading=(2*FRENET_DAMPING_RATIO
                  * math.tan(error_heading)/length)
         lateral=(FRENET_LATERAL_GAIN * error_m
                  / (length*length*cosine))
         return foundation+heading+lateral,foundation,heading,lateral
 
-    control=control_at(e,h)
+    control=control_at(e,control_heading)
     if control is None:
         return 0.0, {"valid": False, "reason": "invalid Frenet frame"}
     demand,foundation,heading,lateral=control
@@ -114,9 +144,9 @@ def solve(curvature, preview_curvature, cte_m, heading_error_rad, speed_ms,
     # is represented once by SteeringDynamics and the game.
     predicted_e,predicted_h=e,h
     observation_weight=0.0
-    angle=math.atan(WHEELBASE_M*demand)
-    base_angle=math.atan(WHEELBASE_M*foundation)
-    lateral_angle=math.atan(WHEELBASE_M*(foundation+lateral))-base_angle
+    angle=math.atan(wheelbase*demand)
+    base_angle=math.atan(wheelbase*foundation)
+    lateral_angle=math.atan(wheelbase*(foundation+lateral))-base_angle
     heading_angle=angle-base_angle-lateral_angle
     return angle/steering_lock_rad, dict(
         valid=True, curvature_foundation_per_m=foundation,
@@ -130,6 +160,9 @@ def solve(curvature, preview_curvature, cte_m, heading_error_rad, speed_ms,
         heading_feedback_angle_rad=heading_angle,
         steering_angle_rad=angle, lock_rad=steering_lock_rad,
         frenet_heading_error_rad=h, frenet_cte_m=e,
+        body_reference_heading_rad=body_reference,
+        body_tracking_error_rad=control_heading,
+        reference_ahead_m=a, wheelbase_m=wheelbase,
         measured_vehicle_curvature_per_m=(
             measured_vehicle_curvature),
         curvature_observation_weight=observation_weight,

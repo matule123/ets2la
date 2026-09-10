@@ -1188,6 +1188,7 @@ class UltraPilotEngine:
                     "game_steer_right": -float(truck.get("gameSteer", 0.0) or 0.0),
                     "sdk_frame_us": truck.get("sdkFrameTimeUs", 0),
                     "road_wheel_angles_rad": truck.get("roadWheelAnglesRad", []),
+                    "tractor_reference_geometry": truck.get("referenceGeometry", {}),
                     "yaw_rate_rad_s": truck.get("yawRateRadS", 0.0),
                     "yaw_rate_valid": truck.get("yawRateValid", False),
                     "tractor_position": [

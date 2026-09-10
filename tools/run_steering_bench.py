@@ -76,6 +76,19 @@ def factories_for_ref(ref):
         return None, None, {}
     loaded = {}
     factories = []
+    # Route imports its regulator at module load time. Loading an old Route
+    # against today's core.lateral_controller silently contaminates the
+    # baseline. Bind the historical solver too, without checking anything out.
+    lateral_path='core/lateral_controller.py'
+    lateral_exists=subprocess.check_output(
+        ['git','ls-tree','--name-only',ref,'--',lateral_path],cwd=ROOT,text=True).strip()
+    lateral_module=None
+    if lateral_exists:
+        lateral_source=subprocess.check_output(
+            ['git','show',f'{ref}:{lateral_path}'],cwd=ROOT,text=True,encoding='utf-8')
+        lateral_module=types.ModuleType('_audit_baseline_lateral')
+        exec(compile(lateral_source,f'{ref}:{lateral_path}','exec'),lateral_module.__dict__)
+        loaded[lateral_path]=hashlib.sha256(lateral_source.encode('utf-8')).hexdigest()
     for relpath, module_name, class_name in (
             ('core/navigation/route.py', '_audit_baseline_route', 'Route'),
             ('core/steering_dynamics.py', '_audit_baseline_dynamics',
@@ -85,7 +98,20 @@ def factories_for_ref(ref):
             encoding='utf-8')
         module = types.ModuleType(module_name)
         module.__file__ = f'{ref}:{relpath}'
-        exec(compile(source, module.__file__, 'exec'), module.__dict__)
+        previous=sys.modules.get('_audit_baseline_lateral')
+        if lateral_module is not None:
+            sys.modules['_audit_baseline_lateral']=lateral_module
+        try:
+            executable=(source.replace('from core.lateral_controller import',
+                'from _audit_baseline_lateral import') if lateral_module is not None else source)
+            if lateral_module is None and 'from core.lateral_controller import' in source:
+                raise RuntimeError('Historical Route requires a missing historical regulator')
+            exec(compile(executable, module.__file__, 'exec'), module.__dict__)
+        finally:
+            if previous is None:
+                sys.modules.pop('_audit_baseline_lateral',None)
+            else:
+                sys.modules['_audit_baseline_lateral']=previous
         factories.append(getattr(module, class_name))
         loaded[relpath] = hashlib.sha256(source.encode('utf-8')).hexdigest()
     return factories[0], factories[1], loaded

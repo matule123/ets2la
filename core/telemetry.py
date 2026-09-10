@@ -99,6 +99,8 @@ class Telemetry:
         truck["yawRateValid"] = ("yawRateTurnsPerSecond" in raw
                                 and math.isfinite(truck["yawRateRadS"]))
         truck["sdkFrameTimeUs"] = raw.get("time", 0)
+        from core.vehicle_geometry import sdk_reference_geometry
+        truck["referenceGeometry"] = sdk_reference_geometry(raw)
         pos = (tp.get("coordinateX", 0.0), tp.get("coordinateZ", 0.0))
 
         # --- Trailer placement (Zone 14). Only the first trailer is used —

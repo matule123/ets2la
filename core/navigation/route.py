@@ -1184,7 +1184,8 @@ class Route:
                  control_dt_s: Optional[float] = None,
                  vehicle_curvature_per_m: Optional[float] = None,
                  actuator_response_s: float = ACTUATION_PREVIEW_S,
-                 steering_lock_rad: float = REFERENCE_LOCK_RAD) -> float:
+                 steering_lock_rad: float = REFERENCE_LOCK_RAD,
+                 reference_geometry: Optional[dict] = None) -> float:
         """Steering command in ``[-1, 1]`` (positive = right) to follow the route.
 
         GPS callers pass lane_offset_m=0: LanePath already is the confirmed
@@ -1247,6 +1248,19 @@ class Route:
                 control_failure="invalid actuator calibration",
                 steering_lock_rad=float(steering_lock_rad),
                 steering_lock_valid=False)
+            return 0.0
+
+        # Pure rear-axle geometry tools keep their explicit a=0 convention.
+        # Live Map callers always pass the current SDK geometry (including an
+        # invalid/missing dict), never this legacy mathematical default.
+        from core.vehicle_geometry import validate_reference_geometry
+        geometry = (dict(valid=True, reference_ahead_m=0., wheelbase_m=WHEELBASE_M,
+                         source='rear_axle_mathematical_reference')
+                    if reference_geometry is None else reference_geometry)
+        geometry_reason=validate_reference_geometry(geometry)
+        if geometry_reason:
+            self.last_steering_debug.update(authority_valid=False,
+                control_failure=geometry_reason, reference_geometry=geometry)
             return 0.0
 
         authority_lane = None
@@ -1380,7 +1394,9 @@ class Route:
             local_curvature, preview_curvature,
             cte, heading_error, v,
             vehicle_curvature_per_m=vehicle_curvature_per_m,
-            response_s=actuator_response_s, steering_lock_rad=steering_lock_rad)
+            response_s=actuator_response_s, steering_lock_rad=steering_lock_rad,
+            reference_ahead_m=geometry['reference_ahead_m'],
+            wheelbase_m=geometry['wheelbase_m'])
         if not control["valid"]:
             self.last_steering_debug.update(
                 authority_valid=False, control_failure=control["reason"])
@@ -1398,6 +1414,7 @@ class Route:
         trailer_debug["curvature_source"] = "local_frenet_path"
         self.last_steering_debug = {
             **control,
+            "reference_geometry": dict(geometry),
             "controller": "frenet_bicycle",
             "curve_sign_projection_active": False,
             "trailer_target_heading_rad": 0.0,
