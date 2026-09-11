@@ -169,3 +169,37 @@ class CadenceMonitor:
             self.interval_sum_s = 0.0
             self.last_tick = None
         return result
+
+
+def wait_for_next_tick(stop_event, deadline: float, period: float, *,
+                       clock=time.monotonic, sleeper=time.sleep):
+    """Wait for one strictly future fixed-cadence deadline.
+
+    Windows waits may return a little before their requested timeout.  Running
+    immediately after such a wake produces a near-zero interval followed by a
+    long interval, which is visible as a steering double-step.  Recheck the
+    monotonic clock until the deadline is actually reached.  If work already
+    missed the deadline, schedule one full period from now instead of trying
+    to catch up with an immediate second tick.
+
+    Returns ``(next_deadline, stopped)``.  This function only schedules a
+    clock; it never changes or interpolates a control value.
+    """
+    period = float(period)
+    if not math.isfinite(period) or period <= 0.0:
+        raise ValueError("period must be finite and positive")
+    next_deadline = float(deadline) + period
+    now = float(clock())
+    if next_deadline <= now:
+        next_deadline = now + period
+    while True:
+        remaining = next_deadline - float(clock())
+        if remaining <= 0.0:
+            return next_deadline, False
+        # Event.wait(timeout) can use a coarse Windows scheduler quantum and
+        # return just before the requested deadline.  Python's monotonic
+        # sleep uses the high-resolution waitable timer on supported Windows
+        # versions.  Shutdown remains bounded by one control period.
+        if stop_event.wait(0.0):
+            return next_deadline, True
+        sleeper(remaining)

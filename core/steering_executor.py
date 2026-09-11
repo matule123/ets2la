@@ -14,7 +14,7 @@ import threading
 import time
 from typing import Callable, Optional
 
-from core.control_timing import CadenceMonitor
+from core.control_timing import CadenceMonitor, wait_for_next_tick
 from core.steering_dynamics import SteeringDynamics
 
 
@@ -150,12 +150,10 @@ class SteeringExecutor:
             previous = now
             self._cadence.tick(now)
             self.step(dt, now=now)
-            deadline += period
-            remaining = deadline - self._clock()
-            if remaining <= 0.0:
-                deadline = self._clock()
-                continue
-            self._stop.wait(remaining)
+            deadline, stopped = wait_for_next_tick(
+                self._stop, now, period, clock=self._clock)
+            if stopped:
+                break
         self._running = False
 
     def cadence_snapshot(self, now=None) -> dict:

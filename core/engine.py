@@ -16,7 +16,7 @@ from core.modules.traffic_analysis import TrafficAnalysis
 from core.planner import UltraPilotPlanner
 from core.camera import CameraSnapshotProducer
 from core.navigation.runtime_preflight import build_runtime_preflight
-from core.control_timing import CadenceMonitor, FrameGate
+from core.control_timing import CadenceMonitor, FrameGate, wait_for_next_tick
 from core.navigation.navigation_intent import (
     NavigationBufferClass, NavigationIntentTracker,
     destination_identity,
@@ -489,12 +489,10 @@ class UltraPilotEngine:
                     "telemetry_sequence": self._telemetry_sequence,
                 })
                 self.shared_state.set("telemetry_timing", timing)
-            deadline += period
-            remaining = deadline - time.monotonic()
-            if remaining <= 0.0:
-                deadline = time.monotonic()
-            else:
-                self._realtime_stop.wait(remaining)
+            deadline, stopped = wait_for_next_tick(
+                self._realtime_stop, timestamp, period)
+            if stopped:
+                break
 
     def _control_loop(self):
         period = self._realtime_period(self.fps)
@@ -513,12 +511,10 @@ class UltraPilotEngine:
                 self.shared_state.set(
                     "engine_control_timing",
                     cadence.snapshot(now, reset_window=True))
-            deadline += period
-            remaining = deadline - time.monotonic()
-            if remaining <= 0.0:
-                deadline = time.monotonic()
-            else:
-                self._realtime_stop.wait(remaining)
+            deadline, stopped = wait_for_next_tick(
+                self._realtime_stop, now, period)
+            if stopped:
+                break
 
     def _autostart_truck(self, truck):
         """Recover a stalled engine using telemetry-controlled ignition steps."""

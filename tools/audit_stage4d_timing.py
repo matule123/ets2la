@@ -105,6 +105,30 @@ def _recorded_output_metrics(samples):
     }
 
 
+def _execution_metrics(samples):
+    """Measure the real schema-3 executor clock, not plugin observations."""
+    rows = []
+    stale = 0
+    for row in samples:
+        timestamp = _finite(row.get("execution_monotonic_s"))
+        output = _finite(row.get("output"))
+        if timestamp is None or output is None:
+            continue
+        rows.append((timestamp, output))
+        stale += int(not bool(row.get("target_fresh", False)))
+    intervals = [b[0] - a[0] for a, b in zip(rows, rows[1:])
+                 if 0.0 < b[0] - a[0] < 2.0]
+    steps = [abs(b[1] - a[1]) for a, b in zip(rows, rows[1:])]
+    return {
+        "samples": len(rows),
+        "observed_hz": (
+            len(intervals) / sum(intervals) if intervals else 0.0),
+        "write_interval_s": _distribution(intervals),
+        "absolute_step": _distribution(steps),
+        "stale_target_samples": stale,
+    }
+
+
 def _fixed_clock_counterfactual(packets, hz=STEERING_EXECUTION_HZ):
     if len(packets) < 2:
         return {"samples": 0}
@@ -147,6 +171,7 @@ def _fixed_clock_counterfactual(packets, hz=STEERING_EXECUTION_HZ):
 
 def analyze(document):
     samples = list(document.get("samples", ()) or ())
+    execution_samples = list(document.get("execution_samples", ()) or ())
     packets = _first_packet_arrivals(samples)
     calculation_intervals = [
         current["time"] - previous["time"]
@@ -168,6 +193,9 @@ def analyze(document):
         "route_target_interval_s": _distribution(calculation_intervals),
         "route_sdk_frame_gap_s": _distribution(frame_gaps),
         "recorded": _recorded_output_metrics(samples),
+        "actual_execution": _execution_metrics(execution_samples),
+        "dropped_execution_sample_count": document.get(
+            "dropped_execution_sample_count", 0),
         "fixed_60hz": _fixed_clock_counterfactual(packets),
         "method": (
             "Exact first-arrival Route targets; no interpolation, smoothing "

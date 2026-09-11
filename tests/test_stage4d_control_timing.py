@@ -6,7 +6,9 @@ import time
 import unittest
 from unittest import mock
 
-from core.control_timing import FrameGate, MonotonicSequenceGate
+from core.control_timing import (
+    FrameGate, MonotonicSequenceGate, wait_for_next_tick,
+)
 from core.engine import UltraPilotEngine
 from core.steering_dynamics import SteeringDynamics
 from core.steering_executor import (
@@ -72,6 +74,56 @@ class OrderingTests(unittest.TestCase):
         self.assertTrue(gate.observe("legacy", 0).is_new)
         self.assertTrue(gate.observe("legacy", None).is_new)
         self.assertFalse(gate.observe("legacy", -1).accepted)
+
+
+class FixedCadenceWaitTests(unittest.TestCase):
+    def test_early_windows_wake_is_rechecked_before_tick(self):
+        clock = [10.0]
+
+        class Event:
+            def wait(self, _timeout):
+                return False
+
+        sleeps = [0]
+
+        def early_sleep(timeout):
+            sleeps[0] += 1
+            # Reproduce an early first wake, then reach the real deadline.
+            clock[0] += timeout * (0.5 if sleeps[0] == 1 else 2.0)
+
+        deadline, stopped = wait_for_next_tick(
+            Event(), 10.0, 1.0 / 60.0, clock=lambda: clock[0],
+            sleeper=early_sleep)
+        self.assertFalse(stopped)
+        self.assertGreaterEqual(clock[0], deadline)
+        self.assertEqual(sleeps[0], 2)
+
+    def test_missed_deadline_does_not_create_catch_up_double_tick(self):
+        clock = [10.050]
+
+        class Event:
+            def wait(self, timeout):
+                clock[0] += timeout
+                return False
+
+        deadline, stopped = wait_for_next_tick(
+            Event(), 10.0, 1.0 / 60.0, clock=lambda: clock[0],
+            sleeper=lambda timeout: clock.__setitem__(0, clock[0] + timeout))
+        self.assertFalse(stopped)
+        self.assertAlmostEqual(deadline, 10.050 + 1.0 / 60.0)
+        self.assertGreaterEqual(clock[0], deadline)
+
+    def test_stop_interrupts_wait_without_executing_next_tick(self):
+        clock = [10.0]
+
+        class StopEvent:
+            def wait(self, _timeout):
+                return True
+
+        deadline, stopped = wait_for_next_tick(
+            StopEvent(), 10.0, 1.0 / 60.0, clock=lambda: clock[0])
+        self.assertTrue(stopped)
+        self.assertGreater(deadline, clock[0])
 
 
 class SteeringExecutorTests(unittest.TestCase):
@@ -254,6 +306,14 @@ class EngineRealtimeBoundaryTests(unittest.TestCase):
 
 
 class ReplayExecutionEvidenceTests(unittest.TestCase):
+    def test_execution_ring_retains_same_time_horizon_as_plugin_ring(self):
+        replay = SteeringReplayBuffer(4)
+        for sequence in range(10):
+            replay.append_execution({"output": sequence / 10.0})
+        self.assertEqual(replay.capacity, 4)
+        self.assertEqual(replay.execution_capacity, 12)
+        self.assertEqual(len(replay.execution_snapshot()), 10)
+
     def test_export_binds_calculation_and_execution_streams(self):
         replay = SteeringReplayBuffer(
             4, monotonic=lambda: 5.0, wall_time=lambda: 10.0)
@@ -290,6 +350,7 @@ class ReplayExecutionEvidenceTests(unittest.TestCase):
             replay.export("C:\\diagnostics", reason="phase4d")
         payload = json.loads(stream.value)
         self.assertEqual(payload["schema_version"], SCHEMA_VERSION)
+        self.assertEqual(payload["execution_capacity"], 12)
         self.assertEqual(payload["execution_sample_count"], 1)
         self.assertEqual(payload["execution_samples"][0][
             "calculation_sequence"], 7)

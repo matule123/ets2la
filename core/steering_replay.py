@@ -23,6 +23,8 @@ import uuid
 SCHEMA_VERSION = 3
 CALCULATION_PACKET_SCHEMA_VERSION = 1
 DEFAULT_CAPACITY = 3600
+EXECUTION_CAPACITY_MULTIPLIER = 3
+MAX_EXECUTION_CAPACITY = 20000
 
 _TRAJECTORY_IDENTITY_FIELDS = (
     "navigation_intent_id",
@@ -147,7 +149,14 @@ class SteeringReplayBuffer:
         if capacity < 2 or capacity > 20000:
             raise ValueError("steering replay capacity must be within 2..20000")
         self._samples = deque(maxlen=capacity)
-        self._execution_samples = deque(maxlen=capacity)
+        # Normal samples follow the plugin/application cadence, while the
+        # execution stream runs at 60 Hz.  Equal item counts retained only
+        # about one third of the same drive in schema 3 and discarded the
+        # beginning of ordinary three-minute reproductions.
+        execution_capacity = min(
+            MAX_EXECUTION_CAPACITY,
+            capacity * EXECUTION_CAPACITY_MULTIPLIER)
+        self._execution_samples = deque(maxlen=execution_capacity)
         self._monotonic = monotonic
         self._wall_time = wall_time
         self._sequence = 0
@@ -157,6 +166,10 @@ class SteeringReplayBuffer:
     @property
     def capacity(self):
         return int(self._samples.maxlen)
+
+    @property
+    def execution_capacity(self):
+        return int(self._execution_samples.maxlen)
 
     def __len__(self):
         with self._lock:
@@ -223,6 +236,7 @@ class SteeringReplayBuffer:
             "created_at": now.isoformat(),
             "reason": str(reason or "event"),
             "capacity": self.capacity,
+            "execution_capacity": self.execution_capacity,
             "sample_count": len(samples),
             "dropped_sample_count": max(0, sample_sequence-len(samples)),
             "execution_sample_count": len(execution_samples),
