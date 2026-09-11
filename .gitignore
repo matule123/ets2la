@@ -23,6 +23,7 @@ tests/.tmp-map-compat/
 
 # Local-only / agent artifacts
 docs/
+*_AUDIT.md
 .zcode/
 .codex/
 

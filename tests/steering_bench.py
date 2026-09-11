@@ -103,7 +103,7 @@ def run(data, speed=12., *, lock_rad=.78, wheelbase=3.8, lag=.32, transport=.10,
         speed_profile=None, max_time=180., route_factory=Route,
         dynamics_factory=SteeringDynamics, controller_lock_rad=.78,
         observation_ahead_m=0., controller_ahead_m=None,
-        controller_preview_s=None):
+        controller_preview_s=None, oracle_window_m=None):
     route=route_factory(data['points'])
     dynamics=dynamics_factory()
     x,z=data['points'][0]
@@ -131,7 +131,19 @@ def run(data, speed=12., *, lock_rad=.78, wheelbase=3.8, lag=.32, transport=.10,
         # Oracle is independent of Route's progress cache: search local true
         # path segments, preserving the same forward occurrence on loops.
         candidates=[]
-        for j in range(max(0,last_index-10),min(len(data['points'])-1,last_index+90)):
+        if oracle_window_m is None:
+            first, last = max(0,last_index-10), min(len(data['points'])-1,last_index+90)
+        else:
+            # Explicit physical window for sparse-grid experiments. A 90-point
+            # window spans 45 m at .5 m, but 180 m at 2 m and can jump an
+            # entire R25 loop. Never let map sampling change the oracle's
+            # reachable occurrence. None preserves historical benchmarks.
+            anchor = data['distance'][last_index]
+            first = max(0, bisect.bisect_right(data['distance'],
+                                             anchor-oracle_window_m[0])-1)
+            last = min(len(data['points'])-1, bisect.bisect_left(
+                data['distance'], anchor+oracle_window_m[1]))
+        for j in range(first, last):
             a,b=data['points'][j:j+2];dx,dz=b[0]-a[0],b[1]-a[1]
             f=max(0.,min(1.,((ox-a[0])*dx+(oz-a[1])*dz)/(dx*dx+dz*dz)))
             px,pz=a[0]+dx*f,a[1]+dz*f
@@ -160,7 +172,13 @@ def run(data, speed=12., *, lock_rad=.78, wheelbase=3.8, lag=.32, transport=.10,
                           heading=tr_h,lane_width_m=4.5,tractor_altitude_m=45.,trailer_altitude_m=45.)
             tx,tz=envelope['position']
             distances=[]
-            for n in range(max(0,j-45),min(len(data['points'])-1,j+5)):
+            if oracle_window_m is None:
+                first_tr, last_tr = max(0,j-45), min(len(data['points'])-1,j+5)
+            else:
+                first_tr = max(0, bisect.bisect_right(data['distance'], s-22.5)-1)
+                last_tr = min(len(data['points'])-1, bisect.bisect_left(
+                    data['distance'], s+2.5))
+            for n in range(first_tr, last_tr):
                 a,b=data['points'][n:n+2];ux,uz=b[0]-a[0],b[1]-a[1]
                 f=max(0.,min(1.,((tx-a[0])*ux+(tz-a[1])*uz)/(ux*ux+uz*uz)))
                 distances.append(((tx-a[0]-f*ux)**2+(tz-a[1]-f*uz)**2,
@@ -202,6 +220,8 @@ def run(data, speed=12., *, lock_rad=.78, wheelbase=3.8, lag=.32, transport=.10,
             tr_h+=v/8*math.sin(h-tr_h)*ds
         completed=s>=data['distance'][-1]-5
         rows.append(dict(t=t,dt=dt,s=s,cte=cte,h=wrap(observed_h-path_h),k=k,raw=raw,
+                         authority_valid=debug.get('authority_valid', True),
+                         body_tracking_error_rad=debug.get('body_tracking_error_rad'),
                          geometry_monotone=monotone,trailer_cte=trailer_cte,
                          out=out,game=game,ff=debug.get('feed_forward',0.),
                          fb=debug.get('feedback',0.),trailer=debug.get('trailer_envelope',{}).get('applied_offset_m',0.),

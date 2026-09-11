@@ -314,7 +314,15 @@ class LaneGeometryAuditTests(unittest.TestCase):
                     cross_track_error_m=live_cte)
                 debug = route.last_steering_debug
                 with self.subTest(direction=direction, cte=requested_cte):
-                    self.assertAlmostEqual(live_cte, requested_cte, places=6)
+                    # The fixture is offset at a VERTEX along the outgoing
+                    # chord's normal. On the inside, the preceding chord is
+                    # nearer: its perpendicular distance is e*cos(ds/R).
+                    # The old heading-biased projection selected the vertex
+                    # instead. Preserve pose, signs and six-place precision;
+                    # correct the analytic expectation, not the tolerance.
+                    expected_cte = requested_cte * (
+                        math.cos(2.0/18.0) if requested_cte*direction > 0.0 else 1.0)
+                    self.assertAlmostEqual(live_cte, expected_cte, places=6)
                     self.assertLess(debug["cte_geometry_residual"], 1e-6)
                     self.assertFalse(debug["curve_direction_hold"])
                     # The lateral counterfactual points toward lane centre.

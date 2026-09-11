@@ -448,17 +448,49 @@ class Route:
     def _best_projection(self, indices, pos: Point, heading: float):
         best = None
         fallback = None
+        candidates = {}
         for index in indices:
             candidate = self._project_segment(index, pos, heading)
             if candidate is None:
                 continue
+            candidates[index] = candidate
             if fallback is None or candidate[1] < fallback[1]:
                 fallback = candidate
             if candidate[5] < -0.15:
                 continue
             if best is None or candidate[0] < best[0]:
                 best = candidate
-        return best if best is not None else fallback
+        if best is None:
+            return fallback
+
+        # Heading selects the directed occurrence/branch, not the point along
+        # that branch. On a bend the chassis necessarily points behind the
+        # tangent at its SDK origin (Phase 4A). Minimising distance² plus a
+        # heading penalty over individual chords consequently pins progress to
+        # the previous endpoint, then jumps forward once distance wins. This
+        # manufactures a sawtooth heading error even on a centred circle.
+        # Refine that selected branch to its orthogonal projection, walking
+        # ONLY through its already supplied, consecutive edges. No missing
+        # index, opposite edge or sharp return arm can be crossed. GPS callers
+        # supply only edges owned by the live lane/deck and reachable window.
+        # This is a spatial minimisation, with no timer or retained command.
+        while best[3] <= 0.0 or best[3] >= 1.0:
+            index = best[2]
+            adjacent = candidates.get(index + (1 if best[3] >= 1.0 else -1))
+            if (adjacent is None or adjacent[5] < -0.15
+                    or adjacent[1] >= best[1] - 1e-12):
+                break
+            other_index = adjacent[2]
+            ax, az = self.points[index]
+            bx, bz = self.points[index + 1]
+            cx, cz = self.points[other_index]
+            dx, dz = self.points[other_index + 1]
+            alignment = ((bx-ax)*(dx-cx)+(bz-az)*(dz-cz)) / (
+                self._segment_lengths[index] * self._segment_lengths[other_index])
+            if alignment < math.cos(AUTHORITY_DERIVATIVE_MAX_HEADING_JUMP_RAD):
+                break
+            best = adjacent
+        return best
 
     def _authority_projection(self, authority, pos: Point, heading: float):
         """Project only onto points owned by one proven lane/deck identity."""
@@ -1338,6 +1370,12 @@ class Route:
         # is not a second steering target. The geometric guidance target below
         # is interpolated by arc-length on the same confirmed trajectory.
         projection = self._point_at_progress(progress)
+        segment_start, segment_end = self.points[idx:idx+2]
+        segment_length = self._segment_lengths[idx]
+        projection_longitudinal_residual = (
+            ((pos[0]-projection[0])*(segment_end[0]-segment_start[0])
+             + (pos[1]-projection[1])*(segment_end[1]-segment_start[1]))
+            / max(segment_length, 1e-9))
         tangent_window = _clamp(3.0 + abs(speed_ms) * 0.15, 3.0, 6.0)
         authority_tangent = self._authority_tangent(
             route_authority, progress)
@@ -1489,6 +1527,8 @@ class Route:
             "tracking_segment_index": idx,
             "tracking_segment_fraction": _fraction,
             "tracking_projection_xz": projection,
+            "projection_selection": "directed_branch_then_orthogonal",
+            "projection_longitudinal_residual_m": projection_longitudinal_residual,
             "local_tangent_heading_rad": path_heading,
         }
         return steer

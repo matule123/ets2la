@@ -584,6 +584,9 @@ class Plugin(BasePlugin):
                 "tracking_segment_fraction"),
             "tracking_projection_xz": accepted.get(
                 "tracking_projection_xz"),
+            "projection_selection": accepted.get("projection_selection"),
+            "projection_longitudinal_residual_m": accepted.get(
+                "projection_longitudinal_residual_m"),
             "local_tangent_heading_rad": accepted.get(
                 "local_tangent_heading_rad"),
             "observation_xz": accepted.get("observation_xz"),
