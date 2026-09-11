@@ -15,11 +15,12 @@ import json
 import math
 import os
 import re
+import threading
 import time
 import uuid
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 CALCULATION_PACKET_SCHEMA_VERSION = 1
 DEFAULT_CAPACITY = 3600
 
@@ -146,35 +147,66 @@ class SteeringReplayBuffer:
         if capacity < 2 or capacity > 20000:
             raise ValueError("steering replay capacity must be within 2..20000")
         self._samples = deque(maxlen=capacity)
+        self._execution_samples = deque(maxlen=capacity)
         self._monotonic = monotonic
         self._wall_time = wall_time
         self._sequence = 0
+        self._execution_sequence = 0
+        self._lock = threading.Lock()
 
     @property
     def capacity(self):
         return int(self._samples.maxlen)
 
     def __len__(self):
-        return len(self._samples)
+        with self._lock:
+            return len(self._samples)
 
     def append(self, sample):
         """Copy one tick without feeding anything back to the control path."""
-        self._sequence += 1
-        row = dict(sample or {})
-        row.update({
-            "sequence": self._sequence,
-            "monotonic_s": float(self._monotonic()),
-            "wall_time_s": float(self._wall_time()),
-        })
-        self._samples.append(_json_value(row))
+        with self._lock:
+            self._sequence += 1
+            row = dict(sample or {})
+            row.update({
+                "sequence": self._sequence,
+                "monotonic_s": float(self._monotonic()),
+                "wall_time_s": float(self._wall_time()),
+            })
+            self._samples.append(_json_value(row))
+
+    def append_execution(self, sample):
+        """Record one physical dynamics step independently of plugin cadence."""
+        with self._lock:
+            self._execution_sequence += 1
+            row = dict(sample or {})
+            row.update({
+                "sequence": self._execution_sequence,
+                "monotonic_s": float(self._monotonic()),
+                "wall_time_s": float(self._wall_time()),
+            })
+            self._execution_samples.append(_json_value(row))
 
     def snapshot(self):
         # Do not let an analyser mutate nested evidence retained by the ring.
-        return tuple(diagnostic_copy(row) for row in self._samples)
+        with self._lock:
+            return tuple(diagnostic_copy(row) for row in self._samples)
+
+    def execution_snapshot(self):
+        with self._lock:
+            return tuple(diagnostic_copy(row)
+                         for row in self._execution_samples)
 
     def export(self, directory, *, reason, identity=None):
         """Write the current immutable snapshot using an atomic replacement."""
-        samples = self.snapshot()
+        # Copy both streams and their counters under one lock.  An execution
+        # tick must not land between the copied rows and the dropped-row
+        # counters recorded in the same evidence document.
+        with self._lock:
+            samples = tuple(diagnostic_copy(row) for row in self._samples)
+            execution_samples = tuple(
+                diagnostic_copy(row) for row in self._execution_samples)
+            sample_sequence = self._sequence
+            execution_sequence = self._execution_sequence
         if not samples:
             return None
         directory = os.path.abspath(os.fspath(directory))
@@ -192,9 +224,13 @@ class SteeringReplayBuffer:
             "reason": str(reason or "event"),
             "capacity": self.capacity,
             "sample_count": len(samples),
-            "dropped_sample_count": max(0, self._sequence-len(samples)),
+            "dropped_sample_count": max(0, sample_sequence-len(samples)),
+            "execution_sample_count": len(execution_samples),
+            "dropped_execution_sample_count": max(
+                0, execution_sequence-len(execution_samples)),
             "identity": _json_value(identity or {}),
             "samples": samples,
+            "execution_samples": execution_samples,
         }
         try:
             with open(temporary, "x", encoding="utf-8") as stream:

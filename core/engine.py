@@ -1,5 +1,6 @@
 import time
 import logging
+import threading
 
 from core.telemetry import Telemetry
 from core.controller import Controller
@@ -15,6 +16,7 @@ from core.modules.traffic_analysis import TrafficAnalysis
 from core.planner import UltraPilotPlanner
 from core.camera import CameraSnapshotProducer
 from core.navigation.runtime_preflight import build_runtime_preflight
+from core.control_timing import CadenceMonitor, FrameGate
 from core.navigation.navigation_intent import (
     NavigationBufferClass, NavigationIntentTracker,
     destination_identity,
@@ -189,6 +191,22 @@ class UltraPilotEngine:
         self._last_control_flush = time.monotonic()
         self._last_output_steering = 0.0
         self._last_output_brake = 0.0
+        # Telemetry acquisition and physical control output are the two
+        # real-time boundaries.  Route/GPS, perception and logging may take
+        # longer, but they must not make either boundary advance in 50--300 ms
+        # bursts.  These workers do not calculate steering or interpolate a
+        # missing observation.
+        self._realtime_stop = threading.Event()
+        self._telemetry_lock = threading.Lock()
+        self._controller_io_lock = threading.Lock()
+        self._shutdown_lock = threading.Lock()
+        self._telemetry_thread = None
+        self._control_thread = None
+        self._latest_telemetry_data = {}
+        self._latest_telemetry_timestamp = 0.0
+        self._latest_telemetry_success = False
+        self._telemetry_sequence = 0
+        self._stopped = False
         # Momentary SDK controls must be released on the frame after a press.
         # Keeping ``geardrive`` high does not create another input edge in ETS2
         # and can leave an automatic gearbox stuck in Neutral indefinitely.
@@ -213,22 +231,294 @@ class UltraPilotEngine:
         # Master safety switch: nothing is sent to the game until enabled.
         if self.shared_state.get("autopilot_active") is None:
             self.shared_state.set("autopilot_active", False)
+        if self.shared_state.get("telemetry_valid") is None:
+            self.shared_state.set("telemetry_valid", False)
 
     def start(self):
         self.running = True
-        self.plugin_manager.discover_and_load()
+        self._stopped = False
+        self._realtime_stop.clear()
         try:
+            self._start_realtime_workers(telemetry=True, controls=False)
+            self.plugin_manager.discover_and_load()
+            self._start_realtime_workers(telemetry=False, controls=True)
             self.run_loop()
         finally:
             self.stop()
 
     def stop(self):
-        self.running = False
-        self.controller.release_all()
+        with self._shutdown_lock:
+            if self._stopped:
+                return
+            self._stopped = True
+            self.running = False
+            self._realtime_stop.set()
+        for thread in (self._control_thread, self._telemetry_thread):
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=1.5)
+        self._release_controller()
         self.module_manager.stop_all()
         self.plugin_manager.stop_all()
         self.voice.stop()
         logging.info("ETS2-UltraPilot Engine stopped.")
+
+    def _start_realtime_workers(self, *, telemetry, controls):
+        """Start independent I/O clocks without creating control authority."""
+        if not self.running or self._realtime_stop.is_set():
+            return
+        if telemetry and (self._telemetry_thread is None
+                          or not self._telemetry_thread.is_alive()):
+            self._telemetry_thread = threading.Thread(
+                target=self._telemetry_loop,
+                name="UltraPilot-Telemetry", daemon=True)
+            self._telemetry_thread.start()
+        if controls and (self._control_thread is None
+                         or not self._control_thread.is_alive()):
+            self._control_thread = threading.Thread(
+                target=self._control_loop,
+                name="UltraPilot-ControlOutput", daemon=True)
+            self._control_thread.start()
+
+    def _release_controller(self):
+        """Release physical controls, including narrow ``__new__`` fixtures."""
+        lock = getattr(self, "_controller_io_lock", None)
+        if lock is None:
+            self.controller.release_all()
+            return
+        with lock:
+            self.controller.release_all()
+
+    @staticmethod
+    def _realtime_period(fps):
+        try:
+            fps = float(fps)
+        except (TypeError, ValueError, OverflowError):
+            fps = 60.0
+        return 1.0 / max(20.0, min(120.0, fps))
+
+    def _vehicle_telemetry_payload(self, data, timestamp):
+        """Build one immutable tractor/trailer observation from one SDK read."""
+        data = data or {}
+        truck = data.get("truck", {}) or {}
+        trailer = data.get("trailer", {}) or {}
+        raw = data.get("raw", {}) or {}
+        attached = bool(trailer.get("attached"))
+        if attached:
+            articulation = self._articulation_angle(
+                truck.get("rotation", 0.0), trailer.get("rotation", 0.0))
+            trailer_payload = {
+                "trailer_attached": True,
+                "trailer_world_pos": (
+                    trailer.get("x", 0.0), trailer.get("z", 0.0)),
+                "trailer_altitude": float(trailer.get("y", 0.0) or 0.0),
+                "trailer_heading": trailer.get("rotation", 0.0),
+                "trailer_articulation": articulation,
+                "trailer_effective_axle_distance_m": trailer.get(
+                    "effectiveAxleDistanceM"),
+                "trailer_wheel_track_m": trailer.get("wheelTrackM"),
+            }
+        else:
+            articulation = 0.0
+            trailer_payload = {
+                "trailer_attached": False,
+                "trailer_world_pos": None,
+                "trailer_altitude": None,
+                "trailer_heading": None,
+                "trailer_articulation": 0.0,
+                "trailer_effective_axle_distance_m": None,
+                "trailer_wheel_track_m": None,
+            }
+        envelope = {
+            "timestamp": float(timestamp),
+            "tractor_speed_ms": float(truck.get("speed", 0.0) or 0.0),
+            "game_steer_right": -float(truck.get("gameSteer", 0.0) or 0.0),
+            "sdk_frame_us": truck.get("sdkFrameTimeUs", 0),
+            "road_wheel_angles_rad": truck.get("roadWheelAnglesRad", []),
+            "tractor_reference_geometry": truck.get("referenceGeometry", {}),
+            "yaw_rate_rad_s": truck.get("yawRateRadS", 0.0),
+            "yaw_rate_valid": truck.get("yawRateValid", False),
+            "tractor_position": [
+                float(truck.get("x", 0.0) or 0.0),
+                float(truck.get("y", 0.0) or 0.0),
+                float(truck.get("z", 0.0) or 0.0),
+            ],
+            "tractor_heading": float(truck.get("rotation", 0.0) or 0.0),
+            "trailer_attached": attached,
+            "trailer_position": ([
+                float(trailer.get("x", 0.0) or 0.0),
+                float(trailer.get("y", 0.0) or 0.0),
+                float(trailer.get("z", 0.0) or 0.0),
+            ] if attached else None),
+            "trailer_heading": (
+                float(trailer.get("rotation", 0.0) or 0.0)
+                if attached else None),
+            "trailer_articulation": float(articulation),
+            "trailer_effective_axle_distance_m": trailer.get(
+                "effectiveAxleDistanceM") if attached else None,
+            "trailer_wheel_track_m": (
+                trailer.get("wheelTrackM") if attached else None),
+        }
+        return {
+            "telemetry": data,
+            "telemetry_valid": bool(truck.get("pose_valid", False)),
+            "telemetry_timestamp": float(timestamp),
+            "telemetry_producer_heartbeat": float(timestamp),
+            "game_in_truck": bool(raw.get("sdkActive", bool(truck))),
+            "speed": truck.get("speed", 0.0),
+            "truck_world_pos": (
+                truck.get("x", 0.0), truck.get("z", 0.0)),
+            "truck_altitude": float(truck.get("y", 0.0) or 0.0),
+            "truck_heading": truck.get("rotation", 0.0),
+            "truck_speed_ms": truck.get("speed", 0.0),
+            "vehicle_envelope_snapshot": envelope,
+            **trailer_payload,
+        }
+
+    def _store_telemetry_sample(self, success, data, timestamp):
+        with self._telemetry_lock:
+            self._latest_telemetry_success = bool(success)
+            self._latest_telemetry_data = dict(data or {})
+            self._latest_telemetry_timestamp = float(timestamp)
+            self._telemetry_sequence += 1
+
+    def _telemetry_snapshot(self, now=None):
+        now = time.monotonic() if now is None else float(now)
+        with self._telemetry_lock:
+            success = bool(self._latest_telemetry_success)
+            data = dict(self._latest_telemetry_data)
+            timestamp = float(self._latest_telemetry_timestamp)
+            sequence = int(self._telemetry_sequence)
+        # Reusing one sample inside the non-real-time main loop is permitted,
+        # but a producer that has not delivered for 0.5 s is not fresh input.
+        fresh = bool(success and timestamp > 0.0 and now - timestamp <= 0.5)
+        return fresh, data, timestamp, sequence
+
+    def _telemetry_loop(self):
+        period = self._realtime_period(self.fps)
+        deadline = time.monotonic()
+        cadence = CadenceMonitor(1.0 / period)
+        gate = FrameGate()
+        epoch = 0
+        last_frame = None
+        last_active = None
+        last_failure_published = False
+        last_accepted_at = 0.0
+        last_timing_publish = 0.0
+        while self.running and not self._realtime_stop.is_set():
+            now = time.monotonic()
+            success = False
+            try:
+                success = bool(self.telemetry.update())
+            except Exception as error:
+                logging.error("Telemetry worker error (recovered): %s", error)
+            timestamp = time.monotonic()
+            cadence.tick(timestamp)
+            if success:
+                data = dict(getattr(self.telemetry, "data", {}) or {})
+                truck = data.get("truck", {}) or {}
+                raw = data.get("raw", {}) or {}
+                try:
+                    frame = int(truck.get("sdkFrameTimeUs", 0) or 0)
+                except (TypeError, ValueError, OverflowError):
+                    frame = -1
+                active = bool(raw.get("sdkActive", bool(truck)))
+                if (last_active is not None and active != last_active) or (
+                        frame > 0 and last_frame is not None
+                        and frame < last_frame):
+                    epoch += 1
+                    gate.reset()
+                decision = gate.observe((epoch, active), frame)
+                last_active = active
+                if frame > 0:
+                    last_frame = frame
+                if decision.accepted and decision.is_new:
+                    self._store_telemetry_sample(True, data, timestamp)
+                    payload = self._vehicle_telemetry_payload(data, timestamp)
+                    payload["telemetry_sequence"] = self._telemetry_sequence
+                    payload["telemetry_generation"] = epoch
+                    self.shared_state.update_batch(payload)
+                    last_accepted_at = timestamp
+                    last_failure_published = False
+                elif not decision.accepted:
+                    # A regressing frame cannot replace the latest proven
+                    # observation.  The old sample naturally becomes stale.
+                    self.shared_state.set(
+                        "telemetry_ordering_failure", decision.reason)
+                    success = False
+                if (not decision.is_new and last_accepted_at > 0.0
+                        and timestamp - last_accepted_at > 0.5):
+                    success = False
+            else:
+                data = {}
+            if not success:
+                self._store_telemetry_sample(False, data, timestamp)
+                if not last_failure_published:
+                    telemetry_loss = _telemetry_loss_navigation_payload(
+                        self.shared_state)
+                    self.shared_state.update_batch({
+                        "game_in_truck": False,
+                        "telemetry_valid": False,
+                        "telemetry_timestamp": timestamp,
+                        "telemetry_producer_heartbeat": timestamp,
+                        "trailer_attached": False,
+                        "trailer_world_pos": None,
+                        "trailer_altitude": None,
+                        "trailer_heading": None,
+                        "trailer_articulation": 0.0,
+                        "trailer_effective_axle_distance_m": None,
+                        "trailer_wheel_track_m": None,
+                        "vehicle_envelope_snapshot": {
+                            "timestamp": float(timestamp),
+                            "tractor_position": None,
+                            "tractor_heading": None,
+                            "trailer_attached": False,
+                            "trailer_position": None,
+                            "trailer_heading": None,
+                            "trailer_articulation": 0.0,
+                            "trailer_effective_axle_distance_m": None,
+                            "trailer_wheel_track_m": None,
+                        },
+                        **telemetry_loss,
+                    })
+                    last_failure_published = True
+            if timestamp - last_timing_publish >= 1.0:
+                last_timing_publish = timestamp
+                timing = cadence.snapshot(timestamp, reset_window=True)
+                timing.update({
+                    "last_sdk_frame_us": last_frame,
+                    "telemetry_sequence": self._telemetry_sequence,
+                })
+                self.shared_state.set("telemetry_timing", timing)
+            deadline += period
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                deadline = time.monotonic()
+            else:
+                self._realtime_stop.wait(remaining)
+
+    def _control_loop(self):
+        period = self._realtime_period(self.fps)
+        deadline = time.monotonic()
+        cadence = CadenceMonitor(1.0 / period)
+        last_timing_publish = 0.0
+        while self.running and not self._realtime_stop.is_set():
+            now = time.monotonic()
+            cadence.tick(now)
+            try:
+                self._flush_controls()
+            except Exception as error:
+                logging.error("Control output worker error (recovered): %s", error)
+            if now - last_timing_publish >= 1.0:
+                last_timing_publish = now
+                self.shared_state.set(
+                    "engine_control_timing",
+                    cadence.snapshot(now, reset_window=True))
+            deadline += period
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                deadline = time.monotonic()
+            else:
+                self._realtime_stop.wait(remaining)
 
     def _autostart_truck(self, truck):
         """Recover a stalled engine using telemetry-controlled ignition steps."""
@@ -537,7 +827,7 @@ class UltraPilotEngine:
             })
             logging.info("Hotkey N -> %s", msg)
             if not new_state:
-                self.controller.release_all()
+                self._release_controller()
                 self._was_active = False
                 self._drive_selector_pressed = False
                 self._last_output_steering = 0.0
@@ -589,7 +879,7 @@ class UltraPilotEngine:
             **({"safety_hazard_active": False} if desired else {}),
         })
         if not desired:
-            self.controller.release_all()
+            self._release_controller()
             self._was_active = False
             self._drive_selector_pressed = False
             self._last_output_steering = 0.0
@@ -685,6 +975,14 @@ class UltraPilotEngine:
         self.controller.set_brake(brake)
 
     def _flush_controls(self):
+        """Serialize the one physical Controller owner across shutdown edges."""
+        lock = getattr(self, "_controller_io_lock", None)
+        if lock is None:  # Narrow unit fixtures created with ``__new__``.
+            return self._flush_controls_unlocked()
+        with lock:
+            return self._flush_controls_unlocked()
+
+    def _flush_controls_unlocked(self):
         """Apply the latest control intents to the physical device.
 
         Gated by the master switch.  When the autopilot is NOT active we release
@@ -875,23 +1173,22 @@ class UltraPilotEngine:
                 logging.warning(str(autopilot_event.get(
                     "message", "Autopilot automatically disabled")))
 
-            # 1. Telemetry
-            if self.telemetry.update():
-                # Capture the sampling instant immediately. CameraProps is read
-                # later in this same branch and rejects the frame if route/GPS
-                # processing delayed it beyond the synchronization tolerance.
-                telemetry_timestamp = time.monotonic()
-                truck = self.telemetry.get("truck", {}) or {}
-                raw = self.telemetry.get("raw", {}) or {}
+            # 1. Consume the latest immutable telemetry frame. Acquisition has
+            # its own clock; this route/perception loop must never delay the
+            # next SCS sample or publish the same sample as a new frame.
+            (telemetry_available, telemetry_data, telemetry_timestamp,
+             _telemetry_sequence) = self._telemetry_snapshot(current_time)
+            if telemetry_available:
+                truck = telemetry_data.get("truck", {}) or {}
+                raw = telemetry_data.get("raw", {}) or {}
                 # Sample CameraProps immediately next to the SCS telemetry
                 # frame, before any route processing can introduce skew.
                 camera_snapshot = self.camera_snapshot_producer.read(
                     raw.get("renderTime", 0), telemetry_timestamp)
                 game_active = bool(raw.get("sdkActive", bool(truck)))
                 self._camera_diagnostic(camera_snapshot, game_active)
-                self.shared_state.set("game_in_truck", game_active)
                 self._autostart_truck(truck)
-                dest_city = self.telemetry.get("dest_city", "") or ""
+                dest_city = telemetry_data.get("dest_city", "") or ""
                 try:
                     route_distance = float(truck.get("routeDistance", 0.0) or 0.0)
                 except (TypeError, ValueError):
@@ -1151,70 +1448,10 @@ class UltraPilotEngine:
                     self._last_game_route_distance = None
                     self._last_route_signature = None
                 self._had_game_destination = has_game_destination
-                # Keep tractor, trailer and camera in one immutable telemetry
-                # frame.  Steering and AR must never combine the next tractor
-                # pose with the previous trailer/camera pose during a fast
-                # bend or a rapid camera movement.
-                trailer = self.telemetry.get("trailer", {}) or {}
-                if trailer.get("attached"):
-                    articulation = self._articulation_angle(
-                        truck.get("rotation", 0.0),
-                        trailer.get("rotation", 0.0))
-                    trailer_payload = {
-                        "trailer_attached": True,
-                        "trailer_world_pos": (
-                            trailer.get("x", 0.0), trailer.get("z", 0.0)),
-                        "trailer_altitude": float(
-                            trailer.get("y", 0.0) or 0.0),
-                        "trailer_heading": trailer.get("rotation", 0.0),
-                        "trailer_articulation": articulation,
-                        "trailer_effective_axle_distance_m": trailer.get(
-                            "effectiveAxleDistanceM"),
-                        "trailer_wheel_track_m": trailer.get("wheelTrackM"),
-                    }
-                else:
-                    trailer_payload = {
-                        "trailer_attached": False,
-                        "trailer_world_pos": None,
-                        "trailer_altitude": None,
-                        "trailer_heading": None,
-                        "trailer_articulation": 0.0,
-                        "trailer_effective_axle_distance_m": None,
-                        "trailer_wheel_track_m": None,
-                    }
-                vehicle_envelope_snapshot = {
-                    "timestamp": float(telemetry_timestamp),
-                    "tractor_speed_ms": float(truck.get("speed", 0.0) or 0.0),
-                    "game_steer_right": -float(truck.get("gameSteer", 0.0) or 0.0),
-                    "sdk_frame_us": truck.get("sdkFrameTimeUs", 0),
-                    "road_wheel_angles_rad": truck.get("roadWheelAnglesRad", []),
-                    "tractor_reference_geometry": truck.get("referenceGeometry", {}),
-                    "yaw_rate_rad_s": truck.get("yawRateRadS", 0.0),
-                    "yaw_rate_valid": truck.get("yawRateValid", False),
-                    "tractor_position": [
-                        float(truck.get("x", 0.0) or 0.0),
-                        float(truck.get("y", 0.0) or 0.0),
-                        float(truck.get("z", 0.0) or 0.0),
-                    ],
-                    "tractor_heading": float(
-                        truck.get("rotation", 0.0) or 0.0),
-                    "trailer_attached": bool(trailer.get("attached")),
-                    "trailer_position": ([
-                        float(trailer.get("x", 0.0) or 0.0),
-                        float(trailer.get("y", 0.0) or 0.0),
-                        float(trailer.get("z", 0.0) or 0.0),
-                    ] if trailer.get("attached") else None),
-                    "trailer_heading": (
-                        float(trailer.get("rotation", 0.0) or 0.0)
-                        if trailer.get("attached") else None),
-                    "trailer_articulation": float(
-                        trailer_payload["trailer_articulation"]),
-                    "trailer_effective_axle_distance_m": (
-                        trailer_payload[
-                            "trailer_effective_axle_distance_m"]),
-                    "trailer_wheel_track_m": trailer_payload[
-                        "trailer_wheel_track_m"],
-                }
+                # CameraProps is sampled against this exact telemetry frame.
+                # The high-rate producer already published the tractor and
+                # trailer envelope atomically and a slower route iteration
+                # must not overwrite it with an older frame.
                 camera_snapshot = dict(camera_snapshot)
                 camera_snapshot.update({
                     "vehicle_position": [
@@ -1226,29 +1463,13 @@ class UltraPilotEngine:
                         truck.get("rotation", 0.0) or 0.0),
                 })
                 self.shared_state.update_batch({
-                    "telemetry": self.telemetry.data,
-                    "telemetry_valid": bool(truck.get("pose_valid", False)),
-                    "telemetry_timestamp": telemetry_timestamp,
-                    # Camera and telemetry are one atomic Manager update.
-                    # Consumers use this snapshot directly; no second matrix
-                    # authority is published under a compatibility key.
                     "camera_snapshot": camera_snapshot,
-                    "speed": truck.get("speed", 0),
-                    # World pose for coordinate-based navigation (map plugin).
-                    "truck_world_pos": (truck.get("x", 0.0), truck.get("z", 0.0)),
-                    "truck_altitude": float(truck.get("y", 0.0) or 0.0),
-                    "truck_heading": truck.get("rotation", 0.0),
-                    "truck_speed_ms": truck.get("speed", 0.0),
-                    # One nested value lets navigation consume a tractor and
-                    # trailer pose from exactly one telemetry frame.
-                    "vehicle_envelope_snapshot": vehicle_envelope_snapshot,
                     # Destination city of the current job (for the gantry sign).
                     "dest_city": dest_city,
                     "game_route_distance": route_distance,
                     "game_gps_navigation_active": game_gps_navigation_active,
                     "navigation_arrival_pending": arrival_pending,
                     "game_route_time": float(truck.get("routeTime", 0.0) or 0.0),
-                    **trailer_payload,
                 })
 
                 # Surrounding traffic + the traffic light controlling us
@@ -1288,12 +1509,11 @@ class UltraPilotEngine:
                 camera_snapshot = self.camera_snapshot_producer.read(
                     0, telemetry_timestamp)
                 self._camera_diagnostic(camera_snapshot, False)
-                telemetry_loss = _telemetry_loss_navigation_payload(
-                    self.shared_state)
+                # The telemetry producer is the sole owner of telemetry loss
+                # and its atomic fail-closed navigation payload.  This slower
+                # consumer only clears equally slow camera/traffic evidence;
+                # it cannot overwrite a newer producer frame.
                 self.shared_state.update_batch({
-                    "game_in_truck": False,
-                    "telemetry_valid": False,
-                    "telemetry_timestamp": telemetry_timestamp,
                     "camera_snapshot": camera_snapshot,
                     "traffic": [],
                     "traffic_light": None,
@@ -1302,25 +1522,6 @@ class UltraPilotEngine:
                     "lead_distance": None,
                     "traffic_snapshot_valid": False,
                     "traffic_snapshot_timestamp": telemetry_timestamp,
-                    "trailer_attached": False,
-                    "trailer_world_pos": None,
-                    "trailer_altitude": None,
-                    "trailer_heading": None,
-                    "trailer_articulation": 0.0,
-                    "trailer_effective_axle_distance_m": None,
-                    "trailer_wheel_track_m": None,
-                    "vehicle_envelope_snapshot": {
-                        "timestamp": float(telemetry_timestamp),
-                        "tractor_position": None,
-                        "tractor_heading": None,
-                        "trailer_attached": False,
-                        "trailer_position": None,
-                        "trailer_heading": None,
-                        "trailer_articulation": 0.0,
-                        "trailer_effective_axle_distance_m": None,
-                        "trailer_wheel_track_m": None,
-                    },
-                    **telemetry_loss,
                 })
 
             # A transient error in any one frame must NOT kill the engine — log
@@ -1390,8 +1591,8 @@ class UltraPilotEngine:
                         build_runtime_preflight(self.shared_state,
                                                 preflight_now))
 
-                # 5. Apply control intents to the device (safety-gated)
-                self._flush_controls()
+                # Physical control output has its own fixed-cadence worker.
+                # This loop only produces longitudinal/planner intents.
             except Exception as e:
                 logging.error("Engine frame error (recovered): %s", e)
 

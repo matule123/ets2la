@@ -9,7 +9,9 @@ from core.navigation.runtime_preflight import (
 )
 from core.navigation.navigation_intent import snapshot_matches_navigation_intent
 from core.navigation.route import curve_speed_limit_ms
+from core.control_timing import MonotonicSequenceGate
 from core.steering_dynamics import SteeringDynamics
+from core.steering_executor import SteeringExecutor
 from core.steering_replay import (
     SteeringReplayBuffer, diagnostic_copy, steering_packet_binding,
 )
@@ -367,8 +369,14 @@ class Plugin(BasePlugin):
         self._last_throttle = 0.0
         self._last_steering = 0.0
         self._steering_dynamics = SteeringDynamics()
+        self._steering_executor = SteeringExecutor(
+            self._steering_dynamics,
+            writer=self.sdk.controller.set_steering,
+            observer=self._observe_steering_execution)
         self._steering_dynamics_debug = dict(
             self._steering_dynamics.last_debug)
+        self._navigation_packet_gate = MonotonicSequenceGate()
+        self._last_execution_timing_publish = 0.0
         self._last_steering_event = (False, False)
         self._last_control_dt = 0.0
         self._last_brake = 0.0          # smoothed brake command (the ramp)
@@ -393,9 +401,56 @@ class Plugin(BasePlugin):
         self._accepted_navigation_command = {}
 
     def on_stop(self):
+        executor = getattr(self, "_steering_executor", None)
+        if executor is not None:
+            executor.stop()
         self._export_steering_replay("plugin_stop")
         logging.info("Autopilot Plugin stopped.")
         self.enabled = False
+
+    def start_control_worker(self):
+        """Start the sole SteeringDynamics clock in the production worker.
+
+        Unit tests call ``on_tick`` directly and therefore retain deterministic
+        synchronous stepping. ``plugin_worker`` calls this hook only after the
+        real plugin process has completed ``on_start``.
+        """
+        self._steering_executor.start()
+
+    def _observe_steering_execution(self, debug):
+        """Publish bounded high-rate evidence without influencing control."""
+        self._last_steering = float(debug.get("output", 0.0) or 0.0)
+        self._steering_dynamics_debug = dict(debug)
+        replay = getattr(self, "_steering_replay", None)
+        accepted = getattr(self, "_accepted_navigation_command", {}) or {}
+        if replay is not None:
+            replay.append_execution({
+                **dict(debug),
+                "calculation_sequence": accepted.get(
+                    "calculation_sequence"),
+                "calculation_sdk_frame_us": accepted.get("sdk_frame_us"),
+                "calculation_computed_at": accepted.get("computed_at"),
+                "navigation_intent_id": accepted.get(
+                    "navigation_intent_id"),
+                "route_build_id": accepted.get("route_build_id"),
+                "revision": accepted.get("authority_revision"),
+            })
+        now = float(debug.get("execution_monotonic_s", 0.0) or 0.0)
+        if now - self._last_execution_timing_publish >= 1.0:
+            self._last_execution_timing_publish = now
+            timing = self._steering_executor.cadence_snapshot(now)
+            timing.update({
+                "target_age_s": debug.get("target_age_s"),
+                "target_fresh": debug.get("target_fresh"),
+                "submission_sequence": debug.get("submission_sequence"),
+            })
+            self.sdk.shared_state.set("steering_execution_timing", timing)
+
+    def _write_steering_output(self, value):
+        """Avoid a stale on_tick write racing the fixed-cadence executor."""
+        executor = getattr(self, "_steering_executor", None)
+        if executor is None or not executor.running:
+            self.sdk.controller.set_steering(value)
 
     # --- Low-pass ramps -------------------------------------------------------
     def _ramp(self, current, target, dt, up_rate, down_rate):
@@ -704,6 +759,22 @@ class Plugin(BasePlugin):
         nav_command, nav_command_curvature, command_reason = navigation_command(
             self.sdk.shared_state, snapshot, gps_active=gps_navigation_present,
             packet=accepted_packet)
+        if (not command_reason
+                and accepted_packet.get("controller") == "frenet_bicycle"
+                and accepted_packet.get(
+                    "calculation_packet_schema_version") is not None):
+            packet_identity = tuple(accepted_packet.get(key) for key in (
+                "navigation_intent_id", "route_build_id",
+                "authority_revision", "source_game_session_id",
+                "source_map_key", "source_dataset_fingerprint"))
+            ordering = self._navigation_packet_gate.observe(
+                packet_identity,
+                accepted_packet.get("calculation_sequence"),
+                accepted_packet.get("sdk_frame_us"))
+            if not ordering.accepted:
+                nav_command = nav_command_curvature = 0.0
+                command_reason = (
+                    "steering command ordering rejected: " + ordering.reason)
         self._accepted_navigation_command = diagnostic_copy({
             **accepted_packet,
             "command": float(nav_command),
@@ -828,7 +899,7 @@ class Plugin(BasePlugin):
             self.sdk.controller.set_throttle(0.0)
             self._last_throttle = 0.0
             self._last_steering = self._ramp_steering(0.0, dt)
-            self.sdk.controller.set_steering(self._last_steering)
+            self._write_steering_output(self._last_steering)
             if speed_kmh > 1.0:
                 self._set_brake(0.72, dt)
                 self.sdk.shared_state.set(
@@ -866,7 +937,7 @@ class Plugin(BasePlugin):
             self.sdk.controller.set_throttle(0.0)
             self._last_throttle = 0.0
             self._last_steering = self._ramp_steering(0.0, dt)
-            self.sdk.controller.set_steering(self._last_steering)
+            self._write_steering_output(self._last_steering)
             self.sdk.shared_state.set(
                 "navigation_status", f"Autopilot zablokovany: {authority_reason}")
             if speed_kmh > 1.0:
@@ -900,7 +971,7 @@ class Plugin(BasePlugin):
             self.sdk.controller.set_throttle(0.0)
             self._last_throttle = 0.0
             self._last_steering = self._ramp_steering(0.0, dt)
-            self.sdk.controller.set_steering(self._last_steering)
+            self._write_steering_output(self._last_steering)
             if float(speed) < -0.10 or speed_kmh > 0.5:
                 self._set_brake(0.62, dt)
                 self.sdk.shared_state.set(
@@ -979,7 +1050,7 @@ class Plugin(BasePlugin):
                     nav_command if settle_nav_active else 0.0, dt,
                     speed_ms=abs(speed),
                     curvature_per_m=nav_command_curvature)
-                self.sdk.controller.set_steering(self._last_steering)
+                self._write_steering_output(self._last_steering)
                 self.sdk.shared_state.set(
                     "navigation_status", "Pripravujem jazdu dopredu")
                 self._publish_control_tags(speed_kmh, settle_nav_active)
@@ -1014,7 +1085,7 @@ class Plugin(BasePlugin):
                 target = 0.0
             self._last_steering = self._ramp_steering(
                 target, dt, speed_ms=abs(speed), curvature_per_m=nav_command_curvature)
-            self.sdk.controller.set_steering(self._last_steering)
+            self._write_steering_output(self._last_steering)
             self.sdk.shared_state.set("tts_message", "Emergency stop triggered!")
             self._publish_control_tags(speed_kmh, emergency_nav_active)
             return
@@ -1025,7 +1096,7 @@ class Plugin(BasePlugin):
             self._last_steering = self._ramp_steering(
                 nav_command if toll_nav_active else 0.0, dt,
                 speed_ms=abs(speed), curvature_per_m=nav_command_curvature)
-            self.sdk.controller.set_steering(self._last_steering)
+            self._write_steering_output(self._last_steering)
             if speed_kmh > 0.5:
                 self.sdk.controller.set_throttle(0.0)
                 self._last_throttle = 0.0
@@ -1547,7 +1618,7 @@ class Plugin(BasePlugin):
                 truck.get("roadWheelAnglesRad", []),
                 truck.get("yawRateRadS"), truck.get("sdkFrameTimeUs"))
 
-        self.sdk.controller.set_steering(steering_val)
+        self._write_steering_output(steering_val)
         self._record_steering_replay_tick(
             truck, snapshot, steering_val, observed_game_steering,
             speed_kmh, authority_reason)
@@ -1601,6 +1672,11 @@ class Plugin(BasePlugin):
         self.sdk.controller.set_brake(self._last_brake)
 
     def _reset_steering_dynamics(self, command: float = 0.0) -> float:
+        executor = getattr(self, "_steering_executor", None)
+        if executor is not None:
+            self._last_steering = executor.reset(command, active=False)
+            self._steering_dynamics_debug = executor.last_debug
+            return self._last_steering
         dynamics = getattr(self, "_steering_dynamics", None)
         if dynamics is None:
             dynamics = SteeringDynamics(command)
@@ -1617,15 +1693,6 @@ class Plugin(BasePlugin):
         remains current while normalized angle, angular rate and angular
         acceleration obey speed-scheduled, real-time bounds.
         """
-        dynamics = getattr(self, "_steering_dynamics", None)
-        if dynamics is None:
-            dynamics = SteeringDynamics(getattr(self, "_last_steering", 0.0))
-            self._steering_dynamics = dynamics
-        # Tests and safety transitions may explicitly synchronize the public
-        # command. Never let a hidden actuator state retain an older lock.
-        current = float(getattr(self, "_last_steering", 0.0) or 0.0)
-        if abs(dynamics.command - current) > 1e-9:
-            dynamics.reset(current)
         try:
             if speed_ms is None:
                 speed_ms = (abs(float(getattr(
@@ -1641,21 +1708,43 @@ class Plugin(BasePlugin):
             speed_ms = 0.0 if speed_ms is None else float(speed_ms)
             curvature_per_m = (0.0 if curvature_per_m is None
                                else float(curvature_per_m))
-        output = dynamics.update(
-            target, dt, speed_ms=speed_ms,
-            curvature_per_m=curvature_per_m or 0.0)
-        self._steering_dynamics_debug = dict(dynamics.last_debug)
-        event = (bool(dynamics.last_debug["target_saturated"]),
-                 bool(dynamics.last_debug["dt_limited"]))
+        executor = getattr(self, "_steering_executor", None)
+        if executor is not None and executor.running:
+            # The worker owns SteeringDynamics while running.  Submitting a
+            # target is the only permitted cross-thread operation; touching
+            # dynamics.command here would reset velocity in the middle of a
+            # physical trajectory and recreate the visible micro-pulses.
+            executor.submit(
+                target, speed_ms=speed_ms,
+                curvature_per_m=curvature_per_m or 0.0, active=True)
+            output = executor.output
+            self._steering_dynamics_debug = executor.last_debug
+        else:
+            dynamics = getattr(self, "_steering_dynamics", None)
+            if dynamics is None:
+                dynamics = SteeringDynamics(
+                    getattr(self, "_last_steering", 0.0))
+                self._steering_dynamics = dynamics
+            # Direct unit-test/synchronous mode has no competing owner.
+            current = float(getattr(self, "_last_steering", 0.0) or 0.0)
+            if abs(dynamics.command - current) > 1e-9:
+                dynamics.reset(current)
+            output = dynamics.update(
+                target, dt, speed_ms=speed_ms,
+                curvature_per_m=curvature_per_m or 0.0)
+            self._steering_dynamics_debug = dict(dynamics.last_debug)
+        dynamics_debug = dict(self._steering_dynamics_debug)
+        event = (bool(dynamics_debug.get("target_saturated", False)),
+                 bool(dynamics_debug.get("dt_limited", False)))
         previous_event = getattr(self, "_last_steering_event", (False, False))
         if event != previous_event and (any(event) or any(previous_event)):
             logging.info(
                 "Steering dynamics event: target_saturated=%s dt_limited=%s "
                 "raw=%.3f bounded=%.3f dt=%.4f used_dt=%.4f speed=%.2fm/s",
-                event[0], event[1], dynamics.last_debug["raw_target"],
-                dynamics.last_debug["bounded_target"],
-                dynamics.last_debug["dt_s"],
-                dynamics.last_debug["dt_used_s"],
-                dynamics.last_debug["speed_ms"])
+                event[0], event[1], dynamics_debug.get("raw_target", 0.0),
+                dynamics_debug.get("bounded_target", 0.0),
+                dynamics_debug.get("dt_s", 0.0),
+                dynamics_debug.get("dt_used_s", 0.0),
+                dynamics_debug.get("speed_ms", 0.0))
         self._last_steering_event = event
         return output

@@ -15,6 +15,7 @@ from core.navigation.route_diagnostics import (
 )
 from core.navigation.runtime_preflight import CONFIDENCE_THRESHOLD
 from core.steering_replay import bind_steering_calculation
+from core.control_timing import CadenceMonitor, FrameGate
 from core.navigation.navigation_intent import (
     CONTINUATION_CLASSES, NavigationBufferClass, NavigationBuildGuard,
     classify_navigation_buffer, ordered_common_prefix_overlap,
@@ -108,6 +109,13 @@ class Plugin(BasePlugin):
         # Diagnostic-only sequence. It binds Route inputs, local geometry and
         # output before another map tick can replace shared state.
         self._steering_packet_sequence = 0
+        self._steering_frame_gate = FrameGate()
+        self._steering_calculation_cadence = CadenceMonitor(60.0)
+        self._last_steering_observation_timestamp = None
+        self._last_steering_sdk_frame_us = None
+        self._last_steering_frame_identity = None
+        self._last_steering_observation_signature = None
+        self._last_steering_calculation_at = None
         self._lane_failure_signature = None
         self._last_logged_lane_failure = None
         self._lane_retry_at = 0.0
@@ -2292,6 +2300,97 @@ class Plugin(BasePlugin):
         if not pos:
             return
 
+        # A Route command is calculated exactly once for each authoritative
+        # SDK observation.  Repeating a Manager snapshot is not a new physical
+        # measurement; calculating again with a different plugin dt produced
+        # multiple commands for one truck pose.  Missing frames are never
+        # interpolated here.
+        steering_frame_identity = (
+            self.sdk.get("telemetry_generation", 0),
+            self.sdk.get("game_session_id", 0),
+            self.sdk.get("active_map_key"),
+            self.sdk.get("active_dataset_fingerprint"),
+        )
+        steering_frame = vehicle_observation.get("sdk_frame_us")
+        reference_signature = reference_geometry
+        if isinstance(reference_geometry, dict):
+            reference_signature = tuple(sorted(
+                (str(key), repr(value))
+                for key, value in reference_geometry.items()))
+        steering_observation_signature = (
+            tuple(vehicle_observation.get("tractor_position") or ()),
+            vehicle_observation.get("tractor_heading"),
+            vehicle_observation.get("tractor_speed_ms"),
+            tuple(vehicle_observation.get("road_wheel_angles_rad") or ()),
+            reference_signature,
+            bool(vehicle_observation.get("trailer_attached", False)),
+            tuple(vehicle_observation.get("trailer_position") or ()),
+            vehicle_observation.get("trailer_heading"),
+        )
+        frame_decision = self._steering_frame_gate.observe(
+            steering_frame_identity, steering_frame)
+        if not frame_decision.accepted:
+            self.sdk.shared_state.update_batch({
+                "nav_active": False,
+                "nav_steering": 0.0,
+                "navigation_unreliable": True,
+                "navigation_failure_reason": frame_decision.reason,
+                "steering_observation_failure": frame_decision.reason,
+            })
+            return
+        if not frame_decision.is_new:
+            if (steering_observation_signature
+                    != self._last_steering_observation_signature):
+                reason = "one SDK frame was reused with different vehicle geometry"
+                rejected_debug = dict(
+                    self.sdk.get("nav_steering_debug", {}) or {})
+                rejected_debug.update({
+                    "authority_valid": False,
+                    "control_failure": reason,
+                })
+                self.sdk.shared_state.update_batch({
+                    "nav_active": False,
+                    "nav_steering": 0.0,
+                    "nav_steering_debug": rejected_debug,
+                    "navigation_unreliable": True,
+                    "navigation_failure_reason": reason,
+                    "steering_observation_failure": reason,
+                })
+            return
+
+        try:
+            observation_timestamp = float(
+                vehicle_observation.get("timestamp", 0.0) or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            observation_timestamp = 0.0
+        try:
+            steering_frame_us = int(steering_frame or 0)
+        except (TypeError, ValueError, OverflowError):
+            steering_frame_us = 0
+        observation_dt = None
+        if steering_frame_identity == self._last_steering_frame_identity:
+            if (steering_frame_us > 0
+                    and self._last_steering_sdk_frame_us is not None):
+                candidate = ((steering_frame_us
+                              - self._last_steering_sdk_frame_us) / 1_000_000.0)
+                if 0.0 < candidate <= 0.25:
+                    observation_dt = candidate
+            if (observation_dt is None and observation_timestamp > 0.0
+                    and self._last_steering_observation_timestamp is not None):
+                candidate = (observation_timestamp
+                             - self._last_steering_observation_timestamp)
+                if 0.0 < candidate <= 0.25:
+                    observation_dt = candidate
+        control_dt_s = float(observation_dt if observation_dt is not None
+                             else max(0.001, min(0.10, delta_time)))
+        self._last_steering_frame_identity = steering_frame_identity
+        self._last_steering_observation_signature = (
+            steering_observation_signature)
+        self._last_steering_sdk_frame_us = (
+            steering_frame_us if steering_frame_us > 0 else None)
+        self._last_steering_observation_timestamp = (
+            observation_timestamp if observation_timestamp > 0.0 else None)
+
         # Lazily load the downloaded road network (engine process) the first
         # time we have a position. Cheap no-op once attempted.
         self._load_road_net()
@@ -2553,6 +2652,14 @@ class Plugin(BasePlugin):
                         vehicle_curvature=math.tan(tyre_angle)/float(
                             reference_geometry['wheelbase_m'])
                         vehicle_curvature_source="road_wheel_angles_rad"
+                calculation_started_at = time.monotonic()
+                previous_calculation_at = self._last_steering_calculation_at
+                calculation_interval_s = (
+                    calculation_started_at - previous_calculation_at
+                    if previous_calculation_at is not None else None)
+                self._last_steering_calculation_at = calculation_started_at
+                self._steering_calculation_cadence.tick(
+                    calculation_started_at)
                 steer = route.steering(
                     pos, heading, speed, lane_offset_m=0.0,
                     cross_track_error_m=live_cte,
@@ -2563,7 +2670,7 @@ class Plugin(BasePlugin):
                         "lane_width_m": metadata["lane_width_m"],
                         "revision": int(snapshot["revision"]),
                     },
-                    control_dt_s=delta_time,
+                    control_dt_s=control_dt_s,
                     vehicle_curvature_per_m=vehicle_curvature,
                     steering_lock_rad=steering_lock_rad,
                     reference_geometry=reference_geometry,
@@ -2582,10 +2689,22 @@ class Plugin(BasePlugin):
                 off_dist = math.hypot(pos[0] - nearest[0], pos[1] - nearest[1])
                 steering_debug = dict(getattr(
                     route, "last_steering_debug", {}) or {})
+                calculation_finished_at = time.monotonic()
                 steering_debug.update({
-                    "computed_at": time.monotonic(),
+                    "computed_at": calculation_finished_at,
                     "observation_timestamp": vehicle_observation.get("timestamp"),
                     "sdk_frame_us": vehicle_observation.get("sdk_frame_us"),
+                    "observation_interval_s": observation_dt,
+                    "control_dt_s": control_dt_s,
+                    "calculation_interval_s": calculation_interval_s,
+                    "calculation_duration_s": (
+                        calculation_finished_at - calculation_started_at),
+                    "observation_age_at_calculation_s": (
+                        calculation_started_at - observation_timestamp
+                        if observation_timestamp > 0.0 else None),
+                    "calculation_cadence": (
+                        self._steering_calculation_cadence.snapshot(
+                            calculation_finished_at)),
                     "observation_xz": pos, "observation_heading_rad": heading,
                     "observation_speed_ms": speed,
                     "vehicle_curvature_source": vehicle_curvature_source,

@@ -51,6 +51,9 @@ def plugin_worker(plugin_class: Type[BasePlugin], plugin_name: str,
         sdk = PluginSDK(shared_dict, plugin_name)
         plugin = plugin_class(sdk)
         plugin.on_start()
+        start_control_worker = getattr(plugin, "start_control_worker", None)
+        if callable(start_control_worker):
+            start_control_worker()
 
         tick_dt = 0.01  # 100 Hz
         last_time = time.monotonic()
