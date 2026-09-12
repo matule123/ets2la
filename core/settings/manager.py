@@ -92,6 +92,11 @@ class SettingsManager:
             # alone cannot supply dimensions. Empty is intentional fail-closed
             # for future maneuver planning, not a change to normal steering.
             "vehicle_profiles": {"schema_version": 1, "profiles": []},
+            # Independently evidenced local XYZ surfaces only. PPD map points,
+            # road-look offsets and derived lane widths must never be inserted
+            # here automatically. An empty catalog intentionally keeps future
+            # swept-envelope maneuver planning fail-closed.
+            "drivable_surfaces": {"schema_version": 1, "surfaces": []},
             "general": {
                 "target_speed": 80.0,
                 "fps": 60,

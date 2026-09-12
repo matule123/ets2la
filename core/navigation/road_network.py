@@ -31,7 +31,7 @@ from core.navigation.route_diagnostics import (
 )
 from core.navigation.road_look_offsets_159 import LANE_OFFSETS_159
 
-CACHE_VERSION = 12  # adds explicit GPS-pair identity to lane segments
+CACHE_VERSION = 13  # adds explicit display-only boundary-source metadata
 MAX_PROVEN_LANE_BOUNDARY_GAP_M = 0.75
 MAX_PROVEN_LANE_BOUNDARY_VERTICAL_M = 0.50
 MAX_PROVEN_LANE_BOUNDARY_HEADING_DEG = 15.0
@@ -564,6 +564,12 @@ class RoadNetwork:
                 # following that topology preserves real prefab islands,
                 # depots and junction surfaces without inventing geometry.
                 map_points = tuple(raw.get("mapPoints", ()) or ())
+                map_point_types = tuple(
+                    str(point.get("type", ""))
+                    for point in map_points if isinstance(point, dict))
+                map_point_heights = tuple(
+                    float(point.get("z", 0.0) or 0.0)
+                    for point in map_points if isinstance(point, dict))
                 polygon_indices = {
                     index for index, point in enumerate(map_points)
                     if isinstance(point, dict) and point.get("type") == "polygon"
@@ -617,6 +623,20 @@ class RoadNetwork:
                         "y": float(node.get("z", 0.0) or 0.0),
                     } for node in raw.get("nodes", ())),
                     "curves": tuple(lane_curves),
+                    # PPD Map Points are explicitly a world-map/GPS
+                    # visualization primitive. Even a polygon whose colour is
+                    # "road" or "accessible" is not collision/drivability
+                    # evidence and may not authorize a swept-envelope plan.
+                    "surface_source": "ppd_map_points_visual_only",
+                    "surface_failure_reason": (
+                        "PREFAB_MAP_POINTS_ARE_DISPLAY_ONLY"
+                        if map_points else "PREFAB_HAS_NO_BOUNDARY_GEOMETRY"),
+                    "map_point_count": len(map_points),
+                    "road_map_point_count": map_point_types.count("road"),
+                    "polygon_map_point_count": map_point_types.count("polygon"),
+                    "map_point_height_span_m": (
+                        max(map_point_heights)-min(map_point_heights)
+                        if map_point_heights else None),
                 }
 
             for raw in _loadf(inst_path):
@@ -1999,6 +2019,16 @@ class RoadNetwork:
             "display_polygon_count": len(
                 self._prefab_map_polygons.get(token, ())),
             "drivable_boundary_source": "unavailable",
+            "boundary_observation_source": str(lane_data.get(
+                "surface_source", "unavailable")),
+            "boundary_failure_reason": str(lane_data.get(
+                "surface_failure_reason",
+                "PREFAB_HAS_NO_BOUNDARY_GEOMETRY")),
+            "map_point_count": int(lane_data.get("map_point_count", 0) or 0),
+            "road_map_point_count": int(lane_data.get(
+                "road_map_point_count", 0) or 0),
+            "polygon_map_point_count": int(lane_data.get(
+                "polygon_map_point_count", 0) or 0),
         }
 
     def _adjacent_prefab_data_evidence(self, segment, instance):
@@ -2035,6 +2065,11 @@ class RoadNetwork:
                         "display_polygon_count": len(
                             self._prefab_map_polygons.get(token, ())),
                         "drivable_boundary_source": "unavailable",
+                        "boundary_observation_source": str(lane_data.get(
+                            "surface_source", "unavailable")),
+                        "boundary_failure_reason": str(lane_data.get(
+                            "surface_failure_reason",
+                            "PREFAB_HAS_NO_BOUNDARY_GEOMETRY")),
                     })
         return sorted(evidence, key=lambda item: (
             item["prefab_token"], item["descriptor_node_uids"]))
