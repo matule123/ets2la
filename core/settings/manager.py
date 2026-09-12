@@ -88,6 +88,10 @@ class SettingsManager:
     def _get_defaults(self) -> Dict[str, Any]:
         """Default settings for the first run."""
         return {
+            # Explicit measured/certified body profiles only. SDK track/brand
+            # alone cannot supply dimensions. Empty is intentional fail-closed
+            # for future maneuver planning, not a change to normal steering.
+            "vehicle_profiles": {"schema_version": 1, "profiles": []},
             "general": {
                 "target_speed": 80.0,
                 "fps": 60,

@@ -17,9 +17,12 @@ class Telemetry:
     of the source.
     """
 
-    def __init__(self, url: str = "http://localhost:25555/api/ets2/telemetry"):
+    def __init__(self, url: str = "http://localhost:25555/api/ets2/telemetry", *,
+                 vehicle_profile_catalog=None):
         self.url = url
         self.data: Dict[str, Any] = {}
+        from core.vehicle_profile import VehicleProfileProvider
+        self.vehicle_profiles = VehicleProfileProvider(vehicle_profile_catalog)
         self.sdk_reader = SCSTelemetry()
         self.use_sdk = self.sdk_reader.connect()
         logging.info(f"Using {'Shared Memory' if self.use_sdk else 'HTTP'} for telemetry.")
@@ -46,6 +49,26 @@ class Telemetry:
         return False
 
     # --- Normalization --------------------------------------------------------
+    def _vehicle_profile(self, observation):
+        import time
+        import json
+        from dataclasses import asdict
+        from core.vehicle_profile import VehicleProfileProvider
+        if not hasattr(self, "vehicle_profiles"):
+            self.vehicle_profiles = VehicleProfileProvider()
+        now = time.monotonic()
+        profile = self.vehicle_profiles.update(observation, now)
+        # Diagnostics only: bounded log rate, no disk work or controller changes.
+        signature = (profile.token.configuration, profile.observation_failure, profile.model_failure)
+        if (signature != getattr(self, '_profile_log_signature', None) and
+                now-getattr(self, '_profile_logged_at', -10.) >= 10.):
+            diagnostic = profile.diagnostic()
+            if profile.observation and not profile.observation_failure:
+                diagnostic['observation'] = asdict(profile.observation)
+            logging.info("Vehicle profile: %s", json.dumps(diagnostic, ensure_ascii=True))
+            self._profile_log_signature, self._profile_logged_at = signature, now
+        return profile
+
     def _normalize_sdk(self, raw: Dict[str, Any]) -> Dict[str, Any]:
         import math
         tf = raw.get("truckFloat", {}) or {}
@@ -165,7 +188,15 @@ class Telemetry:
         except Exception as e:
             logging.debug(f"Job destination unavailable: {e}")
 
+        from dataclasses import replace
+        from core.sdk.vehicle_observation import VehicleObservation
+        observation = raw.get("vehicleObservation")
+        if (isinstance(observation, VehicleObservation) and not observation.failure_reason
+                and observation.sdk_frame_us != raw.get("time")):
+            observation = replace(observation, failure_reason='SDK_PROFILE_FRAME_MISMATCH')
+        profile = self._vehicle_profile(observation)
         return {"raw": raw, "truck": truck, "trailer": trailer,
+                "vehicle_profile": profile,
                 "dest_city": dest_city,
                 "position": pos, "heading": heading}
 
@@ -185,7 +216,8 @@ class Telemetry:
             # than interpreting absent coordinates as world origin.
             "pose_valid": False,
         }
-        return {"raw": payload, "truck": norm}
+        return {"raw": payload, "truck": norm,
+                "vehicle_profile": self._vehicle_profile(None)}
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.data.get(key, default)

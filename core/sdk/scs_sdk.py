@@ -99,7 +99,7 @@ class SCSTelemetry:
         / unsupported", so a missing or disconnected trailer degrades to the
         cab-only rendering without raising.
         """
-        if not self.mm:
+        if type(index) is not int or not 0 <= index < self.TRAILER_MAX or not self.mm:
             return {}
         base = self.TRAILER_BLOCK_START + index * self.TRAILER_BLOCK_SIZE
         # The whole first-trailer struct must fit inside the 32 KB mapping.
@@ -245,4 +245,8 @@ class SCSTelemetry:
         except Exception as e:
             logging.error(f"Error reading SCS telemetry: {e}")
 
+        # Phase 5B1 is observational. Keep the established steering fields and
+        # their read order unchanged; a failed profile read cannot erase them.
+        from core.sdk.vehicle_observation import capture_vehicle_observation
+        data["vehicleObservation"] = capture_vehicle_observation(self.mm)
         return data

@@ -143,7 +143,7 @@ class UltraPilotEngine:
         # Route voice alerts through shared state to the single tts plugin speaker.
         self.voice = VoiceAssistant(self.shared_state)
 
-        self.telemetry = Telemetry()
+        self.telemetry = Telemetry(vehicle_profile_catalog=self.settings.get("vehicle_profiles"))
         self.controller = Controller()
         # Surrounding traffic + traffic lights from the ETS2LA game plugin (if installed).
         from core.sdk.ets2la_data import ETS2LAData
@@ -371,6 +371,9 @@ class UltraPilotEngine:
             "truck_heading": truck.get("rotation", 0.0),
             "truck_speed_ms": truck.get("speed", 0.0),
             "vehicle_envelope_snapshot": envelope,
+            # Separate observational contract. Not consumed by the controller
+            # or substituted for the legacy first-trailer rendering payload.
+            "vehicle_profile_snapshot": data.get("vehicle_profile"),
             **trailer_payload,
         }
 
@@ -467,6 +470,7 @@ class UltraPilotEngine:
                         "trailer_articulation": 0.0,
                         "trailer_effective_axle_distance_m": None,
                         "trailer_wheel_track_m": None,
+                        "vehicle_profile_snapshot": None,
                         "vehicle_envelope_snapshot": {
                             "timestamp": float(timestamp),
                             "tractor_position": None,
